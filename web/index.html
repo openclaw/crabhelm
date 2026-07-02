@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <meta
+      name="description"
+      content="Crabhelm parent-core control plane for independently deployed OpenClaw child cores."
+    />
+    <title>Crabhelm — OpenClaw fleet control</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="shell" id="app">
+      <aside class="rail">
+        <a class="brand" href="#fleet" aria-label="Crabhelm fleet">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span><strong>CRABHELM</strong><small>Parent core</small></span>
+        </a>
+
+        <nav class="nav" aria-label="Primary">
+          <button class="nav-item active" data-view="fleet"><span>01</span>Fleet</button>
+          <button class="nav-item" data-view="templates"><span>02</span>Policies</button>
+          <button class="nav-item" data-view="deployments"><span>03</span>Deployments</button>
+          <button class="nav-item" data-view="activity"><span>04</span>Activity</button>
+        </nav>
+
+        <section class="parent-card" aria-label="Parent core status">
+          <div class="parent-card-top"><span class="pulse"></span><span>Parent online</span></div>
+          <strong>crabhelm-main</strong>
+          <dl>
+            <div><dt>Mode</dt><dd>parent</dd></div>
+            <div><dt>Control</dt><dd>scoped admin</dd></div>
+            <div><dt>Parent capture</dt><dd>off</dd></div>
+          </dl>
+        </section>
+
+        <button class="operator" id="operator-button" title="Gateway operator connection">
+          <span class="operator-avatar">OP</span>
+          <span><strong>Gateway operator</strong><small id="operator-state">Connected</small></span>
+          <b>···</b>
+        </button>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow" id="view-eyebrow">Fleet composition / Parent 01</p>
+            <h1 id="view-title">Fleet</h1>
+          </div>
+          <div class="top-actions">
+            <button class="button ghost" id="refresh-button"><span>↻</span>Refresh</button>
+            <button class="button ghost" id="template-button"><span>⌘</span>Apply policy</button>
+            <button class="button ghost" id="bulk-button"><span>⇧</span>Paste labels</button>
+            <button class="button ghost" id="github-button"><span>◉</span>Import GitHub</button>
+            <button class="button primary" id="new-button"><span>＋</span>New claw</button>
+          </div>
+        </header>
+
+        <div id="view-root" class="view-root" aria-live="polite"></div>
+      </main>
+    </div>
+
+    <aside class="drawer" id="drawer" aria-hidden="true">
+      <div class="drawer-scrim" data-close-drawer></div>
+      <section class="drawer-panel" aria-label="Claw details">
+        <div id="drawer-content"></div>
+      </section>
+    </aside>
+
+    <dialog class="modal" id="new-dialog">
+      <form method="dialog" id="new-form">
+        <div class="modal-head">
+          <div><p class="eyebrow">Create child core</p><h2>New claw</h2></div>
+          <button class="icon-button" type="button" data-close-dialog="new-dialog" aria-label="Close">×</button>
+        </div>
+        <div class="form-grid">
+          <label class="wide"><span>Claw name</span><input name="name" required maxlength="80" placeholder="Ada's maintainer claw" /></label>
+          <label><span>Intended user subject</span><input name="ownerSubject" required maxlength="200" placeholder="github:ada" /></label>
+          <label><span>Intended user label</span><input name="ownerLabel" required maxlength="120" placeholder="@ada" /></label>
+          <label><span>Identity source</span><select name="ownerSource"><option value="github">GitHub</option><option value="slack">Slack</option><option value="email">Email</option><option value="manual">Manual</option></select></label>
+          <label><span>Deployment target</span><select name="deploymentTarget" data-deployment-target></select></label>
+          <label><span>Appliance profile</span><select data-deployment-profile disabled><option>OpenClaw Core · Fixed by target</option></select></label>
+          <label class="wide"><span>Inference model</span><select name="model"><option value="openai/gpt-5.5">OpenAI · GPT-5.5</option><option value="openai/gpt-5.5-mini">OpenAI · GPT-5.5 mini</option><option value="anthropic/claude-sonnet-4.6">Anthropic · Claude Sonnet 4.6</option></select></label>
+          <label class="wide"><span>Slack connection</span><select name="slackEnabled"><option value="false">Not configured</option><option value="true">Use credentials installed by child profile</option></select></label>
+          <label><span>Direct messages</span><select name="dmPolicy"><option value="pairing">Native pairing</option><option value="allowlist">Existing allowlist only</option><option value="disabled">Disabled</option></select></label>
+          <label><span>Group visibility</span><select name="groupPolicy"><option value="allowlist">Allowlisted groups</option><option value="disabled">No groups</option></select></label>
+          <label class="wide"><span>Child log level</span><select name="logLevel"><option value="info">Info · metadata policy</option><option value="warn">Warnings</option><option value="error">Errors only</option><option value="debug">Debug · higher volume</option></select></label>
+        </div>
+        <div class="invariant-note"><b>One claw, one core.</b><span>Creates a dedicated Gateway, state root, pairing store, and OS identity. Nothing is cloned from another claw.</span></div>
+        <div class="modal-actions"><button class="button ghost" type="button" data-close-dialog="new-dialog">Cancel</button><button class="button primary" id="create-submit" value="default">Create and enroll</button></div>
+      </form>
+    </dialog>
+
+    <dialog class="modal template-modal" id="template-dialog">
+      <form method="dialog" id="template-form">
+        <div class="modal-head">
+          <div><p class="eyebrow">Generation-fenced rollout</p><h2>Apply policy</h2></div>
+          <button class="icon-button" type="button" data-close-dialog="template-dialog" aria-label="Close">×</button>
+        </div>
+        <div class="template-scope">
+          <div><span class="scope-index">A</span><p><strong>Managed fields</strong>Inference, Slack enabled state, native DM/group access, and child log level</p></div>
+          <div><span class="scope-index safe">B</span><p><strong>Never changes</strong>Credentials, OAuth, pairing, sessions, memory, agent directories</p></div>
+        </div>
+        <div class="form-grid">
+          <label><span>Policy</span><select name="policyId" id="policy-apply-id"></select></label>
+          <label><span>Version</span><select name="version" id="policy-apply-version"></select></label>
+          <label class="wide"><span>Canary</span><select name="canaryId" id="policy-canary"><option value="">Choose targets first</option></select></label>
+        </div>
+        <fieldset class="target-list"><legend>Target claws</legend><div id="template-targets"></div></fieldset>
+        <div class="policy-preview" id="policy-preview"><p>Select a policy and target claws, then preview the field-level changes.</p></div>
+        <div class="modal-actions"><button class="button ghost" type="button" data-close-dialog="template-dialog">Cancel</button><button class="button" type="button" id="policy-preview-button">Preview changes</button><button class="button primary" id="template-submit" value="default" disabled>Apply after canary</button></div>
+      </form>
+    </dialog>
+
+    <dialog class="modal" id="policy-dialog">
+      <form method="dialog" id="policy-form">
+        <input type="hidden" name="policyId" />
+        <div class="modal-head">
+          <div><p class="eyebrow" id="policy-form-eyebrow">Immutable managed policy</p><h2 id="policy-form-title">New policy</h2></div>
+          <button class="icon-button" type="button" data-close-dialog="policy-dialog" aria-label="Close">×</button>
+        </div>
+        <p class="modal-copy">Each save creates an immutable version. Applying an older version is the rollback path. Secrets and identity state are outside the policy boundary.</p>
+        <div class="form-grid">
+          <label><span>Policy name</span><input name="name" required maxlength="80" placeholder="Maintainer core" /></label>
+          <label><span>Description</span><input name="description" maxlength="240" placeholder="Governed maintainer defaults" /></label>
+          <label><span>Primary model</span><select name="model"><option value="openai/gpt-5.5">OpenAI · GPT-5.5</option><option value="openai/gpt-5.5-mini">OpenAI · GPT-5.5 mini</option><option value="anthropic/claude-sonnet-4.6">Anthropic · Claude Sonnet 4.6</option></select></label>
+          <label><span>Fallback models</span><input name="fallbackModels" placeholder="openai/gpt-5.5-mini" /></label>
+          <label><span>Slack connection</span><select name="slackEnabled"><option value="false">Disabled</option><option value="true">Enabled with child-local SecretRefs</option></select></label>
+          <label><span>Direct-message visibility</span><select name="dmPolicy"><option value="pairing">Visible after native pairing</option><option value="allowlist">Existing allowlist only</option><option value="disabled">No direct messages</option></select></label>
+          <label><span>Group visibility</span><select name="groupPolicy"><option value="allowlist">Allowlisted groups</option><option value="disabled">No groups</option></select></label>
+          <label><span>Child log level</span><select name="logLevel"><option value="info">Info · metadata projection only</option><option value="warn">Warnings</option><option value="error">Errors only</option><option value="debug">Debug · higher volume</option></select></label>
+        </div>
+        <div class="invariant-note"><b>Native access only</b><span>Visibility is expressed through each child’s existing OpenClaw DM pairing and group allowlist settings. Crabhelm adds no parallel user ACL.</span></div>
+        <div class="modal-actions"><button class="button ghost" type="button" data-close-dialog="policy-dialog">Cancel</button><button class="button primary" id="policy-save" value="default">Create policy v1</button></div>
+      </form>
+    </dialog>
+
+    <dialog class="modal" id="bulk-dialog">
+      <form method="dialog" id="bulk-form">
+        <div class="modal-head">
+          <div><p class="eyebrow">Unverified batch create</p><h2>Add maintainer labels</h2></div>
+          <button class="icon-button" type="button" data-close-dialog="bulk-dialog" aria-label="Close">×</button>
+        </div>
+        <p class="modal-copy">Paste one GitHub-style label per line. These labels are not verified against GitHub and use manual identities; use authenticated GitHub import for stable numeric identities. Native user pairing still happens inside each child.</p>
+        <label><span>Maintainer labels</span><textarea name="handles" rows="9" required placeholder="ada&#10;marco&#10;lena"></textarea></label>
+        <div class="form-grid batch-options">
+          <label><span>Deployment target</span><select name="deploymentTarget" data-deployment-target></select></label>
+          <label><span>Appliance profile</span><select data-deployment-profile disabled><option>OpenClaw Core · Fixed by target</option></select></label>
+          <label><span>Inference model</span><select name="model"><option value="openai/gpt-5.5">OpenAI · GPT-5.5</option><option value="openai/gpt-5.5-mini">OpenAI · GPT-5.5 mini</option><option value="anthropic/claude-sonnet-4.6">Anthropic · Claude Sonnet 4.6</option></select></label>
+          <label class="wide"><span>Slack connection</span><select name="slackEnabled"><option value="false">Not configured</option><option value="true">Use credentials installed by child profile</option></select></label>
+          <label><span>Direct messages</span><select name="dmPolicy"><option value="pairing">Native pairing</option><option value="allowlist">Existing allowlist only</option><option value="disabled">Disabled</option></select></label>
+          <label><span>Group visibility</span><select name="groupPolicy"><option value="allowlist">Allowlisted groups</option><option value="disabled">No groups</option></select></label>
+          <label class="wide"><span>Child log level</span><select name="logLevel"><option value="info">Info · metadata policy</option><option value="warn">Warnings</option><option value="error">Errors only</option><option value="debug">Debug · higher volume</option></select></label>
+        </div>
+        <div class="invariant-note"><b>Partial success</b><span>Each claw is independently persisted and reconciled. Failed handles remain visible in the result; successful claws are not rolled back.</span></div>
+        <div class="modal-actions"><button class="button ghost" type="button" data-close-dialog="bulk-dialog">Cancel</button><button class="button primary" id="bulk-submit" value="default">Create maintainers</button></div>
+      </form>
+    </dialog>
+
+    <dialog class="modal github-modal" id="github-dialog">
+      <form method="dialog" id="github-form">
+        <div class="modal-head">
+          <div><p class="eyebrow">Authenticated member discovery</p><h2>Import from GitHub</h2></div>
+          <button class="icon-button" type="button" data-close-dialog="github-dialog" aria-label="Close">×</button>
+        </div>
+        <p class="modal-copy">Preview organization members, a team, or repository maintainers. GitHub numeric IDs become stable intended-user identities; no GitHub credentials are copied into child cores.</p>
+        <div class="form-grid">
+          <label><span>Organization</span><input name="organization" required maxlength="100" placeholder="openclaw" /></label>
+          <label><span>Source</span><select name="scope"><option value="organization">Organization members</option><option value="team">Team members</option><option value="repository">Repository maintainers</option></select></label>
+          <label id="github-target-label" hidden><span id="github-target-copy">Team slug</span><input name="target" maxlength="100" placeholder="core-maintainers" /></label>
+          <label><span id="github-role-copy">Organization role</span><select name="role"><option value="all">All members</option><option value="admin">Owners only</option><option value="member">Members only</option></select></label>
+        </div>
+        <div class="github-preview" id="github-preview"><p>Preview the source before choosing recipients.</p></div>
+        <div class="form-grid batch-options">
+          <label><span>Deployment target</span><select name="deploymentTarget" data-deployment-target></select></label>
+          <label><span>Appliance profile</span><select data-deployment-profile disabled><option>OpenClaw Core · Fixed by target</option></select></label>
+          <label><span>Inference model</span><select name="model"><option value="openai/gpt-5.5">OpenAI · GPT-5.5</option><option value="openai/gpt-5.5-mini">OpenAI · GPT-5.5 mini</option><option value="anthropic/claude-sonnet-4.6">Anthropic · Claude Sonnet 4.6</option></select></label>
+          <label class="wide"><span>Slack connection</span><select name="slackEnabled"><option value="false">Not configured</option><option value="true">Use credentials installed by child profile</option></select></label>
+          <label><span>Direct messages</span><select name="dmPolicy"><option value="pairing">Native pairing</option><option value="allowlist">Existing allowlist only</option><option value="disabled">Disabled</option></select></label>
+          <label><span>Group visibility</span><select name="groupPolicy"><option value="allowlist">Allowlisted groups</option><option value="disabled">No groups</option></select></label>
+          <label class="wide"><span>Child log level</span><select name="logLevel"><option value="info">Info · metadata policy</option><option value="warn">Warnings</option><option value="error">Errors only</option><option value="debug">Debug · higher volume</option></select></label>
+        </div>
+        <div class="invariant-note"><b>Existing permissions remain native.</b><span>Import creates desired child cores. Recipients still cannot chat until their child’s Slack connection and native DM pairing are complete.</span></div>
+        <div class="modal-actions"><button class="button ghost" type="button" data-close-dialog="github-dialog">Cancel</button><button class="button" type="button" id="github-preview-button">Preview members</button><button class="button primary" id="github-import-button" value="default" disabled>Import selected</button></div>
+      </form>
+    </dialog>
+
+    <dialog class="modal auth-modal" id="auth-dialog">
+      <form method="dialog" id="auth-form">
+        <div class="modal-head"><div><p class="eyebrow">Parent Gateway</p><h2>Connect operator</h2></div></div>
+        <p class="modal-copy">Use the parent core's existing Gateway token. Crabhelm does not create a separate login or child authorization layer.</p>
+        <label><span>Gateway token</span><input name="token" type="password" autocomplete="off" required /></label>
+        <div class="modal-actions"><button class="button primary" value="default">Connect</button></div>
+      </form>
+    </dialog>
+
+    <div class="toast-stack" id="toasts" aria-live="assertive"></div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
