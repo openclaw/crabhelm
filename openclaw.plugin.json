@@ -1,0 +1,190 @@
+{
+  "id": "crabhelm",
+  "name": "Crabhelm",
+  "description": "Parent-core control plane for independently deployed OpenClaw child cores.",
+  "activation": {
+    "onStartup": true,
+    "onCapabilities": ["tool"]
+  },
+  "contracts": {
+    "tools": ["crabhelm"]
+  },
+  "toolMetadata": {
+    "crabhelm": {
+      "optional": false
+    }
+  },
+  "uiHints": {
+    "mode": {
+      "label": "Core Mode",
+      "help": "Parent owns and reconciles child cores. Child connects to exactly one parent."
+    },
+    "childId": {
+      "label": "Child ID",
+      "help": "Immutable Crabhelm child identity. Required in child mode and matched by the parent node policy."
+    },
+    "appliedGeneration": {
+      "label": "Applied Generation",
+      "help": "Child-managed reconciliation marker. Do not edit manually."
+    },
+    "appliedDesiredHash": {
+      "label": "Applied Desired Hash",
+      "help": "Child-managed reconciliation marker. Do not edit manually."
+    },
+    "ingressDisabled": {
+      "label": "Ingress Disabled",
+      "help": "Child-managed lifecycle marker. Do not edit manually."
+    },
+    "disabledChannelStates": {
+      "label": "Disabled Channel Snapshot",
+      "help": "Child-managed reversible channel state. Do not edit manually."
+    },
+    "reconcileIntervalSeconds": {
+      "label": "Reconcile Interval",
+      "help": "Seconds between desired/observed state reconciliation passes."
+    },
+    "deployment.defaultTarget": {
+      "label": "Default Deployment Target",
+      "help": "Target id used when an operator does not choose placement explicitly."
+    },
+    "deployment.targets": {
+      "label": "Deployment Targets",
+      "help": "Administrator-controlled Crabbox controllers. Each target pins its adapter URL, token environment variable, region, and appliance profile."
+    },
+    "deployment.simulator": {
+      "label": "Simulator",
+      "help": "Use the local deterministic child-core simulator instead of creating Crabbox workspaces."
+    },
+    "github.apiUrl": {
+      "label": "GitHub API URL",
+      "help": "Fixed GitHub or GitHub Enterprise REST API origin used for organization import."
+    },
+    "github.tokenEnv": {
+      "label": "GitHub Token Environment Variable",
+      "help": "Environment variable containing a read-only GitHub token with organization Members access."
+    },
+    "github.maxMembers": {
+      "label": "Maximum GitHub Import Members",
+      "help": "Hard preview bound. The UI still creates child cores in batches of at most 50."
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "mode": {
+        "type": "string",
+        "enum": ["parent", "child"],
+        "default": "parent"
+      },
+      "childId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200
+      },
+      "appliedGeneration": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "appliedDesiredHash": {
+        "type": "string",
+        "maxLength": 128
+      },
+      "ingressDisabled": {
+        "type": "boolean"
+      },
+      "disabledChannelStates": {
+        "type": "object",
+        "additionalProperties": {
+          "anyOf": [
+            { "type": "boolean" },
+            { "type": "string", "const": "missing" }
+          ]
+        }
+      },
+      "reconcileIntervalSeconds": {
+        "type": "integer",
+        "minimum": 5,
+        "maximum": 300,
+        "default": 15
+      },
+      "deployment": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "simulator": {
+            "type": "boolean",
+            "default": false
+          },
+          "defaultTarget": {
+            "type": "string",
+            "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$",
+            "default": "default"
+          },
+          "targets": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id"],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+                },
+                "label": { "type": "string", "minLength": 1, "maxLength": 80 },
+                "region": { "type": "string", "minLength": 1, "maxLength": 80 },
+                "crabboxUrl": { "type": "string", "format": "uri" },
+                "tokenEnv": {
+                  "type": "string",
+                  "pattern": "^[A-Z][A-Z0-9_]{1,127}$",
+                  "default": "CRABHELM_CRABBOX_TOKEN"
+                },
+                "profile": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$",
+                  "default": "openclaw-core"
+                },
+                "ttlSeconds": {
+                  "type": "integer",
+                  "minimum": 300,
+                  "maximum": 31536000,
+                  "default": 14400
+                },
+                "idleTimeoutSeconds": {
+                  "type": "integer",
+                  "minimum": 60,
+                  "maximum": 31536000,
+                  "default": 14400
+                }
+              }
+            }
+          }
+        }
+      },
+      "github": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "apiUrl": {
+            "type": "string",
+            "format": "uri",
+            "default": "https://api.github.com"
+          },
+          "tokenEnv": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9_]{1,127}$",
+            "default": "CRABHELM_GITHUB_TOKEN"
+          },
+          "maxMembers": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500,
+            "default": 500
+          }
+        }
+      }
+    }
+  }
+}

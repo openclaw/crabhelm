@@ -1,0 +1,133 @@
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { promisify } from "node:util";
+import test from "node:test";
+
+const run = promisify(execFile);
+const bootstrap = path.resolve("deploy/bootstrap-child.sh");
+
+test("child bootstrap verifies artifacts, allowlists Crabhelm, and strips ambient Gateway auth", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "crabhelm-bootstrap-"));
+  const bin = path.join(root, "bin");
+  const plugin = path.join(root, "crabhelm.tgz");
+  const slackPlugin = path.join(root, "slack.tgz");
+  const log = path.join(root, "openclaw.log");
+  await mkdir(bin);
+  await writeFile(plugin, "pinned plugin artifact\n", { mode: 0o600 });
+  await writeFile(slackPlugin, "pinned Slack artifact\n", { mode: 0o600 });
+  await executable(path.join(bin, "openclaw"), `#!/usr/bin/env bash
+printf 'auth=%s/%s argv=' "\${OPENCLAW_GATEWAY_TOKEN+present}" "\${OPENCLAW_GATEWAY_PASSWORD+present}" >>"$CRABHELM_TEST_LOG"
+printf '%q ' "$@" >>"$CRABHELM_TEST_LOG"
+printf '\n' >>"$CRABHELM_TEST_LOG"
+`);
+  await executable(path.join(bin, "curl"), "#!/usr/bin/env bash\nexit 0\n");
+  const digest = createHash("sha256").update(await readFile(plugin)).digest("hex");
+  const slackDigest = createHash("sha256").update(await readFile(slackPlugin)).digest("hex");
+
+  await run("/bin/bash", [bootstrap], {
+    env: {
+      PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+      CRABHELM_TEST_LOG: log,
+      CRABBOX_ADAPTER_ROOT_SESSION_ID: "11111111-1111-4111-8111-111111111111",
+      CRABHELM_PARENT_HOST: "parent.internal.example",
+      CRABHELM_PARENT_PORT: "18789",
+      CRABHELM_PARENT_TLS: "true",
+      CRABHELM_PARENT_TLS_FINGERPRINT: "a".repeat(64),
+      CRABHELM_PLUGIN_TARBALL: plugin,
+      CRABHELM_PLUGIN_SHA256: digest,
+      CRABHELM_SLACK_PLUGIN_TARBALL: slackPlugin,
+      CRABHELM_SLACK_PLUGIN_SHA256: slackDigest,
+      OPENCLAW_GATEWAY_TOKEN: "must-not-reach-openclaw",
+      OPENCLAW_GATEWAY_PASSWORD: "must-not-reach-openclaw",
+    },
+  });
+
+  const calls = await readFile(log, "utf8");
+  assert.doesNotMatch(calls, /auth=present/);
+  assert.match(calls, /config set plugins\.allow/);
+  assert.match(calls, /plugins\.allow .*crabhelm.*slack/);
+  assert.match(calls, /channels\.slack\.mode socket/);
+  assert.match(calls, /channels\.slack\.appToken .*SLACK_APP_TOKEN/);
+  assert.match(calls, /config set gateway\.auth\.mode none/);
+  assert.match(calls, /node install/);
+  assert.match(calls, /--node-id crabhelm-11111111-1111-4111-8111-111111111111/);
+  assert.match(calls, /--tls-fingerprint a{64}/);
+});
+
+test("child bootstrap rejects a changed plugin before invoking OpenClaw", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "crabhelm-bootstrap-digest-"));
+  const bin = path.join(root, "bin");
+  const plugin = path.join(root, "crabhelm.tgz");
+  const slackPlugin = path.join(root, "slack.tgz");
+  const log = path.join(root, "openclaw.log");
+  await mkdir(bin);
+  await writeFile(plugin, "changed artifact\n", { mode: 0o600 });
+  await writeFile(slackPlugin, "pinned Slack artifact\n", { mode: 0o600 });
+  await executable(path.join(bin, "openclaw"), `#!/usr/bin/env bash
+printf 'called\n' >>"$CRABHELM_TEST_LOG"
+`);
+  await executable(path.join(bin, "curl"), "#!/usr/bin/env bash\nexit 0\n");
+  const slackDigest = createHash("sha256").update(await readFile(slackPlugin)).digest("hex");
+
+  await assert.rejects(
+    run("/bin/bash", [bootstrap], {
+      env: {
+        PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+        CRABHELM_TEST_LOG: log,
+        CRABBOX_ADAPTER_ROOT_SESSION_ID: "11111111-1111-4111-8111-111111111111",
+        CRABHELM_PARENT_HOST: "parent.internal.example",
+        CRABHELM_PARENT_TLS_FINGERPRINT: "a".repeat(64),
+        CRABHELM_PLUGIN_TARBALL: plugin,
+        CRABHELM_PLUGIN_SHA256: "0".repeat(64),
+        CRABHELM_SLACK_PLUGIN_TARBALL: slackPlugin,
+        CRABHELM_SLACK_PLUGIN_SHA256: slackDigest,
+      },
+    }),
+    /plugin tarball digest mismatch/,
+  );
+  await assert.rejects(readFile(log), /ENOENT/);
+});
+
+test("child bootstrap requires a pinned TLS fingerprint before installing the node", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "crabhelm-bootstrap-tls-"));
+  const bin = path.join(root, "bin");
+  const plugin = path.join(root, "crabhelm.tgz");
+  const slackPlugin = path.join(root, "slack.tgz");
+  const log = path.join(root, "openclaw.log");
+  await mkdir(bin);
+  await writeFile(plugin, "pinned plugin artifact\n", { mode: 0o600 });
+  await writeFile(slackPlugin, "pinned Slack artifact\n", { mode: 0o600 });
+  await executable(path.join(bin, "openclaw"), `#!/usr/bin/env bash
+printf '%q ' "$@" >>"$CRABHELM_TEST_LOG"
+printf '\n' >>"$CRABHELM_TEST_LOG"
+`);
+  await executable(path.join(bin, "curl"), "#!/usr/bin/env bash\nexit 0\n");
+  const digest = createHash("sha256").update(await readFile(plugin)).digest("hex");
+  const slackDigest = createHash("sha256").update(await readFile(slackPlugin)).digest("hex");
+  await assert.rejects(
+    run("/bin/bash", [bootstrap], {
+      env: {
+        PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+        CRABHELM_TEST_LOG: log,
+        CRABBOX_ADAPTER_ROOT_SESSION_ID: "11111111-1111-4111-8111-111111111111",
+        CRABHELM_PARENT_HOST: "parent.internal.example",
+        CRABHELM_PARENT_TLS: "true",
+        CRABHELM_PLUGIN_TARBALL: plugin,
+        CRABHELM_PLUGIN_SHA256: digest,
+        CRABHELM_SLACK_PLUGIN_TARBALL: slackPlugin,
+        CRABHELM_SLACK_PLUGIN_SHA256: slackDigest,
+      },
+    }),
+    /fixed parent TLS fingerprint is required/,
+  );
+  await assert.rejects(readFile(log), /ENOENT/);
+});
+
+async function executable(file: string, contents: string): Promise<void> {
+  await writeFile(file, contents, { mode: 0o700 });
+  await chmod(file, 0o700);
+}
