@@ -106,6 +106,12 @@ declare module "openclaw/plugin-sdk/plugin-entry" {
       event: "before_tool_call",
       handler: (event: { toolName: string; params: unknown }) => Promise<unknown> | unknown,
     ): void;
+    on(
+      event: "before_prompt_build",
+      handler: (
+        event: { prompt: string; messages: unknown[] },
+      ) => Promise<{ prependSystemContext?: string } | void> | { prependSystemContext?: string } | void,
+    ): void;
     registerGatewayMethod(
       name: string,
       handler: (context: GatewayContext) => Promise<void> | void,

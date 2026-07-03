@@ -41,6 +41,8 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
       CRABHELM_PLUGIN_SHA256: digest,
       CRABHELM_SLACK_PLUGIN_TARBALL: slackPlugin,
       CRABHELM_SLACK_PLUGIN_SHA256: slackDigest,
+      CRABHELM_MODEL: "openai/gpt-5.4-mini",
+      CRABHELM_SLACK_ENABLED: "true",
       OPENCLAW_GATEWAY_TOKEN: "must-not-reach-openclaw",
       OPENCLAW_GATEWAY_PASSWORD: "must-not-reach-openclaw",
     },
@@ -51,6 +53,9 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
   assert.match(calls, /config set plugins\.allow/);
   assert.match(calls, /plugins\.allow .*crabhelm.*slack/);
   assert.match(calls, /channels\.slack\.mode socket/);
+  assert.match(calls, /agents\.defaults\.model\.primary openai\/gpt-5\.4-mini/);
+  assert.match(calls, /agents\.defaults\.workspace .*\.openclaw\/workspace/);
+  assert.match(calls, /channels\.slack\.enabled true/);
   assert.match(calls, /channels\.slack\.appToken .*SLACK_APP_TOKEN/);
   assert.match(calls, /config set gateway\.auth\.mode none/);
   assert.match(calls, /node install/);
@@ -92,7 +97,7 @@ printf 'called\n' >>"$CRABHELM_TEST_LOG"
   await assert.rejects(readFile(log), /ENOENT/);
 });
 
-test("child bootstrap requires a pinned TLS fingerprint before installing the node", async () => {
+test("child bootstrap supports Web PKI TLS without a pinned certificate", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "crabhelm-bootstrap-tls-"));
   const bin = path.join(root, "bin");
   const plugin = path.join(root, "crabhelm.tgz");
@@ -108,23 +113,22 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
   await executable(path.join(bin, "curl"), "#!/usr/bin/env bash\nexit 0\n");
   const digest = createHash("sha256").update(await readFile(plugin)).digest("hex");
   const slackDigest = createHash("sha256").update(await readFile(slackPlugin)).digest("hex");
-  await assert.rejects(
-    run("/bin/bash", [bootstrap], {
-      env: {
-        PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
-        CRABHELM_TEST_LOG: log,
-        CRABBOX_ADAPTER_ROOT_SESSION_ID: "11111111-1111-4111-8111-111111111111",
-        CRABHELM_PARENT_HOST: "parent.internal.example",
-        CRABHELM_PARENT_TLS: "true",
-        CRABHELM_PLUGIN_TARBALL: plugin,
-        CRABHELM_PLUGIN_SHA256: digest,
-        CRABHELM_SLACK_PLUGIN_TARBALL: slackPlugin,
-        CRABHELM_SLACK_PLUGIN_SHA256: slackDigest,
-      },
-    }),
-    /fixed parent TLS fingerprint is required/,
-  );
-  await assert.rejects(readFile(log), /ENOENT/);
+  await run("/bin/bash", [bootstrap], {
+    env: {
+      PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+      CRABHELM_TEST_LOG: log,
+      CRABBOX_ADAPTER_ROOT_SESSION_ID: "11111111-1111-4111-8111-111111111111",
+      CRABHELM_PARENT_HOST: "parent.internal.example",
+      CRABHELM_PARENT_TLS: "true",
+      CRABHELM_PLUGIN_TARBALL: plugin,
+      CRABHELM_PLUGIN_SHA256: digest,
+      CRABHELM_SLACK_PLUGIN_TARBALL: slackPlugin,
+      CRABHELM_SLACK_PLUGIN_SHA256: slackDigest,
+    },
+  });
+  const calls = await readFile(log, "utf8");
+  assert.match(calls, /node install .*--tls/);
+  assert.doesNotMatch(calls, /--tls-fingerprint/);
 });
 
 async function executable(file: string, contents: string): Promise<void> {

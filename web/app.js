@@ -22,9 +22,15 @@ const githubDialog = document.querySelector("#github-dialog");
 const templateDialog = document.querySelector("#template-dialog");
 const policyDialog = document.querySelector("#policy-dialog");
 const authDialog = document.querySelector("#auth-dialog");
+const personaDialog = document.querySelector("#persona-dialog");
+const skillDialog = document.querySelector("#skill-dialog");
+const connectionDialog = document.querySelector("#connection-dialog");
 
 const viewMeta = {
-  fleet: ["Fleet composition / Parent 01", "Fleet"],
+  fleet: ["Fleet composition / Cloud control", "Fleet"],
+  personas: ["Delegation / Explicit authority", "Personas"],
+  skills: ["Reviewed capabilities / Read-only delivery", "Skills"],
+  access: ["Credential vault / Human confirmation", "Access"],
   templates: ["Desired state / Versioned controls", "Policies"],
   deployments: ["Substrate / Child-core placement", "Deployments"],
   activity: ["Metadata only / No conversation content", "Activity"],
@@ -59,6 +65,9 @@ document.querySelector("#template-targets").addEventListener("change", () => {
 });
 document.querySelector("#policy-canary").addEventListener("change", invalidatePolicyPreview);
 document.querySelector("#auth-form").addEventListener("submit", connectOperator);
+document.querySelector("#persona-form").addEventListener("submit", createPersona);
+document.querySelector("#skill-form").addEventListener("submit", createSkill);
+document.querySelector("#connection-form").addEventListener("submit", createConnection);
 document.querySelectorAll("[data-deployment-target]").forEach((select) => {
   select.addEventListener("change", () => syncDeploymentProfile(select.closest("form")));
 });
@@ -119,6 +128,9 @@ function setView(view) {
 
 function render() {
   if (!state.data) return renderLoading();
+  if (state.view === "personas") return renderPersonas();
+  if (state.view === "skills") return renderSkills();
+  if (state.view === "access") return renderAccess();
   if (state.view === "templates") return renderTemplates();
   if (state.view === "deployments") return renderDeployments();
   if (state.view === "activity") return renderActivity();
@@ -184,11 +196,11 @@ function renderCoreMap(claws) {
     const tone = statusTone(claw.observed.phase);
     return `<button class="child-node ${tone}" style="left:${x}%;top:${y}%" data-claw-id="${escapeAttr(claw.id)}" title="${escapeAttr(claw.desired.name)}"><i></i><b>${escapeHtml(claw.desired.name)}</b></button>`;
   }).join("");
-  return `<section class="core-map" aria-label="Parent and child core topology">
+  return `<section class="core-map" aria-label="Control plane and deployed core topology">
     <span class="map-label">Control topology · not shared runtime</span>
     <span class="map-legend"><span><i></i>Policy converged</span><span><i class="warn-dot"></i>Needs work</span></span>
     <svg class="map-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">${lines}</svg>
-    <div class="parent-node"><strong>Parent core</strong><span>Crabhelm</span></div>
+    <div class="parent-node"><strong>Cloud control</strong><span>Crabhelm</span></div>
     ${nodes}
   </section>`;
 }
@@ -251,7 +263,7 @@ function renderDeployments() {
   const admissionOpen = runtime.targets.filter((target) => target.admissionOpen).length;
   const allocated = active.filter((claw) => claw.observed.lifecycle?.workspaceId).length;
   root.innerHTML = `${renderRuntimeBanner()}<section class="metrics">${metric("Provider", label(runtime.mode))}${metric("Targets", runtime.targets.length)}${metric("Admission open", admissionOpen, admissionOpen === runtime.targets.length ? "good" : "warn")}${metric(runtime.mode === "simulator" ? "Simulated records" : "Allocated", allocated, allocated ? "good" : "")}${metric("Node links", active.filter((c) => c.observed.controlLink.status === "paired").length, "good")}${metric("Default", runtime.defaultTarget)}</section>
-    <section class="section-head"><div><h2>Placement targets</h2><p>Each target is an administrator-pinned Crabbox controller and appliance profile. Operators choose placement, never provider overrides.</p></div></section>
+    <section class="section-head"><div><h2>Placement targets</h2><p>Each target is an administrator-pinned deployment adapter and appliance profile. Crabbox is the first adapter; additional providers can be added without relocating Crabhelm.</p></div></section>
     <section class="panel" style="margin-top:12px">
       ${runtime.targets.map((target, index) => {
         const claws = active.filter((claw) => claw.desired.deployment.target === target.id);
@@ -263,12 +275,51 @@ function renderDeployments() {
 }
 
 function renderActivity() {
-  const events = state.data.events || [];
-  root.innerHTML = `${renderRuntimeBanner()}<section class="section-head" style="margin-top:0"><div><h2>Audit trail</h2><p>Lifecycle and policy metadata only. No prompts, messages, tool output, or credentials.</p></div><span class="status">Parent content capture off</span></section>
-    <section class="activity-list" style="margin-top:14px">${events.length ? events.map((event) => `<article class="event"><time>${escapeHtml(formatTime(event.at))}</time><span class="actor">${escapeHtml(event.actor)}</span><div><strong>${escapeHtml(label(event.action.replace("claw.", "")))}</strong><p>${escapeHtml(event.summary)}</p></div><span class="event-outcome ${escapeAttr(event.outcome)}">${escapeHtml(event.outcome)}</span></article>`).join("") : '<div class="empty"><h3>No activity yet</h3></div>'}</section>`;
+  const events = [...(state.data.governanceEvents || []), ...(state.data.events || [])]
+    .sort((a, b) => b.at.localeCompare(a.at)).slice(0, 300);
+  root.innerHTML = `${renderRuntimeBanner()}<section class="section-head" style="margin-top:0"><div><h2>Audit trail</h2><p>Lifecycle and policy metadata only. No prompts, messages, tool output, or credentials.</p></div><span class="status">Content capture off</span></section>
+    <section class="activity-list" style="margin-top:14px">${events.length ? events.map((event) => `<article class="event"><time>${escapeHtml(formatTime(event.at))}</time><span class="actor">${escapeHtml(event.actor || event.actorId || event.requesterId || "system")}</span><div><strong>${escapeHtml(label(event.action.replace("claw.", "")))}</strong><p>${escapeHtml(event.summary)}</p></div><span class="event-outcome ${escapeAttr(event.outcome)}">${escapeHtml(event.outcome)}</span></article>`).join("") : '<div class="empty"><h3>No activity yet</h3></div>'}</section>`;
+}
+
+function renderPersonas() {
+  const personas = state.data.personas || [];
+  const principalMap = new Map((state.data.principals || []).map((item) => [item.id, item]));
+  root.innerHTML = `${renderRuntimeBanner()}<section class="metrics">${metric("Personas", personas.length)}${metric("Personal", personas.filter((p) => p.kind === "personal").length)}${metric("Shared", personas.filter((p) => p.kind === "shared").length)}${metric("Profiles", personas.filter((p) => p.kind === "profile").length)}${metric("Enabled", personas.filter((p) => p.enabled).length, "good")}</section>
+    <section class="section-head"><div><h2>Delegated teammates</h2><p>Requester, responding persona, and credential actor remain separate in every invocation.</p></div><button class="button primary" data-new-persona>New persona</button></section>
+    <section class="governance-grid">${personas.length ? personas.map((persona) => `<article class="governance-card"><div class="card-kicker"><span class="status ${persona.enabled ? "good" : ""}">${escapeHtml(persona.kind)}</span><code>r${persona.revision}</code></div><h3>${escapeHtml(persona.name)}</h3><p>${escapeHtml(principalMap.get(persona.ownerPrincipalId)?.label || persona.ownerPrincipalId)}</p><dl class="definition-list compact"><div><dt>Actor</dt><dd>${escapeHtml(persona.actorPolicy.mode)}</dd></div><div><dt>Capabilities</dt><dd>${persona.capabilityIds.length}</dd></div><div><dt>Skills</dt><dd>${persona.skillIds.length}</dd></div><div><dt>Runtime</dt><dd>${escapeHtml(shortId(persona.clawId))}</dd></div></dl></article>`).join("") : '<div class="empty"><h3>No personas</h3><p>Create a claw to bootstrap its personal persona, or add a shared/profile persona.</p></div>'}</section>`;
+}
+
+function renderSkills() {
+  const skills = state.data.skills || [];
+  root.innerHTML = `${renderRuntimeBanner()}<section class="metrics">${metric("Skills", skills.length)}${metric("Approved", skills.filter((s) => s.status === "approved").length, "good")}${metric("Review queue", skills.filter((s) => s.status === "draft").length, skills.some((s) => s.status === "draft") ? "warn" : "")}${metric("Revoked", skills.filter((s) => s.status === "revoked").length)}</section>
+    <section class="section-head"><div><h2>Central skill library</h2><p>Reviewed artifacts; delivered with immutable digests into read-only runtime state.</p></div><button class="button primary" data-new-skill>Submit skill</button></section>
+    <section class="governance-grid">${skills.length ? skills.map((skill) => `<article class="governance-card"><div class="card-kicker"><span class="status ${skill.status === "approved" ? "good" : skill.status === "draft" ? "warn" : "bad"}">${escapeHtml(skill.status)}</span><code>v${skill.version}</code></div><h3>${escapeHtml(skill.name)}</h3><p>${escapeHtml(skill.description || "No description")}</p><dl class="definition-list compact"><div><dt>Files</dt><dd>${skill.files.length}</dd></div><div><dt>Digest</dt><dd><code>${escapeHtml(skill.digest.slice(0, 12))}</code></dd></div><div><dt>Departments</dt><dd>${escapeHtml(skill.departments.join(", ") || "all")}</dd></div></dl>${skill.status === "draft" ? `<button class="button small primary" data-approve-skill="${escapeAttr(skill.id)}">Approve</button>` : ""}</article>`).join("") : '<div class="empty"><h3>No governed skills</h3><p>Submit a SKILL.md for administrative review.</p></div>'}</section>`;
+}
+
+function renderAccess() {
+  const connections = state.data.connections || [];
+  const confirmations = state.data.confirmations || [];
+  const principals = new Map((state.data.principals || []).map((item) => [item.id, item]));
+  const pending = confirmations.filter((item) => item.status === "pending");
+  root.innerHTML = `${renderRuntimeBanner()}<section class="metrics">${metric("Connections", connections.filter((c) => c.status === "active").length, "good")}${metric("Pending confirmation", pending.length, pending.length ? "warn" : "")}${metric("Issued calls", (state.data.invocations || []).length)}${metric("Active secrets in runtimes", 0, "good")}</section>
+    <section class="section-head"><div><h2>OAuth connections</h2><p>Encrypted at rest. Durable grants stay in the vault; tool wrappers decrypt only for a signed invocation.</p></div><button class="button primary" data-new-connection>Connect GitHub</button></section>
+    <section class="governance-grid">${connections.length ? connections.map((connection) => `<article class="governance-card"><div class="card-kicker"><span class="status ${connection.status === "active" ? "good" : "bad"}">${escapeHtml(connection.status)}</span><code>${escapeHtml(connection.provider)}</code></div><h3>${escapeHtml(connection.label)}</h3><p>${escapeHtml(principals.get(connection.principalId)?.label || connection.principalId)}</p><dl class="definition-list compact"><div><dt>Scopes</dt><dd>${escapeHtml(connection.scopes.join(", "))}</dd></div><div><dt>Vault</dt><dd>encrypted envelope</dd></div></dl>${connection.status === "active" ? `<button class="button small" data-revoke-connection="${escapeAttr(connection.id)}">Revoke</button>` : ""}</article>`).join("") : '<div class="empty"><h3>No OAuth connections</h3><p>Connect a principal before it can invoke provider tools.</p></div>'}</section>
+    <section class="section-head"><div><h2>Confirmation queue</h2><p>Action summary, requester, actor, target, and exact argument digest are bound together.</p></div></section>
+    <section class="activity-list">${pending.length ? pending.map((item) => `<article class="event confirmation-row"><time>${escapeHtml(relativeTime(item.createdAt))}</time><span class="actor">${escapeHtml(principals.get(item.requesterId)?.label || item.requesterId)}</span><div><strong>${escapeHtml(item.summary)}</strong><p>${escapeHtml(item.target)} · ${escapeHtml(item.argumentsDigest.slice(0, 12))}</p></div><span><button class="button small" data-deny-confirmation="${escapeAttr(item.id)}">Deny</button> <button class="button small primary" data-approve-confirmation="${escapeAttr(item.id)}">Approve</button></span></article>`).join("") : '<div class="empty"><h3>No pending confirmations</h3></div>'}</section>`;
 }
 
 function handleViewClick(event) {
+  if (event.target.closest("[data-new-persona]")) return openPersonaDialog();
+  if (event.target.closest("[data-new-skill]")) return skillDialog.showModal();
+  if (event.target.closest("[data-new-connection]")) return openConnectionDialog();
+  const approveSkillId = event.target.closest("[data-approve-skill]")?.dataset.approveSkill;
+  if (approveSkillId) return mutate(`/skills/${encodeURIComponent(approveSkillId)}/approve`, "Skill approved");
+  const revokeConnectionId = event.target.closest("[data-revoke-connection]")?.dataset.revokeConnection;
+  if (revokeConnectionId) return mutate(`/connections/${encodeURIComponent(revokeConnectionId)}/revoke`, "Connection revoked");
+  const approveConfirmationId = event.target.closest("[data-approve-confirmation]")?.dataset.approveConfirmation;
+  if (approveConfirmationId) return mutate(`/confirmations/${encodeURIComponent(approveConfirmationId)}/approve`, "Action approved");
+  const denyConfirmationId = event.target.closest("[data-deny-confirmation]")?.dataset.denyConfirmation;
+  if (denyConfirmationId) return mutate(`/confirmations/${encodeURIComponent(denyConfirmationId)}/deny`, "Action denied");
   if (event.target.closest("[data-retry-failed]")) {
     const failures = state.batchResult?.entries.filter((entry) => !entry.ok) || [];
     if (state.batchResult?.source === "github" && state.githubPreview) {
@@ -353,7 +404,7 @@ function renderDrawer(claw) {
         ${readinessFacet("Gateway", claw.observed.health === "healthy" ? "ready" : claw.observed.health, claw.observed.gatewayVersion || "Local readiness not observed")}
         ${readinessFacet("Managed policy", claw.observed.generation === claw.desired.generation && claw.observed.configHash ? "applied" : "drifted", `g${claw.observed.generation} / desired g${claw.desired.generation}`)}
         ${readinessFacet("Model authentication", modelProbe?.status || "pending", modelProbe ? `${modelProbe.configuredModel} · ${modelProbe.liveInferenceProbe ? "live inference probed" : "auth metadata only"}${modelProbe.missingProviders.length ? ` · missing ${modelProbe.missingProviders.join(", ")}` : ""}` : "Waiting for child model-auth status")}
-        ${readinessFacet("Child log redaction", claw.observed.probes ? claw.observed.probes.diagnostics.redaction === "off" ? "warning" : "configured" : "pending", claw.observed.probes ? `Child setting: ${claw.observed.probes.diagnostics.redaction}; Crabhelm parent projection never stores content` : "Waiting for child diagnostics")}
+        ${readinessFacet("Child log redaction", claw.observed.probes ? claw.observed.probes.diagnostics.redaction === "off" ? "warning" : "configured" : "pending", claw.observed.probes ? `Child setting: ${claw.observed.probes.diagnostics.redaction}; Crabhelm control-plane projection never stores content` : "Waiting for child diagnostics")}
         ${readinessFacet("Slack connection", !claw.desired.channels.slack.enabled ? "not requested" : !claw.desired.enabled ? "disabled" : slackProbe?.status || "pending", !claw.desired.channels.slack.enabled ? "No Slack connection desired" : !claw.desired.enabled ? "Connection configured; all child ingress disabled" : slackProbe ? `${slackProbe.accountCount} account${slackProbe.accountCount === 1 ? "" : "s"} · ${slackProbe.connected ? "connected" : "not connected"}${slackProbe.lastError ? ` · ${slackProbe.lastError}` : ""}` : "Waiting for native Slack live probe")}
         ${readinessFacet("Approved Slack user", claw.observed.userAccess?.status || "none", claw.observed.userAccess ? claw.observed.userAccess.label || claw.observed.userAccess.subjectId : claw.desired.channels.slack.enabled ? "Waiting for native Slack DM pairing" : "Enable the child Slack connection before pairing")}
       </div></section>
@@ -362,16 +413,16 @@ function renderDrawer(claw) {
         <div><dt>Gateway</dt><dd>${escapeHtml(claw.observed.gatewayVersion || "awaiting enrollment")}</dd></div>
         <div><dt>Health</dt><dd>${escapeHtml(claw.observed.health)} · ${escapeHtml(claw.observed.message)}</dd></div>
         <div><dt>Child policy hash</dt><dd>${escapeHtml((claw.observed.configHash || "not observed").slice(0, 18))}</dd></div>
-        <div><dt>Child logging</dt><dd>${escapeHtml(claw.desired.observability.logLevel)} · parent audit metadata only</dd></div>
+        <div><dt>Child logging</dt><dd>${escapeHtml(claw.desired.observability.logLevel)} · control-plane audit metadata only</dd></div>
         <div><dt>Operational probe</dt><dd>${escapeHtml(claw.observed.probes ? relativeTime(claw.observed.probes.checkedAt) : "not observed")}</dd></div>
         <div><dt>Child process</dt><dd>${escapeHtml(claw.observed.probes ? `${formatBytes(claw.observed.probes.diagnostics.rssBytes)} RSS · ${formatDuration(claw.observed.probes.diagnostics.processUptimeSeconds)} uptime` : "not observed")}</dd></div>
-        <div><dt>Log projection</dt><dd>${escapeHtml(claw.observed.probes ? `${claw.observed.probes.diagnostics.logLevel} · child redaction ${claw.observed.probes.diagnostics.redaction} · Crabhelm parent content capture off` : "not observed")}</dd></div>
+        <div><dt>Log projection</dt><dd>${escapeHtml(claw.observed.probes ? `${claw.observed.probes.diagnostics.logLevel} · child redaction ${claw.observed.probes.diagnostics.redaction} · Crabhelm content capture off` : "not observed")}</dd></div>
         <div><dt>Crabbox</dt><dd>${escapeHtml(claw.observed.lifecycle?.providerResourceId || claw.observed.lifecycle?.workspaceId || "not allocated")}</dd></div>
       </dl></div></section>
       <section class="detail-block"><h3>Identity and access intent</h3><div class="detail-card">
         ${ownership("01", "Intended user", claw.desired.owner.label, `${claw.desired.owner.source} · access intent only`)}
         ${claw.observed.userAccess ? ownership("02", "Approved Slack user", "approved", claw.observed.userAccess.label || claw.observed.userAccess.subjectId) : ""}
-        ${ownership("03", "Parent control", claw.observed.controlLink.status, `native node pairing · ${claw.observed.controlLink.command}`)}
+        ${ownership("03", "Control link", claw.observed.controlLink.status, `${claw.observed.controlLink.transport} · ${claw.observed.controlLink.command}`)}
         ${ownership("04", "Child ingress", claw.desired.access.dmPolicy, `${claw.desired.access.groupPolicy} groups · enforced by child`)}
         ${ownership("05", "Deployment owner", state.data.runtime.mode === "simulator" ? "Simulator" : "Crabbox", `${claw.desired.deployment.target} · ${claw.desired.deployment.region || "region unset"} · ${claw.desired.deployment.profile}`)}
         ${ownership("06", "Inference auth", claw.desired.inference.authRef || "child-local", claw.desired.inference.model)}
@@ -386,7 +437,7 @@ function renderDrawer(claw) {
         <button class="button small" type="button" data-detail-action="save">Save desired state</button>
       </form></div></section>
       <section class="detail-block"><h3>Controls</h3><div class="detail-actions"><button class="button small" data-detail-action="reconcile">↻ Reconcile</button><button class="button small" data-detail-action="${enabled ? "disable" : "enable"}">${enabled ? "Disable ingress" : "Enable claw"}</button></div></section>
-      <section class="delete-zone"><h3>Remove child core</h3><p>Disables ingress, waits for active runs to drain, releases the exact Crabbox workspace, confirms provider absence, then removes and verifies the exact native parent pairing. Type <b>${escapeHtml(claw.desired.name)}</b> to continue.</p><div class="delete-confirm"><input id="delete-confirmation" placeholder="${escapeAttr(claw.desired.name)}"/><button class="button danger small" data-detail-action="remove">Remove</button></div></section>
+      <section class="delete-zone"><h3>Remove child core</h3><p>Disables ingress, waits for active runs to drain, releases the exact provider workspace, confirms absence, then revokes its exact control link. Type <b>${escapeHtml(claw.desired.name)}</b> to continue.</p><div class="delete-confirm"><input id="delete-confirmation" placeholder="${escapeAttr(claw.desired.name)}"/><button class="button danger small" data-detail-action="remove">Remove</button></div></section>
     </div>`;
 }
 
@@ -480,7 +531,8 @@ async function loadPairingQueue(id) {
 
 async function createClaw(event) {
   event.preventDefault();
-  const form = new FormData(event.currentTarget);
+  const formElement = event.currentTarget;
+  const form = new FormData(formElement);
   const submit = document.querySelector("#create-submit");
   submit.disabled = true;
   try {
@@ -495,7 +547,7 @@ async function createClaw(event) {
     };
     const result = await request("/claws", { method: "POST", body: JSON.stringify(spec) });
     newDialog.close();
-    event.currentTarget.reset();
+    formElement.reset();
     syncRuntimeActions();
     toast(createOutcome(result));
     await loadState();
@@ -508,7 +560,8 @@ async function createClaw(event) {
 
 async function createMaintainers(event) {
   event.preventDefault();
-  const form = new FormData(event.currentTarget);
+  const formElement = event.currentTarget;
+  const form = new FormData(formElement);
   const handles = [...new Set(
     String(form.get("handles") || "")
       .split(/\r?\n/)
@@ -551,7 +604,7 @@ async function createMaintainers(event) {
       entries: result.results.map((item, index) => ({ handle: handles[index], ...item })),
     };
     bulkDialog.close();
-    event.currentTarget.reset();
+    formElement.reset();
     syncRuntimeActions();
     toast(
       result.failed
@@ -727,7 +780,7 @@ async function importGithubMembers(event) {
         const unknown = `outcome unknown; refresh before retry: ${error.message}`;
         aggregate.results.push(...chunk.map((member) => ({ ok: false, member, error: unknown })));
         const remaining = members.slice(index + chunk.length);
-        aggregate.results.push(...remaining.map((member) => ({ ok: false, member, error: "not attempted after parent API failure" })));
+        aggregate.results.push(...remaining.map((member) => ({ ok: false, member, error: "not attempted after control-plane API failure" })));
         aggregate.failed += chunk.length + remaining.length;
         break;
       }
@@ -943,19 +996,77 @@ async function connectOperator(event) {
   try {
     await loadState();
     document.querySelector("#operator-state").textContent = "Connected";
-    toast("Parent Gateway connected");
+    toast("Crabhelm control plane connected");
   } catch (error) {
     state.token = "";
     toast(error.message, true);
   }
 }
 
+function openPersonaDialog() {
+  const form = document.querySelector("#persona-form");
+  form.reset();
+  form.elements.namedItem("ownerPrincipalId").innerHTML = (state.data.principals || []).map((principal) => `<option value="${escapeAttr(principal.id)}">${escapeHtml(principal.label)} · ${escapeHtml(principal.kind)}</option>`).join("");
+  form.elements.namedItem("servicePrincipalId").innerHTML = `<option value="">None</option>${(state.data.principals || []).filter((principal) => principal.kind === "service").map((principal) => `<option value="${escapeAttr(principal.id)}">${escapeHtml(principal.label)}</option>`).join("")}`;
+  form.elements.namedItem("clawId").innerHTML = (state.data.claws || []).filter((claw) => claw.observed.phase !== "deleted").map((claw) => `<option value="${escapeAttr(claw.id)}">${escapeHtml(claw.desired.name)}</option>`).join("");
+  document.querySelector("#persona-capabilities").innerHTML = (state.data.capabilities || []).map((capability) => `<label><input type="checkbox" name="capability" value="${escapeAttr(capability.id)}" checked /> <span><b>${escapeHtml(capability.label)}</b><small>${escapeHtml(capability.risk)} · confirm ${escapeHtml(capability.confirmation)}</small></span></label>`).join("");
+  personaDialog.showModal();
+}
+
+function openConnectionDialog() {
+  const form = document.querySelector("#connection-form");
+  form.reset();
+  form.elements.namedItem("principalId").innerHTML = (state.data.principals || []).map((principal) => `<option value="${escapeAttr(principal.id)}">${escapeHtml(principal.label)} · ${escapeHtml(principal.kind)}</option>`).join("");
+  connectionDialog.showModal();
+}
+
+async function createPersona(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const actorMode = String(form.get("actorMode"));
+  try {
+    await request("/personas", { method: "POST", body: JSON.stringify({
+      name: String(form.get("name")), kind: String(form.get("kind")), ownerPrincipalId: String(form.get("ownerPrincipalId")), clawId: String(form.get("clawId")),
+      actorPolicy: { mode: actorMode, ...(actorMode !== "invoker" ? { servicePrincipalId: String(form.get("servicePrincipalId")) } : {}) },
+      capabilityIds: form.getAll("capability").map(String), instructions: { identity: String(form.get("identity") || ""), soul: String(form.get("soul") || ""), agents: String(form.get("agents") || "") },
+    }) });
+    personaDialog.close(); toast("Persona created"); await loadState();
+  } catch (error) { toast(error.message, true); }
+}
+
+async function createSkill(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  try {
+    await request("/skills", { method: "POST", body: JSON.stringify({
+      name: String(form.get("name")), description: String(form.get("description") || ""),
+      departments: String(form.get("departments") || "").split(",").map((value) => value.trim()).filter(Boolean),
+      files: [{ path: "SKILL.md", content: String(form.get("content")) }],
+    }) });
+    skillDialog.close(); event.currentTarget.reset(); toast("Draft skill submitted"); await loadState();
+  } catch (error) { toast(error.message, true); }
+}
+
+async function createConnection(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  try {
+    await request("/connections", { method: "POST", body: JSON.stringify({ principalId: String(form.get("principalId")), provider: "github", label: String(form.get("label")), scopes: form.getAll("scope").map(String), secret: String(form.get("secret")) }) });
+    connectionDialog.close(); event.currentTarget.reset(); toast("GitHub credential encrypted and connected"); await loadState();
+  } catch (error) { toast(error.message, true); }
+}
+
+async function mutate(path, message) {
+  try { await request(path, { method: "POST", body: "{}" }); toast(message); await loadState(); }
+  catch (error) { toast(error.message, true); }
+}
+
 function renderLoading() {
-  root.innerHTML = '<div class="loading"><div class="loading-mark"></div><span>Reading parent-core state…</span></div>';
+  root.innerHTML = '<div class="loading"><div class="loading-mark"></div><span>Reading cloud control-plane state…</span></div>';
 }
 
 function renderError(message) {
-  root.innerHTML = `<section class="empty"><div class="empty-mark">!</div><h3>Parent core unavailable</h3><p>${escapeHtml(message)}</p><button class="button primary" id="retry-button">Retry</button></section>`;
+  root.innerHTML = `<section class="empty"><div class="empty-mark">!</div><h3>Control plane unavailable</h3><p>${escapeHtml(message)}</p><button class="button primary" id="retry-button">Retry</button></section>`;
   document.querySelector("#retry-button")?.addEventListener("click", () => loadState());
 }
 
@@ -970,7 +1081,7 @@ function renderRuntimeBanner() {
   if (runtime.mode === "partial") {
     return `<section class="runtime-banner warning"><b>Partial placement configuration</b><span>${runtime.targets.filter((target) => target.admissionOpen).length}/${runtime.targets.length} deployment targets pass local admission checks. Controller reachability is proven only by lifecycle operations.</span></section>`;
   }
-  return `<section class="runtime-banner"><b>Crabbox targets configured</b><span>${runtime.targets.length} fixed deployment target${runtime.targets.length === 1 ? "" : "s"} pass local admission checks. Controller and child health remain lifecycle evidence.</span></section>`;
+  return `<section class="runtime-banner"><b>Cloud control plane online</b><span>${runtime.targets.length} fixed deployment target${runtime.targets.length === 1 ? "" : "s"} available. Crabbox provisions the current target; agent readiness comes from live workspace evidence.</span></section>`;
 }
 
 function renderBatchResult() {
@@ -1071,6 +1182,7 @@ function statusTone(phase) {
 }
 
 function shortModel(model) { return model.includes("/") ? model.split("/").slice(1).join("/") : model; }
+function shortId(value) { return String(value || "").length > 12 ? `${String(value).slice(0, 8)}…` : String(value || ""); }
 function visibilityLabel(access) {
   if (access.dmPolicy === "disabled" && access.groupPolicy === "disabled") return "no channel ingress";
   if (access.dmPolicy === "pairing" && access.groupPolicy === "allowlist") return "paired + allowlisted";

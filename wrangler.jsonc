@@ -1,0 +1,60 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "crabhelm",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-07-02",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "assets": {
+    "directory": "./web",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": true
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "CONTROL_PLANE", "class_name": "CrabhelmControlPlane" },
+      { "name": "CLAW_COORDINATOR", "class_name": "CrabhelmClawCoordinator" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["CrabhelmControlPlane"] },
+    { "tag": "v2", "new_sqlite_classes": ["CrabhelmClawCoordinator"] }
+  ],
+  "r2_buckets": [
+    { "binding": "APPLIANCES", "bucket_name": "crabhelm-appliances-example" },
+    { "binding": "OAUTH_VAULT", "bucket_name": "crabhelm-oauth-vault-example" },
+    { "binding": "AUDIT_ARCHIVE", "bucket_name": "crabhelm-audit-archive-example" }
+  ],
+  "queues": {
+    "producers": [{ "binding": "AUDIT_QUEUE", "queue": "crabhelm-audit-example" }],
+    "consumers": [{ "queue": "crabhelm-audit-example", "max_batch_size": 10, "max_batch_timeout": 5 }]
+  },
+  "vars": {
+    "PUBLIC_URL": "https://crabhelm.example.com",
+    "RUNTIME_URL": "https://crabhelm-runtime.example.com",
+    "CF_ACCESS_TEAM_DOMAIN": "https://example.cloudflareaccess.com",
+    "CF_ACCESS_AUD": "configure-after-access-app-creation",
+    "CF_ACCESS_ADMIN_EMAILS": "",
+    "CF_ACCESS_ADMIN_GROUPS": "",
+    "CRABHELM_PROBE_EMAIL": "",
+    "GITHUB_OAUTH_CLIENT_ID": "",
+    "CRABBOX_URL": "https://crabbox.example.com",
+    "CRABBOX_TARGET_ID": "example",
+    "CRABBOX_TARGET_LABEL": "Example provider target",
+    "CRABBOX_TARGET_REGION": "example",
+    "CRABBOX_PROFILE": "openclaw-core",
+    "CRABBOX_TTL_SECONDS": "14400",
+    "CRABBOX_IDLE_TIMEOUT_SECONDS": "14400",
+    "CRABHELM_EGRESS_LOCKDOWN": "required",
+    "CRABHELM_MODEL_PROXY": "off",
+    "NODE_RUNTIME_SHA256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "APPLIANCE_ARCHIVE_SHA256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "APPLIANCE_MANIFEST_SHA256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "observability": {
+    "enabled": true,
+    "logs": { "head_sampling_rate": 1 },
+    "traces": { "enabled": true, "head_sampling_rate": 0.1 }
+  }
+}

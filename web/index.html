@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="dark" />
     <meta
       name="description"
-      content="Crabhelm parent-core control plane for independently deployed OpenClaw child cores."
+      content="Cloudflare-hosted control plane for independently deployed OpenClaw agents."
     />
     <title>Crabhelm — OpenClaw fleet control</title>
     <link rel="stylesheet" href="./styles.css" />
@@ -16,29 +16,32 @@
       <aside class="rail">
         <a class="brand" href="#fleet" aria-label="Crabhelm fleet">
           <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-          <span><strong>CRABHELM</strong><small>Parent core</small></span>
+          <span><strong>CRABHELM</strong><small>Cloud control</small></span>
         </a>
 
         <nav class="nav" aria-label="Primary">
           <button class="nav-item active" data-view="fleet"><span>01</span>Fleet</button>
-          <button class="nav-item" data-view="templates"><span>02</span>Policies</button>
-          <button class="nav-item" data-view="deployments"><span>03</span>Deployments</button>
-          <button class="nav-item" data-view="activity"><span>04</span>Activity</button>
+          <button class="nav-item" data-view="personas"><span>02</span>Personas</button>
+          <button class="nav-item" data-view="skills"><span>03</span>Skills</button>
+          <button class="nav-item" data-view="access"><span>04</span>Access</button>
+          <button class="nav-item" data-view="templates"><span>05</span>Policies</button>
+          <button class="nav-item" data-view="deployments"><span>06</span>Deployments</button>
+          <button class="nav-item" data-view="activity"><span>07</span>Activity</button>
         </nav>
 
-        <section class="parent-card" aria-label="Parent core status">
-          <div class="parent-card-top"><span class="pulse"></span><span>Parent online</span></div>
-          <strong>crabhelm-main</strong>
+        <section class="parent-card" aria-label="Control plane status">
+          <div class="parent-card-top"><span class="pulse"></span><span>Control online</span></div>
+          <strong>Cloudflare</strong>
           <dl>
-            <div><dt>Mode</dt><dd>parent</dd></div>
-            <div><dt>Control</dt><dd>scoped admin</dd></div>
-            <div><dt>Parent capture</dt><dd>off</dd></div>
+            <div><dt>State</dt><dd>Durable Object</dd></div>
+            <div><dt>Placement</dt><dd>provider adapters</dd></div>
+            <div><dt>Content capture</dt><dd>off</dd></div>
           </dl>
         </section>
 
-        <button class="operator" id="operator-button" title="Gateway operator connection">
+        <button class="operator" id="operator-button" title="Crabhelm operator connection">
           <span class="operator-avatar">OP</span>
-          <span><strong>Gateway operator</strong><small id="operator-state">Connected</small></span>
+          <span><strong>Crabhelm operator</strong><small id="operator-state">Connected</small></span>
           <b>···</b>
         </button>
       </aside>
@@ -46,7 +49,7 @@
       <main class="main">
         <header class="topbar">
           <div>
-            <p class="eyebrow" id="view-eyebrow">Fleet composition / Parent 01</p>
+            <p class="eyebrow" id="view-eyebrow">Fleet composition / Cloud control</p>
             <h1 id="view-title">Fleet</h1>
           </div>
           <div class="top-actions">
@@ -189,10 +192,58 @@
 
     <dialog class="modal auth-modal" id="auth-dialog">
       <form method="dialog" id="auth-form">
-        <div class="modal-head"><div><p class="eyebrow">Parent Gateway</p><h2>Connect operator</h2></div></div>
-        <p class="modal-copy">Use the parent core's existing Gateway token. Crabhelm does not create a separate login or child authorization layer.</p>
-        <label><span>Gateway token</span><input name="token" type="password" autocomplete="off" required /></label>
+        <div class="modal-head"><div><p class="eyebrow">Cloud control plane</p><h2>Connect operator</h2></div></div>
+        <p class="modal-copy">Use the Crabhelm operator token. It authenticates control-plane requests and is never sent to agent machines.</p>
+        <label><span>Operator token</span><input name="token" type="password" autocomplete="off" required /></label>
         <div class="modal-actions"><button class="button primary" value="default">Connect</button></div>
+      </form>
+    </dialog>
+
+    <dialog class="modal" id="persona-dialog">
+      <form method="dialog" id="persona-form">
+        <div class="modal-head"><div><p class="eyebrow">Requester / persona / actor</p><h2>New persona</h2></div><button class="icon-button" type="button" data-close-dialog="persona-dialog" aria-label="Close">×</button></div>
+        <div class="form-grid">
+          <label><span>Name</span><input name="name" required maxlength="80" placeholder="Incident coordinator" /></label>
+          <label><span>Kind</span><select name="kind"><option value="personal">Personal</option><option value="shared">Shared channel</option><option value="profile">Profile assistant</option></select></label>
+          <label><span>Owner</span><select name="ownerPrincipalId" required></select></label>
+          <label><span>Runtime claw</span><select name="clawId" required></select></label>
+          <label><span>Actor policy</span><select name="actorMode"><option value="invoker">Invoker</option><option value="service">Managed service</option><option value="invoker-with-service-fallback">Invoker with service fallback</option></select></label>
+          <label><span>Service actor</span><select name="servicePrincipalId"><option value="">None</option></select></label>
+          <label class="wide"><span>Capabilities</span><div id="persona-capabilities" class="check-grid"></div></label>
+          <label class="wide"><span>Identity</span><textarea name="identity" rows="3" maxlength="16384" placeholder="Who this teammate is"></textarea></label>
+          <label class="wide"><span>Operating principles</span><textarea name="soul" rows="3" maxlength="16384" placeholder="How this teammate behaves"></textarea></label>
+          <label class="wide"><span>Managed instructions</span><textarea name="agents" rows="4" maxlength="32768" placeholder="What this teammate may do"></textarea></label>
+        </div>
+        <div class="invariant-note"><b>Authority is platform policy.</b><span>Profile assistants always act as the invoker. Shared service authority requires an explicit service principal and compatible connection.</span></div>
+        <div class="modal-actions"><button class="button ghost" type="button" data-close-dialog="persona-dialog">Cancel</button><button class="button primary" value="default">Create persona</button></div>
+      </form>
+    </dialog>
+
+    <dialog class="modal" id="skill-dialog">
+      <form method="dialog" id="skill-form">
+        <div class="modal-head"><div><p class="eyebrow">Reviewed read-only capability</p><h2>Submit skill</h2></div><button class="icon-button" type="button" data-close-dialog="skill-dialog" aria-label="Close">×</button></div>
+        <div class="form-grid">
+          <label><span>Name</span><input name="name" required maxlength="80" placeholder="Incident context" /></label>
+          <label><span>Departments</span><input name="departments" maxlength="240" placeholder="engineering, platform" /></label>
+          <label class="wide"><span>Description</span><input name="description" maxlength="240" placeholder="Bounded incident investigation guidance" /></label>
+          <label class="wide"><span>SKILL.md</span><textarea name="content" rows="12" required maxlength="65536" placeholder="# Incident context&#10;&#10;Use approved telemetry capabilities only."></textarea></label>
+        </div>
+        <div class="invariant-note"><b>Two-step governance.</b><span>Submission creates a draft. An administrator must approve it before any persona can receive it.</span></div>
+        <div class="modal-actions"><button class="button ghost" type="button" data-close-dialog="skill-dialog">Cancel</button><button class="button primary" value="default">Submit draft</button></div>
+      </form>
+    </dialog>
+
+    <dialog class="modal" id="connection-dialog">
+      <form method="dialog" id="connection-form">
+        <div class="modal-head"><div><p class="eyebrow">Encrypted OAuth vault</p><h2>Connect GitHub</h2></div><button class="icon-button" type="button" data-close-dialog="connection-dialog" aria-label="Close">×</button></div>
+        <p class="modal-copy">The credential is encrypted with AES-GCM and stored outside agent runtimes. Agents receive only short-lived, action-bound grants.</p>
+        <div class="form-grid">
+          <label><span>Principal</span><select name="principalId" required></select></label>
+          <label><span>Label</span><input name="label" required maxlength="120" placeholder="Work GitHub" /></label>
+          <label class="wide"><span>Capability scopes</span><div class="check-grid"><label><input type="checkbox" name="scope" value="repo:read" checked /> Repository read</label><label><input type="checkbox" name="scope" value="repo:write" /> Issue comments</label></div></label>
+          <label class="wide"><span>GitHub token</span><input name="secret" type="password" autocomplete="off" required maxlength="16384" /></label>
+        </div>
+        <div class="modal-actions"><button class="button ghost" type="button" data-close-dialog="connection-dialog">Cancel</button><button class="button primary" value="default">Encrypt and connect</button></div>
       </form>
     </dialog>
 
