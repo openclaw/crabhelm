@@ -38,7 +38,7 @@ test("child status command binds evidence to the configured child id", async () 
   let handler: ((params?: string | null) => Promise<string>) | undefined;
   registerChildCommands(
     {
-      runtime: registrationRuntime(),
+      runtime: registrationRuntime({ gateway: { port: 1 } }),
       registerNodeHostCommand(command) {
         if (command.command === childStatusCommand) handler = command.handle;
       },

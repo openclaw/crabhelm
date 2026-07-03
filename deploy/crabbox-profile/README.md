@@ -1,35 +1,31 @@
-# `openclaw-core` appliance bundle
+# Crabbox `openclaw-core` appliance
 
-This directory is the provider-neutral guest overlay for Crabhelm's fixed Crabbox profile. It intentionally does not copy or reimplement a private provider lifecycle. The dedicated Linux controller continues to own acquire, resolve, attest, and release through a reviewed public Crabbox `external` adapter configuration.
-
-The shipped contract requires exactly four hours for both TTL and idle timeout. It is an evaluation/pilot profile and will expire; it is not an always-on production appliance. Persistent or renewable operation needs a separately reviewed controller profile and matching Crabhelm target values.
+Provider-neutral guest overlay used by Crabhelm's Crabbox deployment adapter. Crabbox owns workspace acquisition, authenticated terminal transport, and release. Cloudflare owns desired state, appliance delivery, and reconciliation.
 
 ## Build
 
-Supply a reviewed npm tarball containing the exact OpenClaw version named in `profile.conf`:
-
 ```bash
 deploy/crabbox-profile/build-bundle.sh \
-  --openclaw-tarball /absolute/path/to/openclaw-2026.6.11-beta.1.tgz \
-  --slack-tarball /absolute/path/to/openclaw-slack-2026.6.10.tgz \
-  --output /absolute/empty/openclaw-core-bundle
+  --node-tarball /absolute/node-v22.23.1-linux-x64.tar.xz \
+  --openclaw-tarball /absolute/openclaw.tgz \
+  --slack-tarball /absolute/slack.tgz \
+  --output /absolute/empty/output
 ```
 
-The builder packages the current Crabhelm checkout, verifies every declared Slack dependency is embedded in the reviewed Slack tarball, repacks Slack with dependency resolution disabled, and emits a mode-private bundle plus `manifest_sha256`. The compiled Crabhelm artifact has no runtime npm dependencies. Pin the manifest digest in the private controller release. Do not fetch `latest` on a controller or child.
+The builder pins a Linux x64 Node.js `22.23.1` fallback plus OpenClaw and Slack `2026.6.11`, packs the current Crabhelm source, verifies all artifacts, and emits `manifest.json`. Archive the output under a top-level `bundle/` directory because the Cloudflare installer executes `bundle/guest-install.sh`:
 
-## Controller integration
+```bash
+tar -C /path/to/parent -s '|^output|bundle|' -czf /tmp/crabhelm-bundle.tgz output
+```
 
-The fixed controller must:
+Upload the archive to `crabhelm-appliances/openclaw-core/bundle.tgz` in remote R2, then set `APPLIANCE_MANIFEST_SHA256` to the manifest digest and deploy the Worker.
 
-1. expose only `profile=openclaw-core` with `--forbid-class-override` and `--forbid-server-type-override`;
-2. require the TTL, idle timeout, and headless capabilities from `profile.conf`;
-3. acquire and durably record the provider identity before guest configuration;
-4. stage a child-user-owned, non-symlink mode-`0600` credential source outside `$HOME/.openclaw` containing `OPENAI_API_KEY`, `SLACK_BOT_TOKEN`, and `SLACK_APP_TOKEN`; obtain those values through the controller host's approved secret delivery, never a workspace request;
-5. stage this exact bundle into the new guest without following symlinks;
-6. run `guest-install.sh` as the child service user with `CRABHELM_BUNDLE_MANIFEST_SHA256` set to the pinned release digest and `CRABHELM_CREDENTIAL_FILE` set to the staged credential source;
-7. pass the adapter-provided `CRABBOX_ADAPTER_ROOT_SESSION_ID` unchanged plus fixed parent host/port/TLS/fingerprint values;
-8. report ready only after `guest-install.sh` succeeds; retain normal external-provider rollback on failure.
+## Guest sequence
 
-The controller request may carry metadata but never a command, provider, class, server type, credential, parent token, or artifact URL. Slack and inference credentials remain box-owned profile inputs and are not part of this bundle, installer environment, or the Crabhelm create request. The evaluation profile deliberately supports one concrete credential contract: environment-backed OpenAI inference plus one Slack Socket Mode bot/app token pair per child. `guest-install.sh` validates only the source file's metadata and required key names, installs OpenClaw and both plugins through empty/offline environments, then atomically activates the credentials at `$HOME/.openclaw/.env` before configuration and service installation.
+1. Cloudflare generates a child-specific HMAC bootstrap URL containing the exact desired model and Slack state.
+2. Guest downloads the private archive and credential file.
+3. `guest-install.sh` verifies manifest/artifacts, installs pinned packages in sanitized environments, and activates credentials at `$HOME/.openclaw/.env`.
+4. `bootstrap-child.sh` writes exact child config and starts the loopback Gateway.
+5. Crabhelm attaches through Crabbox and requires a real model turn before readiness.
 
-`guest-install.sh` verifies the pinned manifest and every artifact, validates the owner-only credential source by key name without printing values, installs the exact OpenClaw tarball through an empty privileged environment, and installs the self-contained Crabhelm and Slack plugin artifacts with npm offline mode forced. The pinned OpenClaw package may fetch its own shrinkwrap-integrity-locked dependencies before credentials are activated; plugin installation itself performs no registry resolution. Only then does the installer activate the credential file and delegate to `bootstrap-child.sh`. Bootstrap configures Socket Mode SecretRefs, starts a loopback-only child Gateway, and starts the outbound node host using OpenClaw's native pairing.
+Required credential: `OPENAI_API_KEY`. Slack tokens are an all-or-none optional pair. Secret values never appear in workspace requests, registry records, audit rows, or terminal evidence.

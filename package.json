@@ -2,17 +2,20 @@
   "name": "@openclaw/crabhelm",
   "version": "0.0.0",
   "private": true,
-  "description": "Parent-core control plane for fleets of single-tenant OpenClaw child cores.",
+  "description": "Cloudflare control plane for independently deployed OpenClaw agents.",
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
   },
   "scripts": {
-    "build": "tsgo --noEmit && node --check web/app.js && esbuild index.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/index.js --external:openclaw/*",
+    "build": "tsgo --noEmit && pnpm worker:check && node --check web/app.js && esbuild index.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/index.js --external:openclaw/*",
     "check": "pnpm build && pnpm test",
     "dev": "tsx dev/server.ts",
     "prepack": "pnpm build",
-    "test": "node --import tsx --test tests/*.test.ts"
+    "test": "node --import tsx --test tests/*.test.ts",
+    "worker:check": "tsgo -p tsconfig.worker.json --noEmit && wrangler deploy --dry-run",
+    "worker:deploy": "wrangler deploy",
+    "worker:types": "wrangler types"
   },
   "peerDependencies": {
     "openclaw": ">=2026.6.11"
@@ -23,11 +26,13 @@
     }
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "4.20260702.1",
     "@types/node": "25.9.1",
     "@typescript/native-preview": "7.0.0-dev.20260527.2",
     "esbuild": "0.28.1",
     "tsx": "4.22.3",
-    "typebox": "1.1.39"
+    "typebox": "1.1.39",
+    "wrangler": "4.106.0"
   },
   "files": [
     "dist",
