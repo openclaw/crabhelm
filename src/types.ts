@@ -125,8 +125,8 @@ export type LifecycleIdentity = {
 
 export type ParentControlLink = {
   status: "pending" | "paired" | "offline" | "revoked";
-  transport: "openclaw-node";
-  command: "crabhelm.child.status";
+  transport: "openclaw-node" | "crabbox-workspace";
+  command: "crabhelm.child.status" | "crabhelm.bootstrap.status";
   nodeId?: string;
   lastSeenAt?: string;
 };
@@ -156,7 +156,7 @@ export type ChildOperationalProbes = {
     configuredModel: string;
     resolvedModel?: string;
     authReady: boolean;
-    liveInferenceProbe: false;
+    liveInferenceProbe: boolean;
     missingProviders: string[];
     unusableProfileCount: number;
   };
