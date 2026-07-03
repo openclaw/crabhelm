@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { capabilityById, invocationArgumentsDigest, mayInvokePersona, normalizeGithubTarget, normalizeInvocationArguments, resolveInvocationActor, SYSTEM_OPERATOR_PRINCIPAL_ID } from "../src/governance.js";
 import { GovernanceRegistry } from "../src/governance-registry.js";
-import type { CreateInvocationInput, CreateOAuthConnectionInput, CreatePersonaInput, CreatePrincipalInput, CreateSkillInput, GovernanceAuditEvent, InvocationGrantClaims, InvocationRecord, UpdatePersonaInput } from "../src/governance-types.js";
+import type { CreateInvocationInput, CreatePersonaInput, CreatePrincipalInput, CreateSkillInput, GovernanceAuditEvent, InvocationGrantClaims, InvocationRecord, TurnClaims, UpdatePersonaInput } from "../src/governance-types.js";
 import type { CrabhelmRegistry } from "../src/registry.js";
 import { signClaims, verifyClaims } from "./security.js";
 import { OAuthVault } from "./vault.js";
+import { postSlackConfirmation } from "./slack.js";
 
 const maxBodyBytes = 64 * 1024;
 
@@ -55,28 +56,69 @@ export class GovernanceController {
       return json(await this.#governance.approveSkill(decodeURIComponent(skillApprove[1]! ), principalId));
     }
     if (request.method === "POST" && url.pathname === "/api/connections") {
-      const input = await readJson(request) as CreateOAuthConnectionInput;
-      if (!isAdmin && input.principalId !== principalId) throw new Error("cannot connect credentials for another principal");
-      if (input.provider !== "github") throw new Error("provider is not supported");
+      throw new Error("direct credential upload is disabled; connect GitHub with OAuth");
+    }
+    if (request.method === "GET" && url.pathname === "/api/oauth/github/start") {
+      const state = await this.#governance.createOAuthState(principalId);
+      const authorize = new URL("https://github.com/login/oauth/authorize");
+      authorize.searchParams.set("client_id", this.#env.GITHUB_OAUTH_CLIENT_ID);
+      authorize.searchParams.set("redirect_uri", `${this.#env.PUBLIC_URL}/api/oauth/github/callback`);
+      authorize.searchParams.set("scope", "repo read:org user:email");
+      authorize.searchParams.set("state", state.id);
+      return Response.redirect(authorize, 302);
+    }
+    if (request.method === "GET" && url.pathname === "/api/oauth/github/callback") {
+      const code = text(url.searchParams.get("code"), "OAuth code", 500);
+      const stateId = text(url.searchParams.get("state"), "OAuth state", 200);
+      await this.#governance.consumeOAuthState(stateId, principalId);
+      const credential = await exchangeGithubCode(this.#env, code);
+      const profile = await githubProfile(credential.token);
       const id = randomUUID();
-      const vaultKey = await this.#vault.put(id, input.principalId, input.provider, text(input.secret, "OAuth secret", 16 * 1024));
+      const vaultKey = await this.#vault.put(id, principalId, "github", credential.token);
       try {
-        return json(await this.#governance.registerConnection(input, vaultKey, principalId, id), 201);
+        await this.#governance.registerConnection({
+          principalId,
+          provider: "github",
+          label: `GitHub @${profile.login}`,
+          scopes: logicalGithubScopes(credential.scopes),
+          secret: "oauth-callback",
+        }, vaultKey, principalId, id);
       } catch (error) {
         await this.#vault.delete(vaultKey);
         throw error;
       }
+      return Response.redirect(`${this.#env.PUBLIC_URL}/#access`, 302);
     }
     const connectionRevoke = url.pathname.match(/^\/api\/connections\/([^/]+)\/revoke$/u);
     if (request.method === "POST" && connectionRevoke) {
       const current = await this.#governance.requireConnection(decodeURIComponent(connectionRevoke[1]!));
       if (!isAdmin && current.principalId !== principalId) throw new Error("cannot revoke credentials for another principal");
+      const credential = await this.#vault.get(current.vaultKey, current.id, current.principalId, current.provider);
+      await revokeGithubCredential(this.#env, credential);
       const revoked = await this.#governance.revokeConnection(current.id, principalId);
       await this.#vault.delete(current.vaultKey);
       return json(revoked);
     }
     if (request.method === "POST" && url.pathname === "/api/invocations/issue") {
       return this.#issueInvocation(principalId, isAdmin, await readJson(request) as CreateInvocationInput);
+    }
+    if (request.method === "POST" && url.pathname === "/api/runtime/invocations/issue") {
+      const turn = await this.#runtimeTurn(request);
+      const input = await readJson(request) as Omit<CreateInvocationInput, "personaId">;
+      const response = await this.#issueInvocation(turn.requesterId, false, { ...input, personaId: turn.personaId }, true);
+      if (response.status === 202 && turn.surface === "slack") {
+        const body = await response.clone().json() as { confirmation?: import("../src/governance-types.js").ConfirmationRecord };
+        if (body.confirmation) await postSlackConfirmation(this.#env, turn, body.confirmation);
+      }
+      await this.#emit(await this.#governance.audit({ correlationId: turn.jobId, clawId: turn.clawId, requesterId: turn.requesterId, personaId: turn.personaId, runtimeId: `claw:${turn.clawId}`, action: "runtime.invocation.request", outcome: "succeeded", summary: "Runtime requested a governed invocation" }));
+      return response;
+    }
+    const runtimeConfirmation = url.pathname.match(/^\/api\/runtime\/confirmations\/([^/]+)$/u);
+    if (request.method === "GET" && runtimeConfirmation) {
+      const turn = await this.#runtimeTurn(request);
+      const confirmation = await this.#governance.requireConfirmation(decodeURIComponent(runtimeConfirmation[1]!));
+      if (confirmation.requesterId !== turn.requesterId || confirmation.personaId !== turn.personaId) throw new Error("confirmation does not belong to this turn");
+      return json({ id: confirmation.id, status: confirmation.status, expiresAt: confirmation.expiresAt });
     }
     const confirmation = url.pathname.match(/^\/api\/confirmations\/([^/]+)\/(approve|deny)$/u);
     if (request.method === "POST" && confirmation) {
@@ -92,10 +134,10 @@ export class GovernanceController {
     return json(await this.#governance.managedSpecForClaw(await this.#fleet.get(clawId)));
   }
 
-  async #issueInvocation(requesterId: string, isAdmin: boolean, raw: CreateInvocationInput): Promise<Response> {
+  async #issueInvocation(requesterId: string, isAdmin: boolean, raw: CreateInvocationInput, trustedIngress = false): Promise<Response> {
     const requester = await this.#governance.requirePrincipal(requesterId);
     const persona = await this.#governance.requirePersona(text(raw.personaId, "personaId", 200));
-    if (!mayInvokePersona(persona, requesterId, isAdmin)) throw new Error("requester is not permitted to invoke this persona");
+    if (!trustedIngress && !mayInvokePersona(persona, requesterId, isAdmin)) throw new Error("requester is not permitted to invoke this persona");
     const capability = capabilityById(text(raw.capabilityId, "capabilityId", 120));
     const target = normalizeGithubTarget(raw.target);
     const args = normalizeInvocationArguments(raw.arguments);
@@ -132,7 +174,16 @@ export class GovernanceController {
     await this.#governance.saveInvocation(invocation);
     await this.#env.CLAW_COORDINATOR.getByName(persona.clawId).registerGrant({ invocationId, jti: claims.jti, argumentsDigest, expiresAt });
     await this.#emit(await this.#governance.audit({ correlationId: invocationId, clawId: persona.clawId, requesterId, personaId: persona.id, actorId: resolved.actor.id, actorMode: resolved.actorMode, fallbackUsed: resolved.fallbackUsed, capabilityId: capability.id, target, policyRevision: persona.revision, confirmationId: raw.confirmationId, action: "invocation.issue", outcome: "succeeded", summary: `Issued one-time grant for ${capability.label}` }));
-    return json({ invocation, grant, executeUrl: `${this.#env.PUBLIC_URL}/api/tools/github/execute`, arguments: args }, 201);
+    return json({ invocation, grant, executeUrl: `${this.#env.RUNTIME_URL}/api/tools/github/execute`, arguments: args }, 201);
+  }
+
+  async #runtimeTurn(request: Request): Promise<TurnClaims> {
+    const turnToken = bearer(request);
+    if (!turnToken) throw new Error("turn authentication is required");
+    const turn = await verifyClaims<TurnClaims>(this.#env.RUNTIME_SIGNING_SECRET, turnToken, { typ: "turn", aud: "crabhelm-runtime-turn" });
+    const persona = await this.#governance.requirePersona(turn.personaId);
+    if (persona.clawId !== turn.clawId) throw new Error("persona does not belong to this turn");
+    return turn;
   }
 
   async #executeGithub(request: Request): Promise<Response> {
@@ -172,6 +223,62 @@ export class GovernanceController {
   }
 }
 
+async function exchangeGithubCode(env: Env, code: string): Promise<{ token: string; scopes: string[] }> {
+  const response = await fetch("https://github.com/login/oauth/access_token", {
+    method: "POST",
+    redirect: "manual",
+    signal: AbortSignal.timeout(15_000),
+    headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded", "user-agent": "crabhelm.example.com" },
+    body: new URLSearchParams({ client_id: env.GITHUB_OAUTH_CLIENT_ID, client_secret: env.GITHUB_OAUTH_CLIENT_SECRET, code, redirect_uri: `${env.PUBLIC_URL}/api/oauth/github/callback` }),
+  });
+  const value = await boundedProviderJson(response);
+  if (!response.ok || typeof value.access_token !== "string") throw new Error(`GitHub OAuth exchange failed (${response.status})`);
+  const scopes = typeof value.scope === "string" ? value.scope.split(",").map((scope) => scope.trim()).filter(Boolean) : [];
+  return { token: value.access_token, scopes };
+}
+
+async function githubProfile(token: string): Promise<{ login: string }> {
+  const response = await fetch("https://api.github.com/user", {
+    redirect: "manual",
+    signal: AbortSignal.timeout(15_000),
+    headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "crabhelm.example.com", "x-github-api-version": "2022-11-28" },
+  });
+  const value = await boundedProviderJson(response);
+  if (!response.ok || typeof value.login !== "string" || !value.login.trim()) throw new Error(`GitHub profile lookup failed (${response.status})`);
+  return { login: value.login.trim() };
+}
+
+async function revokeGithubCredential(env: Env, token: string): Promise<void> {
+  const response = await fetch(`https://api.github.com/applications/${encodeURIComponent(env.GITHUB_OAUTH_CLIENT_ID)}/token`, {
+    method: "DELETE",
+    redirect: "manual",
+    signal: AbortSignal.timeout(15_000),
+    headers: {
+      authorization: `Basic ${Buffer.from(`${env.GITHUB_OAUTH_CLIENT_ID}:${env.GITHUB_OAUTH_CLIENT_SECRET}`).toString("base64")}`,
+      accept: "application/vnd.github+json",
+      "content-type": "application/json",
+      "user-agent": "crabhelm.example.com",
+      "x-github-api-version": "2022-11-28",
+    },
+    body: JSON.stringify({ access_token: token }),
+  });
+  if (response.status !== 204) throw new Error(`GitHub token revocation failed (${response.status})`);
+}
+
+async function boundedProviderJson(response: Response): Promise<Record<string, unknown>> {
+  const length = Number(response.headers.get("content-length") ?? 0);
+  if (length > 128 * 1024) throw new Error("provider response is too large");
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > 128 * 1024) throw new Error("provider response is too large");
+  try { return JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>; }
+  catch { throw new Error(`provider returned invalid JSON (${response.status})`); }
+}
+
+function logicalGithubScopes(scopes: string[]): string[] {
+  if (scopes.includes("repo") || scopes.includes("public_repo")) return ["repo:read", "repo:write"];
+  return ["repo:read"];
+}
+
 async function githubRequest(claims: InvocationGrantClaims, args: Record<string, string | number | boolean | null>, credential: string): Promise<unknown> {
   const target = normalizeGithubTarget(claims.target);
   const base = `https://api.github.com/repos/${target.split("/").map(encodeURIComponent).join("/")}`;
@@ -188,8 +295,8 @@ async function githubRequest(claims: InvocationGrantClaims, args: Record<string,
   } else if (claims.capabilityId !== "github.repository.read" && claims.capabilityId !== "github.issue.read") {
     throw new Error("GitHub capability is unsupported");
   }
-  const response = await fetch(url, { method, redirect: "error", signal: AbortSignal.timeout(15_000), headers: { authorization: `Bearer ${credential}`, accept: "application/vnd.github+json", "content-type": "application/json", "user-agent": "crabhelm.example.com", "x-github-api-version": "2022-11-28" }, ...(body ? { body } : {}) });
-  const data = await response.json().catch(() => ({})) as Record<string, unknown>;
+  const response = await fetch(url, { method, redirect: "manual", signal: AbortSignal.timeout(15_000), headers: { authorization: `Bearer ${credential}`, accept: "application/vnd.github+json", "content-type": "application/json", "user-agent": "crabhelm.example.com", "x-github-api-version": "2022-11-28" }, ...(body ? { body } : {}) });
+  const data = await boundedProviderJson(response);
   if (!response.ok) throw new Error(`GitHub request failed (${response.status}): ${typeof data.message === "string" ? data.message.slice(0, 200) : "provider error"}`);
   if (claims.capabilityId === "github.repository.read") return pick(data, ["id", "name", "full_name", "private", "html_url", "description", "default_branch", "archived"]);
   return pick(data, ["id", "number", "title", "state", "html_url", "body", "created_at", "updated_at"]);

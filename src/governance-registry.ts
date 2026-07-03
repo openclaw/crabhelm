@@ -21,6 +21,7 @@ import type {
   InvocationRecord,
   ManagedAgentSpec,
   OAuthConnectionRecord,
+  OAuthStateRecord,
   PersonaRecord,
   PrincipalRecord,
   SkillRecord,
@@ -34,6 +35,7 @@ type Stores = {
   personas: StateStore<PersonaRecord>;
   skills: StateStore<SkillRecord>;
   connections: StateStore<OAuthConnectionRecord>;
+  oauthStates: StateStore<OAuthStateRecord>;
   confirmations: StateStore<ConfirmationRecord>;
   invocations: StateStore<InvocationRecord>;
   events: StateStore<GovernanceAuditEvent>;
@@ -123,6 +125,34 @@ export class GovernanceRegistry {
     });
   }
 
+  async ensureExternalPrincipal(input: CreatePrincipalInput): Promise<PrincipalRecord> {
+    return this.#serialize(async () => {
+      const candidate = createPrincipalRecord(input);
+      const current = (await values(this.#stores.principals)).find((item) => item.subject === candidate.subject);
+      if (!current) {
+        await this.#stores.principals.register(candidate.id, candidate);
+        await this.audit({ requesterId: candidate.id, actorId: candidate.id, action: "principal.login", outcome: "succeeded", summary: `Created ${candidate.source} principal ${candidate.label}` });
+        return candidate;
+      }
+      const preserveOidcAuthority = current.source === "oidc" && candidate.source !== "oidc";
+      const next = {
+        ...current,
+        revision: current.revision + 1,
+        label: preserveOidcAuthority ? current.label : candidate.label,
+        source: preserveOidcAuthority ? current.source : candidate.source,
+        roles: preserveOidcAuthority ? current.roles : candidate.roles,
+        departments: preserveOidcAuthority ? current.departments : candidate.departments,
+        updatedAt: new Date().toISOString(),
+      };
+      await this.#stores.principals.register(current.id, next);
+      return next;
+    });
+  }
+
+  async principalBySubject(subject: string): Promise<PrincipalRecord | undefined> {
+    return (await values(this.#stores.principals)).find((item) => item.subject === subject);
+  }
+
   async createPersona(input: CreatePersonaInput, actorId: string): Promise<PersonaRecord> {
     return this.#serialize(async () => {
       await this.requirePrincipal(input.ownerPrincipalId);
@@ -192,6 +222,29 @@ export class GovernanceRegistry {
       await this.#stores.connections.register(id, next);
       await this.audit({ requesterId: actorId, actorId, action: "connection.revoke", outcome: "succeeded", summary: `Revoked ${next.label}` });
       return next;
+    });
+  }
+
+  async createOAuthState(principalId: string): Promise<OAuthStateRecord> {
+    await this.requirePrincipal(principalId);
+    const now = new Date();
+    const state: OAuthStateRecord = {
+      id: randomUUID(),
+      principalId,
+      provider: "github",
+      createdAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 10 * 60 * 1000).toISOString(),
+    };
+    await this.#stores.oauthStates.register(state.id, state);
+    return state;
+  }
+
+  async consumeOAuthState(id: string, principalId: string): Promise<OAuthStateRecord> {
+    return this.#serialize(async () => {
+      const state = await this.#stores.oauthStates.lookup(id);
+      if (!state || state.principalId !== principalId || Date.parse(state.expiresAt) <= Date.now()) throw new Error("OAuth state is invalid or expired");
+      await this.#stores.oauthStates.delete(id);
+      return state;
     });
   }
 
@@ -268,6 +321,7 @@ export class GovernanceRegistry {
 
   async connections(): Promise<OAuthConnectionRecord[]> { return values(this.#stores.connections); }
   async principals(): Promise<PrincipalRecord[]> { return values(this.#stores.principals); }
+  async personas(): Promise<PersonaRecord[]> { return values(this.#stores.personas); }
 
   async audit(input: Omit<GovernanceAuditEvent, "id" | "at" | "correlationId"> & { correlationId?: string }): Promise<GovernanceAuditEvent> {
     const event: GovernanceAuditEvent = { ...input, id: randomUUID(), at: new Date().toISOString(), correlationId: input.correlationId ?? randomUUID() };

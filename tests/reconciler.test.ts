@@ -38,6 +38,34 @@ test("provisions one child Gateway and pairs the parent control identity", async
   assert.equal((await registry.snapshot()).summary.ready, 1);
 });
 
+test("enabled claws replace an expired provider resource", async () => {
+  const provider = new SimulatorChildCoreProvider();
+  let absent = false;
+  const recoveringProvider: ChildCoreProvider = {
+    provision: (claw) => provider.provision(claw),
+    inspect: async (claw, options) => absent
+      ? { phase: "attention", health: "offline", absent: true, message: "workspace expired" }
+      : provider.inspect(claw),
+    disable: (claw) => provider.disable(claw),
+    drain: (claw) => provider.drain(claw),
+    remove: (claw) => provider.remove(claw),
+    revokeControl: (claw) => provider.revokeControl(claw),
+  };
+  const registry = new CrabhelmRegistry(createMemoryStateStore<ClawRecord>(), createMemoryStateStore<AuditEvent>());
+  const reconciler = new CrabhelmReconciler(registry, recoveringProvider);
+  const created = await registry.create({ name: "Recoverable", owner: { subject: "email:owner@example.com", label: "Owner", source: "email" } }, "test-admin");
+  await reconciler.reconcileOne(created.id);
+  absent = true;
+  const replacement = await reconciler.reconcileOne(created.id);
+  assert.equal(replacement.observed.phase, "provisioning");
+  assert.equal(replacement.observed.lifecycle, undefined);
+  assert.match(replacement.observed.message, /recreating/u);
+  absent = false;
+  const ready = await reconciler.reconcileOne(created.id);
+  assert.equal(ready.observed.phase, "ready");
+  assert.ok(ready.observed.lifecycle);
+});
+
 test("disable retains provider identity and removal requires typed confirmation", async () => {
   const { registry, reconciler } = fixture();
   const created = await registry.create(
@@ -232,6 +260,78 @@ test("removal never releases a provider resource when child disable is unproven"
   assert.equal(result.observed.phase, "attention");
   assert.equal(result.observed.deletion?.stage, "disable");
   assert.equal(removeCalls, 0);
+});
+
+test("removal releases a provider workspace that has terminally failed", async () => {
+  const registry = new CrabhelmRegistry(
+    createMemoryStateStore<ClawRecord>(),
+    createMemoryStateStore<AuditEvent>(),
+  );
+  const simulator = new SimulatorChildCoreProvider();
+  let failed = false;
+  let removeCalls = 0;
+  const provider: ChildCoreProvider = {
+    provision: (claw) => simulator.provision(claw),
+    inspect: async (claw) => {
+      if (failed) throw operationalError("CRABBOX_WORKSPACE_FAILED", "Crabbox workspace reported failure");
+      return simulator.inspect(claw);
+    },
+    disable: async () => { throw new Error("failed workspaces cannot be disabled"); },
+    drain: async () => ({ drained: true, activeRuns: 0, checkedAt: new Date().toISOString(), message: "drained" }),
+    remove: async () => {
+      removeCalls += 1;
+      return { absent: true, message: "Provider resource confirmed absent" };
+    },
+    revokeControl: async () => ({ removedPairedDevice: false, rejectedPendingRequest: false, alreadyAbsent: true, message: "no pairing" }),
+  };
+  const reconciler = new CrabhelmReconciler(registry, provider, { drainQuietPeriodMs: 0 });
+  const created = await registry.create(
+    { name: "Failed workspace", owner: { subject: "manual:failed", label: "Failed", source: "manual" } },
+    "test-admin",
+  );
+  await reconciler.reconcileOne(created.id);
+  failed = true;
+  await registry.requestRemoval(created.id, "test-admin", "Failed workspace");
+
+  const draining = await reconciler.reconcileOne(created.id);
+  assert.equal(draining.observed.deletion?.stage, "drain");
+  await reconciler.reconcileOne(created.id);
+  const releasable = await reconciler.reconcileOne(created.id);
+  assert.equal(releasable.observed.deletion?.stage, "release");
+  const absent = await reconciler.reconcileOne(created.id);
+  assert.equal(absent.observed.deletion?.stage, "revoke");
+  const deleted = await reconciler.reconcileOne(created.id);
+  assert.equal(deleted.observed.phase, "deleted");
+  assert.equal(removeCalls, 1);
+});
+
+test("provider release confirmation retries the idempotent remove request", async () => {
+  const registry = new CrabhelmRegistry(createMemoryStateStore<ClawRecord>(), createMemoryStateStore<AuditEvent>());
+  const simulator = new SimulatorChildCoreProvider();
+  let removeCalls = 0;
+  const provider: ChildCoreProvider = {
+    provision: (claw) => simulator.provision(claw),
+    inspect: (claw) => simulator.inspect(claw),
+    disable: (claw) => simulator.disable(claw),
+    drain: (claw) => simulator.drain(claw),
+    remove: async () => ({ absent: ++removeCalls >= 2, message: removeCalls >= 2 ? "absent" : "pending" }),
+    revokeControl: (claw) => simulator.revokeControl(claw),
+  };
+  const reconciler = new CrabhelmReconciler(registry, provider, { drainQuietPeriodMs: 0 });
+  const created = await registry.create(
+    { name: "Async release", owner: { subject: "manual:release", label: "Release", source: "manual" } },
+    "test-admin",
+  );
+  await reconciler.reconcileOne(created.id);
+  await registry.requestRemoval(created.id, "test-admin", "Async release");
+  await reconciler.reconcileOne(created.id);
+  await reconciler.reconcileOne(created.id);
+  await reconciler.reconcileOne(created.id);
+  const confirming = await reconciler.reconcileOne(created.id);
+  assert.equal(confirming.observed.deletion?.stage, "confirm");
+  const absent = await reconciler.reconcileOne(created.id);
+  assert.equal(absent.observed.deletion?.stage, "revoke");
+  assert.equal(removeCalls, 2);
 });
 
 test("removal never releases a provider resource while child runs are active", async () => {

@@ -1,6 +1,7 @@
 import type { ChildCoreProvider } from "./providers.js";
 import { childPolicyHash } from "./domain.js";
 import {
+  CrabhelmOperationalError,
   safeOperationalFailure,
   type CrabhelmOperationalErrorCode,
 } from "./errors.js";
@@ -66,7 +67,21 @@ export class CrabhelmReconciler {
       if (claw.observed.deletion) {
         const attemptAt = this.#now().toISOString();
         if (claw.observed.deletion.stage === "disable") {
-          const providerState = await this.#provider.inspect(claw, { reconcileDesired: false });
+          let providerState;
+          try {
+            providerState = await this.#provider.inspect(claw, { reconcileDesired: false });
+          } catch (error) {
+            if (!(error instanceof CrabhelmOperationalError) || error.code !== "CRABBOX_WORKSPACE_FAILED") {
+              throw error;
+            }
+            return await this.#writeObserved(claw, {
+              ...claw.observed,
+              phase: "deleting",
+              health: "offline",
+              message: "Provider reports a failed workspace; central ingress is closed and runtime drain is next",
+              deletion: { ...claw.observed.deletion, stage: "drain", lastAttemptAt: attemptAt },
+            });
+          }
           if (providerState.absent) {
             return await this.#markProviderAbsent(
               claw,
@@ -85,7 +100,15 @@ export class CrabhelmReconciler {
           });
         }
         if (claw.observed.deletion.stage === "drain") {
-          const providerState = await this.#provider.inspect(claw, { reconcileDesired: false });
+          let providerState;
+          try {
+            providerState = await this.#provider.inspect(claw, { reconcileDesired: false });
+          } catch (error) {
+            if (!(error instanceof CrabhelmOperationalError) || error.code !== "CRABBOX_WORKSPACE_FAILED") {
+              throw error;
+            }
+            providerState = { absent: false };
+          }
           if (providerState.absent) {
             return await this.#markProviderAbsent(
               claw,
@@ -143,6 +166,16 @@ export class CrabhelmReconciler {
             phase: "deleting",
             message: result.message,
             deletion: { ...claw.observed.deletion, stage: "confirm", lastAttemptAt: attemptAt },
+          });
+        }
+        if (claw.observed.deletion.stage === "confirm") {
+          const result = await this.#provider.remove(claw);
+          if (result.absent) return await this.#markProviderAbsent(claw, result.message);
+          return await this.#writeObserved(claw, {
+            ...claw.observed,
+            phase: "deleting",
+            message: result.message,
+            deletion: { ...claw.observed.deletion, lastAttemptAt: attemptAt },
           });
         }
         if (claw.observed.deletion.stage === "revoke") {
@@ -211,7 +244,29 @@ export class CrabhelmReconciler {
       }
       const result = await this.#provider.inspect(claw);
       if (result.absent) {
-        throw new Error("owned provider resource is absent");
+        return await this.#writeObserved(
+          claw,
+          {
+            ...claw.observed,
+            generation: 0,
+            phase: "provisioning",
+            health: "offline",
+            message: "Provider resource expired or disappeared; recreating the managed runtime",
+            lifecycle: undefined,
+            controlLink: { ...claw.observed.controlLink, status: "offline", lastSeenAt: undefined },
+            gatewayVersion: undefined,
+            configHash: undefined,
+            probes: undefined,
+            lastSeenAt: undefined,
+          },
+          {
+            actor: "crabhelm-reconciler",
+            action: "claw.recover",
+            outcome: "requested",
+            summary: `${claw.desired.name} provider resource was absent; replacement requested`,
+            generation: claw.desired.generation,
+          },
+        );
       }
       const ready = result.phase === "ready" && result.health === "healthy";
       const policyApplied = result.configHash === childPolicyHash(claw);

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
+import { inferenceProbeCommand } from "../worker/bootstrap.js";
 
 const run = promisify(execFile);
 const bootstrap = path.resolve("deploy/bootstrap-child.sh");
@@ -15,10 +16,12 @@ test("child bootstrap verifies artifacts, allowlists Crabhelm, and strips ambien
   const bin = path.join(root, "bin");
   const plugin = path.join(root, "crabhelm.tgz");
   const slackPlugin = path.join(root, "slack.tgz");
+  const runtimeBridge = path.join(root, "runtime-bridge.mjs");
   const log = path.join(root, "openclaw.log");
   await mkdir(bin);
   await writeFile(plugin, "pinned plugin artifact\n", { mode: 0o600 });
   await writeFile(slackPlugin, "pinned Slack artifact\n", { mode: 0o600 });
+  await writeFile(runtimeBridge, "// pinned runtime bridge\n", { mode: 0o600 });
   await executable(path.join(bin, "openclaw"), `#!/usr/bin/env bash
 printf 'auth=%s/%s argv=' "\${OPENCLAW_GATEWAY_TOKEN+present}" "\${OPENCLAW_GATEWAY_PASSWORD+present}" >>"$CRABHELM_TEST_LOG"
 printf '%q ' "$@" >>"$CRABHELM_TEST_LOG"
@@ -27,6 +30,7 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
   await executable(path.join(bin, "curl"), "#!/usr/bin/env bash\nexit 0\n");
   const digest = createHash("sha256").update(await readFile(plugin)).digest("hex");
   const slackDigest = createHash("sha256").update(await readFile(slackPlugin)).digest("hex");
+  const runtimeBridgeDigest = createHash("sha256").update(await readFile(runtimeBridge)).digest("hex");
 
   await run("/bin/bash", [bootstrap], {
     env: {
@@ -41,6 +45,9 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
       CRABHELM_PLUGIN_SHA256: digest,
       CRABHELM_SLACK_PLUGIN_TARBALL: slackPlugin,
       CRABHELM_SLACK_PLUGIN_SHA256: slackDigest,
+      CRABHELM_RUNTIME_BRIDGE: runtimeBridge,
+      CRABHELM_RUNTIME_BRIDGE_SHA256: runtimeBridgeDigest,
+      CRABHELM_RELEASE_ID: "b".repeat(64),
       CRABHELM_MODEL: "openai/gpt-5.4-mini",
       CRABHELM_SLACK_ENABLED: "true",
       OPENCLAW_GATEWAY_TOKEN: "must-not-reach-openclaw",
@@ -68,15 +75,18 @@ test("child bootstrap rejects a changed plugin before invoking OpenClaw", async 
   const bin = path.join(root, "bin");
   const plugin = path.join(root, "crabhelm.tgz");
   const slackPlugin = path.join(root, "slack.tgz");
+  const runtimeBridge = path.join(root, "runtime-bridge.mjs");
   const log = path.join(root, "openclaw.log");
   await mkdir(bin);
   await writeFile(plugin, "changed artifact\n", { mode: 0o600 });
   await writeFile(slackPlugin, "pinned Slack artifact\n", { mode: 0o600 });
+  await writeFile(runtimeBridge, "// pinned runtime bridge\n", { mode: 0o600 });
   await executable(path.join(bin, "openclaw"), `#!/usr/bin/env bash
 printf 'called\n' >>"$CRABHELM_TEST_LOG"
 `);
   await executable(path.join(bin, "curl"), "#!/usr/bin/env bash\nexit 0\n");
   const slackDigest = createHash("sha256").update(await readFile(slackPlugin)).digest("hex");
+  const runtimeBridgeDigest = createHash("sha256").update(await readFile(runtimeBridge)).digest("hex");
 
   await assert.rejects(
     run("/bin/bash", [bootstrap], {
@@ -90,6 +100,9 @@ printf 'called\n' >>"$CRABHELM_TEST_LOG"
         CRABHELM_PLUGIN_SHA256: "0".repeat(64),
         CRABHELM_SLACK_PLUGIN_TARBALL: slackPlugin,
         CRABHELM_SLACK_PLUGIN_SHA256: slackDigest,
+        CRABHELM_RUNTIME_BRIDGE: runtimeBridge,
+        CRABHELM_RUNTIME_BRIDGE_SHA256: runtimeBridgeDigest,
+        CRABHELM_RELEASE_ID: "b".repeat(64),
       },
     }),
     /plugin tarball digest mismatch/,
@@ -102,10 +115,12 @@ test("child bootstrap supports Web PKI TLS without a pinned certificate", async 
   const bin = path.join(root, "bin");
   const plugin = path.join(root, "crabhelm.tgz");
   const slackPlugin = path.join(root, "slack.tgz");
+  const runtimeBridge = path.join(root, "runtime-bridge.mjs");
   const log = path.join(root, "openclaw.log");
   await mkdir(bin);
   await writeFile(plugin, "pinned plugin artifact\n", { mode: 0o600 });
   await writeFile(slackPlugin, "pinned Slack artifact\n", { mode: 0o600 });
+  await writeFile(runtimeBridge, "// pinned runtime bridge\n", { mode: 0o600 });
   await executable(path.join(bin, "openclaw"), `#!/usr/bin/env bash
 printf '%q ' "$@" >>"$CRABHELM_TEST_LOG"
 printf '\n' >>"$CRABHELM_TEST_LOG"
@@ -113,6 +128,7 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
   await executable(path.join(bin, "curl"), "#!/usr/bin/env bash\nexit 0\n");
   const digest = createHash("sha256").update(await readFile(plugin)).digest("hex");
   const slackDigest = createHash("sha256").update(await readFile(slackPlugin)).digest("hex");
+  const runtimeBridgeDigest = createHash("sha256").update(await readFile(runtimeBridge)).digest("hex");
   await run("/bin/bash", [bootstrap], {
     env: {
       PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
@@ -124,11 +140,75 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
       CRABHELM_PLUGIN_SHA256: digest,
       CRABHELM_SLACK_PLUGIN_TARBALL: slackPlugin,
       CRABHELM_SLACK_PLUGIN_SHA256: slackDigest,
+      CRABHELM_RUNTIME_BRIDGE: runtimeBridge,
+      CRABHELM_RUNTIME_BRIDGE_SHA256: runtimeBridgeDigest,
+      CRABHELM_RELEASE_ID: "b".repeat(64),
     },
   });
   const calls = await readFile(log, "utf8");
   assert.match(calls, /node install .*--tls/);
   assert.doesNotMatch(calls, /--tls-fingerprint/);
+});
+
+test("standalone bootstrap defers the runtime bridge until inference readiness", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "crabhelm-bootstrap-runtime-"));
+  const bin = path.join(root, "bin");
+  const home = path.join(root, "home");
+  const state = path.join(home, ".openclaw");
+  const plugin = path.join(root, "crabhelm.tgz");
+  const slackPlugin = path.join(root, "slack.tgz");
+  const runtimeBridge = path.join(root, "runtime-bridge.mjs");
+  const log = path.join(root, "openclaw.log");
+  await mkdir(bin);
+  await mkdir(state, { recursive: true });
+  await writeFile(plugin, "pinned plugin artifact\n", { mode: 0o600 });
+  await writeFile(slackPlugin, "pinned Slack artifact\n", { mode: 0o600 });
+  await writeFile(runtimeBridge, "// pinned runtime bridge\n", { mode: 0o600 });
+  await writeFile(path.join(state, "crabhelm-runtime.env"), "CRABHELM_CONTROL_URL=https://crabhelm.example.test\nCRABHELM_CHILD_ID=11111111-1111-4111-8111-111111111111\n", { mode: 0o600 });
+  await writeFile(path.join(state, "crabhelm-runtime-token"), "test-runtime-token\n", { mode: 0o600 });
+  await executable(path.join(bin, "openclaw"), `#!/usr/bin/env bash
+printf '%q ' "$@" >>"$CRABHELM_TEST_LOG"
+printf '\n' >>"$CRABHELM_TEST_LOG"
+`);
+  await executable(path.join(bin, "curl"), "#!/usr/bin/env bash\nexit 0\n");
+  const digest = createHash("sha256").update(await readFile(plugin)).digest("hex");
+  const slackDigest = createHash("sha256").update(await readFile(slackPlugin)).digest("hex");
+  const runtimeBridgeDigest = createHash("sha256").update(await readFile(runtimeBridge)).digest("hex");
+
+  const bootstrapEnv = {
+    PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+    HOME: home,
+    CRABHELM_TEST_LOG: log,
+    CRABBOX_ADAPTER_ROOT_SESSION_ID: "11111111-1111-4111-8111-111111111111",
+    CRABHELM_STANDALONE: "true",
+    CRABHELM_PLUGIN_TARBALL: plugin,
+    CRABHELM_PLUGIN_SHA256: digest,
+    CRABHELM_SLACK_PLUGIN_TARBALL: slackPlugin,
+    CRABHELM_SLACK_PLUGIN_SHA256: slackDigest,
+    CRABHELM_RUNTIME_BRIDGE: runtimeBridge,
+    CRABHELM_RUNTIME_BRIDGE_SHA256: runtimeBridgeDigest,
+    CRABHELM_RELEASE_ID: "b".repeat(64),
+  };
+  await run("/bin/bash", [bootstrap], { env: bootstrapEnv });
+  await run("/bin/bash", [bootstrap], { env: bootstrapEnv });
+
+  const launcher = path.join(home, ".local/share/crabhelm/runtime/start-runtime-bridge.sh");
+  assert.equal((await stat(launcher)).mode & 0o777, 0o500);
+  const launcherSource = await readFile(launcher, "utf8");
+  assert.match(launcherSource, /CRABHELM_RUNTIME_TOKEN_FILE=/u);
+  assert.doesNotMatch(launcherSource, /flock|lock_dir/u);
+  assert.doesNotMatch(launcherSource, /rm -f "\$runtime_token_file"/u);
+  assert.equal(await readFile(path.join(state, "crabhelm-runtime-token"), "utf8"), "test-runtime-token\n");
+  await assert.rejects(stat(path.join(state, "crabhelm-runtime-bridge.pid")), /ENOENT/u);
+  await run("/bin/bash", ["-n", launcher]);
+  const bootstrapSource = await readFile(bootstrap, "utf8");
+  assert.ok(
+    bootstrapSource.lastIndexOf("prepare_runtime_bridge") < bootstrapSource.indexOf('printf \'%s\\n\' "$release_id"'),
+    "release readiness must be written only after the runtime launcher is executable",
+  );
+  const probe = inferenceProbeCommand("openai/gpt-5.5");
+  assert.match(probe, /start-runtime-bridge\.sh/u);
+  assert.match(probe, /if \/bin\/bash \$HOME\/\.local\/share\/crabhelm\/runtime\/start-runtime-bridge\.sh; then[\s\S]*crabhelm-inference-ready/u);
 });
 
 async function executable(file: string, contents: string): Promise<void> {

@@ -39,11 +39,10 @@
           </dl>
         </section>
 
-        <button class="operator" id="operator-button" title="Crabhelm operator connection">
-          <span class="operator-avatar">OP</span>
-          <span><strong>Crabhelm operator</strong><small id="operator-state">Connected</small></span>
-          <b>···</b>
-        </button>
+        <div class="operator" id="operator-button" title="Authenticated by Cloudflare Access">
+          <span class="operator-avatar">ID</span>
+          <span><strong>OpenClaw identity</strong><small id="operator-state">Access verified</small></span>
+        </div>
       </aside>
 
       <main class="main">
@@ -85,8 +84,8 @@
           <label><span>Identity source</span><select name="ownerSource"><option value="github">GitHub</option><option value="slack">Slack</option><option value="email">Email</option><option value="manual">Manual</option></select></label>
           <label><span>Deployment target</span><select name="deploymentTarget" data-deployment-target></select></label>
           <label><span>Appliance profile</span><select data-deployment-profile disabled><option>OpenClaw Core · Fixed by target</option></select></label>
-          <label class="wide"><span>Inference model</span><select name="model"><option value="openai/gpt-5.5">OpenAI · GPT-5.5</option><option value="openai/gpt-5.4-mini">OpenAI · GPT-5.4 mini</option><option value="anthropic/claude-sonnet-4.6">Anthropic · Claude Sonnet 4.6</option></select></label>
-          <label class="wide"><span>Slack connection</span><select name="slackEnabled"><option value="false">Not configured</option><option value="true">Use credentials installed by child profile</option></select></label>
+          <label class="wide"><span>Inference model</span><select name="model"><option value="openai/gpt-5.5">OpenAI · GPT-5.5</option><option value="openai/gpt-5.4-mini">OpenAI · GPT-5.4 mini</option></select></label>
+          <label class="wide"><span>Slack ingress</span><select name="slackEnabled"><option value="false">Cloudflare-routed after persona binding</option></select></label>
           <label><span>Direct messages</span><select name="dmPolicy"><option value="pairing">Native pairing</option><option value="allowlist">Existing allowlist only</option><option value="disabled">Disabled</option></select></label>
           <label><span>Group visibility</span><select name="groupPolicy"><option value="allowlist">Allowlisted groups</option><option value="disabled">No groups</option></select></label>
           <label class="wide"><span>Child log level</span><select name="logLevel"><option value="info">Info · metadata policy</option><option value="warn">Warnings</option><option value="error">Errors only</option><option value="debug">Debug · higher volume</option></select></label>
@@ -103,7 +102,7 @@
           <button class="icon-button" type="button" data-close-dialog="template-dialog" aria-label="Close">×</button>
         </div>
         <div class="template-scope">
-          <div><span class="scope-index">A</span><p><strong>Managed fields</strong>Inference, Slack enabled state, native DM/group access, and child log level</p></div>
+          <div><span class="scope-index">A</span><p><strong>Managed fields</strong>Inference, native DM/group access, and child log level</p></div>
           <div><span class="scope-index safe">B</span><p><strong>Never changes</strong>Credentials, OAuth, pairing, sessions, memory, agent directories</p></div>
         </div>
         <div class="form-grid">
@@ -128,9 +127,9 @@
         <div class="form-grid">
           <label><span>Policy name</span><input name="name" required maxlength="80" placeholder="Maintainer core" /></label>
           <label><span>Description</span><input name="description" maxlength="240" placeholder="Governed maintainer defaults" /></label>
-          <label><span>Primary model</span><select name="model"><option value="openai/gpt-5.5">OpenAI · GPT-5.5</option><option value="openai/gpt-5.4-mini">OpenAI · GPT-5.4 mini</option><option value="anthropic/claude-sonnet-4.6">Anthropic · Claude Sonnet 4.6</option></select></label>
+          <label><span>Primary model</span><select name="model"><option value="openai/gpt-5.5">OpenAI · GPT-5.5</option><option value="openai/gpt-5.4-mini">OpenAI · GPT-5.4 mini</option></select></label>
           <label><span>Fallback models</span><input name="fallbackModels" placeholder="openai/gpt-5.4-mini" /></label>
-          <label><span>Slack connection</span><select name="slackEnabled"><option value="false">Disabled</option><option value="true">Enabled with child-local SecretRefs</option></select></label>
+          <label><span>Slack ingress</span><select name="slackEnabled"><option value="false">Cloudflare-routed</option></select></label>
           <label><span>Direct-message visibility</span><select name="dmPolicy"><option value="pairing">Visible after native pairing</option><option value="allowlist">Existing allowlist only</option><option value="disabled">No direct messages</option></select></label>
           <label><span>Group visibility</span><select name="groupPolicy"><option value="allowlist">Allowlisted groups</option><option value="disabled">No groups</option></select></label>
           <label><span>Child log level</span><select name="logLevel"><option value="info">Info · metadata projection only</option><option value="warn">Warnings</option><option value="error">Errors only</option><option value="debug">Debug · higher volume</option></select></label>
@@ -151,8 +150,8 @@
         <div class="form-grid batch-options">
           <label><span>Deployment target</span><select name="deploymentTarget" data-deployment-target></select></label>
           <label><span>Appliance profile</span><select data-deployment-profile disabled><option>OpenClaw Core · Fixed by target</option></select></label>
-          <label><span>Inference model</span><select name="model"><option value="openai/gpt-5.5">OpenAI · GPT-5.5</option><option value="openai/gpt-5.4-mini">OpenAI · GPT-5.4 mini</option><option value="anthropic/claude-sonnet-4.6">Anthropic · Claude Sonnet 4.6</option></select></label>
-          <label class="wide"><span>Slack connection</span><select name="slackEnabled"><option value="false">Not configured</option><option value="true">Use credentials installed by child profile</option></select></label>
+          <label><span>Inference model</span><select name="model"><option value="openai/gpt-5.5">OpenAI · GPT-5.5</option><option value="openai/gpt-5.4-mini">OpenAI · GPT-5.4 mini</option></select></label>
+          <label class="wide"><span>Slack ingress</span><select name="slackEnabled"><option value="false">Cloudflare-routed after persona binding</option></select></label>
           <label><span>Direct messages</span><select name="dmPolicy"><option value="pairing">Native pairing</option><option value="allowlist">Existing allowlist only</option><option value="disabled">Disabled</option></select></label>
           <label><span>Group visibility</span><select name="groupPolicy"><option value="allowlist">Allowlisted groups</option><option value="disabled">No groups</option></select></label>
           <label class="wide"><span>Child log level</span><select name="logLevel"><option value="info">Info · metadata policy</option><option value="warn">Warnings</option><option value="error">Errors only</option><option value="debug">Debug · higher volume</option></select></label>
@@ -179,23 +178,14 @@
         <div class="form-grid batch-options">
           <label><span>Deployment target</span><select name="deploymentTarget" data-deployment-target></select></label>
           <label><span>Appliance profile</span><select data-deployment-profile disabled><option>OpenClaw Core · Fixed by target</option></select></label>
-          <label><span>Inference model</span><select name="model"><option value="openai/gpt-5.5">OpenAI · GPT-5.5</option><option value="openai/gpt-5.4-mini">OpenAI · GPT-5.4 mini</option><option value="anthropic/claude-sonnet-4.6">Anthropic · Claude Sonnet 4.6</option></select></label>
-          <label class="wide"><span>Slack connection</span><select name="slackEnabled"><option value="false">Not configured</option><option value="true">Use credentials installed by child profile</option></select></label>
+          <label><span>Inference model</span><select name="model"><option value="openai/gpt-5.5">OpenAI · GPT-5.5</option><option value="openai/gpt-5.4-mini">OpenAI · GPT-5.4 mini</option></select></label>
+          <label class="wide"><span>Slack ingress</span><select name="slackEnabled"><option value="false">Cloudflare-routed after persona binding</option></select></label>
           <label><span>Direct messages</span><select name="dmPolicy"><option value="pairing">Native pairing</option><option value="allowlist">Existing allowlist only</option><option value="disabled">Disabled</option></select></label>
           <label><span>Group visibility</span><select name="groupPolicy"><option value="allowlist">Allowlisted groups</option><option value="disabled">No groups</option></select></label>
           <label class="wide"><span>Child log level</span><select name="logLevel"><option value="info">Info · metadata policy</option><option value="warn">Warnings</option><option value="error">Errors only</option><option value="debug">Debug · higher volume</option></select></label>
         </div>
-        <div class="invariant-note"><b>Existing permissions remain native.</b><span>Import creates desired child cores. Recipients still cannot chat until their child’s Slack connection and native DM pairing are complete.</span></div>
+        <div class="invariant-note"><b>Identity stays explicit.</b><span>Import creates desired child cores. Slack requests route only after an administrator binds a persona to a workspace and channel.</span></div>
         <div class="modal-actions"><button class="button ghost" type="button" data-close-dialog="github-dialog">Cancel</button><button class="button" type="button" id="github-preview-button">Preview members</button><button class="button primary" id="github-import-button" value="default" disabled>Import selected</button></div>
-      </form>
-    </dialog>
-
-    <dialog class="modal auth-modal" id="auth-dialog">
-      <form method="dialog" id="auth-form">
-        <div class="modal-head"><div><p class="eyebrow">Cloud control plane</p><h2>Connect operator</h2></div></div>
-        <p class="modal-copy">Use the Crabhelm operator token. It authenticates control-plane requests and is never sent to agent machines.</p>
-        <label><span>Operator token</span><input name="token" type="password" autocomplete="off" required /></label>
-        <div class="modal-actions"><button class="button primary" value="default">Connect</button></div>
       </form>
     </dialog>
 
@@ -209,12 +199,14 @@
           <label><span>Runtime claw</span><select name="clawId" required></select></label>
           <label><span>Actor policy</span><select name="actorMode"><option value="invoker">Invoker</option><option value="service">Managed service</option><option value="invoker-with-service-fallback">Invoker with service fallback</option></select></label>
           <label><span>Service actor</span><select name="servicePrincipalId"><option value="">None</option></select></label>
+          <label><span>Slack workspace ID</span><input name="slackWorkspaceId" maxlength="100" placeholder="T01234567" /></label>
+          <label><span>Slack channel ID</span><input name="slackChannelId" maxlength="100" placeholder="C01234567" /></label>
           <label class="wide"><span>Capabilities</span><div id="persona-capabilities" class="check-grid"></div></label>
           <label class="wide"><span>Identity</span><textarea name="identity" rows="3" maxlength="16384" placeholder="Who this teammate is"></textarea></label>
           <label class="wide"><span>Operating principles</span><textarea name="soul" rows="3" maxlength="16384" placeholder="How this teammate behaves"></textarea></label>
           <label class="wide"><span>Managed instructions</span><textarea name="agents" rows="4" maxlength="32768" placeholder="What this teammate may do"></textarea></label>
         </div>
-        <div class="invariant-note"><b>Authority is platform policy.</b><span>Profile assistants always act as the invoker. Shared service authority requires an explicit service principal and compatible connection.</span></div>
+        <div class="invariant-note"><b>Authority is platform policy.</b><span>Profile assistants always act as the invoker. Slack routing requires both workspace and channel IDs. Shared service authority requires an explicit service principal and compatible connection.</span></div>
         <div class="modal-actions"><button class="button ghost" type="button" data-close-dialog="persona-dialog">Cancel</button><button class="button primary" value="default">Create persona</button></div>
       </form>
     </dialog>
@@ -230,20 +222,6 @@
         </div>
         <div class="invariant-note"><b>Two-step governance.</b><span>Submission creates a draft. An administrator must approve it before any persona can receive it.</span></div>
         <div class="modal-actions"><button class="button ghost" type="button" data-close-dialog="skill-dialog">Cancel</button><button class="button primary" value="default">Submit draft</button></div>
-      </form>
-    </dialog>
-
-    <dialog class="modal" id="connection-dialog">
-      <form method="dialog" id="connection-form">
-        <div class="modal-head"><div><p class="eyebrow">Encrypted OAuth vault</p><h2>Connect GitHub</h2></div><button class="icon-button" type="button" data-close-dialog="connection-dialog" aria-label="Close">×</button></div>
-        <p class="modal-copy">The credential is encrypted with AES-GCM and stored outside agent runtimes. Agents receive only short-lived, action-bound grants.</p>
-        <div class="form-grid">
-          <label><span>Principal</span><select name="principalId" required></select></label>
-          <label><span>Label</span><input name="label" required maxlength="120" placeholder="Work GitHub" /></label>
-          <label class="wide"><span>Capability scopes</span><div class="check-grid"><label><input type="checkbox" name="scope" value="repo:read" checked /> Repository read</label><label><input type="checkbox" name="scope" value="repo:write" /> Issue comments</label></div></label>
-          <label class="wide"><span>GitHub token</span><input name="secret" type="password" autocomplete="off" required maxlength="16384" /></label>
-        </div>
-        <div class="modal-actions"><button class="button ghost" type="button" data-close-dialog="connection-dialog">Cancel</button><button class="button primary" value="default">Encrypt and connect</button></div>
       </form>
     </dialog>
 

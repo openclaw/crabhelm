@@ -7,7 +7,6 @@ const state = {
   search: "",
   filter: "all",
   selectedId: null,
-  token: "",
   batchResult: null,
   githubPreview: null,
   policyPreview: null,
@@ -21,10 +20,8 @@ const bulkDialog = document.querySelector("#bulk-dialog");
 const githubDialog = document.querySelector("#github-dialog");
 const templateDialog = document.querySelector("#template-dialog");
 const policyDialog = document.querySelector("#policy-dialog");
-const authDialog = document.querySelector("#auth-dialog");
 const personaDialog = document.querySelector("#persona-dialog");
 const skillDialog = document.querySelector("#skill-dialog");
-const connectionDialog = document.querySelector("#connection-dialog");
 
 const viewMeta = {
   fleet: ["Fleet composition / Cloud control", "Fleet"],
@@ -44,7 +41,6 @@ document.querySelector("#new-button").addEventListener("click", () => openCreate
 document.querySelector("#bulk-button").addEventListener("click", () => openCreateDialog(bulkDialog));
 document.querySelector("#github-button").addEventListener("click", openGithubDialog);
 document.querySelector("#template-button").addEventListener("click", openTemplateDialog);
-document.querySelector("#operator-button").addEventListener("click", () => authDialog.showModal());
 document.querySelector("#new-form").addEventListener("submit", createClaw);
 document.querySelector("#bulk-form").addEventListener("submit", createMaintainers);
 document.querySelector("#github-form").addEventListener("submit", importGithubMembers);
@@ -64,10 +60,8 @@ document.querySelector("#template-targets").addEventListener("change", () => {
   invalidatePolicyPreview();
 });
 document.querySelector("#policy-canary").addEventListener("change", invalidatePolicyPreview);
-document.querySelector("#auth-form").addEventListener("submit", connectOperator);
 document.querySelector("#persona-form").addEventListener("submit", createPersona);
 document.querySelector("#skill-form").addEventListener("submit", createSkill);
-document.querySelector("#connection-form").addEventListener("submit", createConnection);
 document.querySelectorAll("[data-deployment-target]").forEach((select) => {
   select.addEventListener("change", () => syncDeploymentProfile(select.closest("form")));
 });
@@ -86,13 +80,13 @@ loadState();
 async function loadState(showNotice = false) {
   try {
     state.data = await request("/state");
+    const viewer = (state.data.principals || []).find((principal) => principal.id === state.data.viewer?.principalId);
+    document.querySelector("#operator-state").textContent = viewer ? `${viewer.label} · ${state.data.viewer.roles.join(", ")}` : "Access verified";
     syncRuntimeActions();
     render();
     if (showNotice) toast("Fleet state refreshed");
   } catch (error) {
-    if (error.message !== "authentication required") {
-      renderError(error.message);
-    }
+    renderError(error.message);
   }
 }
 
@@ -100,12 +94,10 @@ async function request(path, options = {}) {
   const headers = new Headers(options.headers || {});
   headers.set("accept", "application/json");
   if (options.body) headers.set("content-type", "application/json");
-  if (state.token) headers.set("authorization", `Bearer ${state.token}`);
   const response = await fetch(`${apiBase}${path}`, { ...options, headers });
   if (response.status === 401) {
     document.querySelector("#operator-state").textContent = "Authentication required";
-    if (!authDialog.open) authDialog.showModal();
-    throw new Error("authentication required");
+    throw new Error("Cloudflare Access authentication required. Reload to sign in through OpenClaw.");
   }
   const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
   if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
@@ -262,7 +254,8 @@ function renderDeployments() {
   const runtime = state.data.runtime;
   const admissionOpen = runtime.targets.filter((target) => target.admissionOpen).length;
   const allocated = active.filter((claw) => claw.observed.lifecycle?.workspaceId).length;
-  root.innerHTML = `${renderRuntimeBanner()}<section class="metrics">${metric("Provider", label(runtime.mode))}${metric("Targets", runtime.targets.length)}${metric("Admission open", admissionOpen, admissionOpen === runtime.targets.length ? "good" : "warn")}${metric(runtime.mode === "simulator" ? "Simulated records" : "Allocated", allocated, allocated ? "good" : "")}${metric("Node links", active.filter((c) => c.observed.controlLink.status === "paired").length, "good")}${metric("Default", runtime.defaultTarget)}</section>
+  const integrations = state.data.integrations || {};
+  root.innerHTML = `${renderRuntimeBanner()}<section class="metrics">${metric("Provider", label(runtime.mode))}${metric("Targets", runtime.targets.length)}${metric("Admission open", admissionOpen, admissionOpen === runtime.targets.length ? "good" : "warn")}${metric(runtime.mode === "simulator" ? "Simulated records" : "Allocated", allocated, allocated ? "good" : "")}${metric("Runtime bridges", Object.values(state.data.runtimeStatuses || {}).filter((status) => status.connected > 0).length, integrations.runtimeBridge ? "good" : "warn")}${metric("Slack ingress", integrations.slack ? "configured" : "missing", integrations.slack ? "good" : "warn")}${metric("GitHub OAuth", integrations.githubOAuth ? "configured" : "missing", integrations.githubOAuth ? "good" : "warn")}${metric("Access", integrations.cloudflareAccess ? "verified" : "missing", integrations.cloudflareAccess ? "good" : "warn")}</section>
     <section class="section-head"><div><h2>Placement targets</h2><p>Each target is an administrator-pinned deployment adapter and appliance profile. Crabbox is the first adapter; additional providers can be added without relocating Crabhelm.</p></div></section>
     <section class="panel" style="margin-top:12px">
       ${runtime.targets.map((target, index) => {
@@ -302,7 +295,7 @@ function renderAccess() {
   const principals = new Map((state.data.principals || []).map((item) => [item.id, item]));
   const pending = confirmations.filter((item) => item.status === "pending");
   root.innerHTML = `${renderRuntimeBanner()}<section class="metrics">${metric("Connections", connections.filter((c) => c.status === "active").length, "good")}${metric("Pending confirmation", pending.length, pending.length ? "warn" : "")}${metric("Issued calls", (state.data.invocations || []).length)}${metric("Active secrets in runtimes", 0, "good")}</section>
-    <section class="section-head"><div><h2>OAuth connections</h2><p>Encrypted at rest. Durable grants stay in the vault; tool wrappers decrypt only for a signed invocation.</p></div><button class="button primary" data-new-connection>Connect GitHub</button></section>
+    <section class="section-head"><div><h2>OAuth connections</h2><p>Encrypted at rest. Durable grants stay in the vault; tool wrappers decrypt only for a signed invocation.</p></div><button class="button primary" data-connect-github>Connect GitHub</button></section>
     <section class="governance-grid">${connections.length ? connections.map((connection) => `<article class="governance-card"><div class="card-kicker"><span class="status ${connection.status === "active" ? "good" : "bad"}">${escapeHtml(connection.status)}</span><code>${escapeHtml(connection.provider)}</code></div><h3>${escapeHtml(connection.label)}</h3><p>${escapeHtml(principals.get(connection.principalId)?.label || connection.principalId)}</p><dl class="definition-list compact"><div><dt>Scopes</dt><dd>${escapeHtml(connection.scopes.join(", "))}</dd></div><div><dt>Vault</dt><dd>encrypted envelope</dd></div></dl>${connection.status === "active" ? `<button class="button small" data-revoke-connection="${escapeAttr(connection.id)}">Revoke</button>` : ""}</article>`).join("") : '<div class="empty"><h3>No OAuth connections</h3><p>Connect a principal before it can invoke provider tools.</p></div>'}</section>
     <section class="section-head"><div><h2>Confirmation queue</h2><p>Action summary, requester, actor, target, and exact argument digest are bound together.</p></div></section>
     <section class="activity-list">${pending.length ? pending.map((item) => `<article class="event confirmation-row"><time>${escapeHtml(relativeTime(item.createdAt))}</time><span class="actor">${escapeHtml(principals.get(item.requesterId)?.label || item.requesterId)}</span><div><strong>${escapeHtml(item.summary)}</strong><p>${escapeHtml(item.target)} · ${escapeHtml(item.argumentsDigest.slice(0, 12))}</p></div><span><button class="button small" data-deny-confirmation="${escapeAttr(item.id)}">Deny</button> <button class="button small primary" data-approve-confirmation="${escapeAttr(item.id)}">Approve</button></span></article>`).join("") : '<div class="empty"><h3>No pending confirmations</h3></div>'}</section>`;
@@ -311,7 +304,10 @@ function renderAccess() {
 function handleViewClick(event) {
   if (event.target.closest("[data-new-persona]")) return openPersonaDialog();
   if (event.target.closest("[data-new-skill]")) return skillDialog.showModal();
-  if (event.target.closest("[data-new-connection]")) return openConnectionDialog();
+  if (event.target.closest("[data-connect-github]")) {
+    location.assign(`${apiBase}/oauth/github/start`);
+    return;
+  }
   const approveSkillId = event.target.closest("[data-approve-skill]")?.dataset.approveSkill;
   if (approveSkillId) return mutate(`/skills/${encodeURIComponent(approveSkillId)}/approve`, "Skill approved");
   const revokeConnectionId = event.target.closest("[data-revoke-connection]")?.dataset.revokeConnection;
@@ -380,7 +376,6 @@ function openDrawer(id) {
   renderDrawer(claw);
   drawer.classList.add("open");
   drawer.setAttribute("aria-hidden", "false");
-  void loadPairingQueue(id);
 }
 
 function closeDrawer() {
@@ -396,6 +391,8 @@ function renderDrawer(claw) {
   const drift = claw.desired.generation !== claw.observed.generation;
   const slackProbe = claw.observed.probes?.slack;
   const modelProbe = claw.observed.probes?.model;
+  const runtimeStatus = state.data.runtimeStatuses?.[claw.id] || { connected: 0, pending: 0, running: 0, awaitingDelivery: 0 };
+  const slackBindings = (state.data.personas || []).filter((persona) => persona.clawId === claw.id).flatMap((persona) => persona.bindings || []).filter((binding) => binding.surface === "slack");
   drawerContent.innerHTML = `<header class="drawer-head"><div class="drawer-head-row"><div><p class="eyebrow">Child core / ${escapeHtml(claw.desired.slug)}</p><h2>${escapeHtml(claw.desired.name)}</h2><span class="status ${tone}">${escapeHtml(phaseLabel(phase))}${drift ? " · drifted" : ""}</span></div><button class="icon-button" data-close-drawer aria-label="Close">×</button></div></header>
     <div class="drawer-body">
       <section class="detail-block"><h3>Readiness facets</h3><div class="detail-card readiness-list">
@@ -405,6 +402,8 @@ function renderDrawer(claw) {
         ${readinessFacet("Managed policy", claw.observed.generation === claw.desired.generation && claw.observed.configHash ? "applied" : "drifted", `g${claw.observed.generation} / desired g${claw.desired.generation}`)}
         ${readinessFacet("Model authentication", modelProbe?.status || "pending", modelProbe ? `${modelProbe.configuredModel} · ${modelProbe.liveInferenceProbe ? "live inference probed" : "auth metadata only"}${modelProbe.missingProviders.length ? ` · missing ${modelProbe.missingProviders.join(", ")}` : ""}` : "Waiting for child model-auth status")}
         ${readinessFacet("Child log redaction", claw.observed.probes ? claw.observed.probes.diagnostics.redaction === "off" ? "warning" : "configured" : "pending", claw.observed.probes ? `Child setting: ${claw.observed.probes.diagnostics.redaction}; Crabhelm control-plane projection never stores content` : "Waiting for child diagnostics")}
+        ${readinessFacet("Outbound runtime bridge", runtimeStatus.connected > 0 ? "connected" : "offline", `${runtimeStatus.connected} connected · ${runtimeStatus.pending} queued · ${runtimeStatus.running} running · ${runtimeStatus.awaitingDelivery} awaiting delivery`)}
+        ${readinessFacet("Slack persona routing", slackBindings.length ? "configured" : "not requested", slackBindings.length ? `${slackBindings.length} administrator-approved binding${slackBindings.length === 1 ? "" : "s"}` : "Bind a persona to a Slack workspace and channel")}
         ${readinessFacet("Slack connection", !claw.desired.channels.slack.enabled ? "not requested" : !claw.desired.enabled ? "disabled" : slackProbe?.status || "pending", !claw.desired.channels.slack.enabled ? "No Slack connection desired" : !claw.desired.enabled ? "Connection configured; all child ingress disabled" : slackProbe ? `${slackProbe.accountCount} account${slackProbe.accountCount === 1 ? "" : "s"} · ${slackProbe.connected ? "connected" : "not connected"}${slackProbe.lastError ? ` · ${slackProbe.lastError}` : ""}` : "Waiting for native Slack live probe")}
         ${readinessFacet("Approved Slack user", claw.observed.userAccess?.status || "none", claw.observed.userAccess ? claw.observed.userAccess.label || claw.observed.userAccess.subjectId : claw.desired.channels.slack.enabled ? "Waiting for native Slack DM pairing" : "Enable the child Slack connection before pairing")}
       </div></section>
@@ -427,7 +426,7 @@ function renderDrawer(claw) {
         ${ownership("05", "Deployment owner", state.data.runtime.mode === "simulator" ? "Simulator" : "Crabbox", `${claw.desired.deployment.target} · ${claw.desired.deployment.region || "region unset"} · ${claw.desired.deployment.profile}`)}
         ${ownership("06", "Inference auth", claw.desired.inference.authRef || "child-local", claw.desired.inference.model)}
       </div></section>
-      <section class="detail-block"><h3>Slack pairing queue</h3><div class="detail-card" id="pairing-queue"><p class="queue-note">Loading native child pairing requests…</p></div></section>
+      <section class="detail-block"><h3>Cloudflare-routed Slack</h3><div class="detail-card"><p class="queue-note">Slack terminates at Cloudflare. The central app resolves requester identity and persona policy, then the child pulls the encrypted turn over its outbound runtime bridge.</p></div></section>
       <section class="detail-block"><h3>Edit desired state</h3><div class="detail-card"><form id="edit-claw-form" class="drawer-form">
         <label><span>Name</span><input name="name" maxlength="80" required value="${escapeAttr(claw.desired.name)}" /></label>
         <label><span>Model</span><select name="model">${modelOptions(claw.desired.inference.model)}</select></label>
@@ -446,36 +445,13 @@ function ownership(index, title, value, detail) {
 }
 
 function readinessFacet(title, status, detail) {
-  const good = ["observed", "paired", "ready", "healthy", "applied", "enabled"].includes(status);
+  const good = ["observed", "paired", "ready", "healthy", "applied", "enabled", "connected", "configured"].includes(status);
   const neutral = ["not requested", "disabled"].includes(status);
   return `<div class="readiness-row"><i class="${good ? "good" : neutral ? "neutral" : "warn"}"></i><span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(detail)}</small></span><b>${escapeHtml(status)}</b></div>`;
 }
 
 async function handleDrawerClick(event) {
   if (event.target.closest("[data-close-drawer]")) return closeDrawer();
-  const pairingButton = event.target.closest("[data-pairing-code]");
-  if (pairingButton && state.selectedId) {
-    try {
-      pairingButton.disabled = true;
-      await request(`/claws/${encodeURIComponent(state.selectedId)}/pairing/approve`, {
-        method: "POST",
-        body: JSON.stringify({
-          channel: "slack",
-          code: pairingButton.dataset.pairingCode,
-          ...(pairingButton.dataset.accountId
-            ? { accountId: pairingButton.dataset.accountId }
-            : {}),
-        }),
-      });
-      toast("Slack user paired through the child’s native allowlist");
-      await loadState();
-      if (state.selectedId) openDrawer(state.selectedId);
-    } catch (error) {
-      pairingButton.disabled = false;
-      toast(error.message, true);
-    }
-    return;
-  }
   const action = event.target.closest("[data-detail-action]")?.dataset.detailAction;
   if (!action || !state.selectedId) return;
   try {
@@ -510,25 +486,6 @@ async function handleDrawerClick(event) {
   }
 }
 
-async function loadPairingQueue(id) {
-  const container = document.querySelector("#pairing-queue");
-  if (!container || state.selectedId !== id) return;
-  const claw = state.data.claws.find((item) => item.id === id);
-  if (!claw?.desired.channels.slack.enabled) {
-    container.innerHTML = '<p class="queue-note">Slack is not enabled in desired state. Install child-local credentials and enable the connection before pairing a user.</p>';
-    return;
-  }
-  try {
-    const result = await request(`/claws/${encodeURIComponent(id)}/pairing?channel=slack`);
-    if (state.selectedId !== id) return;
-    container.innerHTML = result.requests.length
-      ? result.requests.map((item) => `<div class="pairing-row"><span><strong>${escapeHtml(item.label || item.id)}</strong><small>${escapeHtml(item.accountId || "default account")} · ${escapeHtml(relativeTime(item.createdAt))}</small></span><button class="button small" data-pairing-code="${escapeAttr(item.code)}" ${item.accountId ? `data-account-id="${escapeAttr(item.accountId)}"` : ""}>Approve ${escapeHtml(item.code)}</button></div>`).join("")
-      : '<p class="queue-note">No pending Slack DMs. The intended user must message the child first to receive a native pairing code.</p>';
-  } catch (error) {
-    container.innerHTML = `<p class="queue-note">${escapeHtml(error.message)}</p>`;
-  }
-}
-
 async function createClaw(event) {
   event.preventDefault();
   const formElement = event.currentTarget;
@@ -541,7 +498,7 @@ async function createClaw(event) {
       owner: { subject: form.get("ownerSubject"), label: form.get("ownerLabel"), source: form.get("ownerSource") },
       deployment: deploymentSpec(form.get("deploymentTarget")),
       inference: { model: form.get("model") },
-      slack: { enabled: form.get("slackEnabled") === "true", mode: "socket" },
+      slack: { enabled: false, mode: "socket" },
       access: { dmPolicy: form.get("dmPolicy"), groupPolicy: form.get("groupPolicy") },
       observability: { logLevel: form.get("logLevel") },
     };
@@ -579,7 +536,7 @@ async function createMaintainers(event) {
     const batchOptions = {
       deploymentTarget: String(form.get("deploymentTarget")),
       model: String(form.get("model")),
-      slackEnabled: String(form.get("slackEnabled")),
+      slackEnabled: "false",
       dmPolicy: String(form.get("dmPolicy")),
       groupPolicy: String(form.get("groupPolicy")),
       logLevel: String(form.get("logLevel")),
@@ -589,7 +546,7 @@ async function createMaintainers(event) {
       owner: { subject: `manual:github-handle:${handle}`, label: `@${handle}`, source: "manual" },
       deployment: deploymentSpec(batchOptions.deploymentTarget),
       inference: { model: batchOptions.model },
-      slack: { enabled: batchOptions.slackEnabled === "true", mode: "socket" },
+      slack: { enabled: false, mode: "socket" },
       access: { dmPolicy: batchOptions.dmPolicy, groupPolicy: batchOptions.groupPolicy },
       observability: { logLevel: batchOptions.logLevel },
     }));
@@ -745,7 +702,7 @@ async function importGithubMembers(event) {
   const batchOptions = {
     deploymentTarget: String(form.get("deploymentTarget")),
     model: String(form.get("model")),
-    slackEnabled: String(form.get("slackEnabled")),
+    slackEnabled: "false",
     dmPolicy: String(form.get("dmPolicy")),
     groupPolicy: String(form.get("groupPolicy")),
     logLevel: String(form.get("logLevel")),
@@ -753,7 +710,7 @@ async function importGithubMembers(event) {
   const createOptions = {
     target: batchOptions.deploymentTarget,
     model: batchOptions.model,
-    slackEnabled: batchOptions.slackEnabled === "true",
+    slackEnabled: false,
     dmPolicy: batchOptions.dmPolicy,
     groupPolicy: batchOptions.groupPolicy,
     logLevel: batchOptions.logLevel,
@@ -942,7 +899,7 @@ function openPolicyDialog(policyId) {
   if (latest) {
     form.elements.namedItem("model").value = latest.spec.inference.model;
     form.elements.namedItem("fallbackModels").value = latest.spec.inference.fallbackModels.join(", ");
-    form.elements.namedItem("slackEnabled").value = String(latest.spec.slackEnabled);
+    form.elements.namedItem("slackEnabled").value = "false";
     form.elements.namedItem("dmPolicy").value = latest.spec.access.dmPolicy;
     form.elements.namedItem("groupPolicy").value = latest.spec.access.groupPolicy;
     form.elements.namedItem("logLevel").value = latest.spec.observability.logLevel;
@@ -965,7 +922,7 @@ async function savePolicy(event) {
     description: String(form.get("description") || ""),
     spec: {
       inference: { model: String(form.get("model")), fallbackModels },
-      slackEnabled: form.get("slackEnabled") === "true",
+      slackEnabled: false,
       access: { dmPolicy: String(form.get("dmPolicy")), groupPolicy: String(form.get("groupPolicy")) },
       observability: { logLevel: String(form.get("logLevel")) },
     },
@@ -988,21 +945,6 @@ async function savePolicy(event) {
   }
 }
 
-async function connectOperator(event) {
-  event.preventDefault();
-  const token = new FormData(event.currentTarget).get("token");
-  state.token = String(token || "").trim();
-  authDialog.close();
-  try {
-    await loadState();
-    document.querySelector("#operator-state").textContent = "Connected";
-    toast("Crabhelm control plane connected");
-  } catch (error) {
-    state.token = "";
-    toast(error.message, true);
-  }
-}
-
 function openPersonaDialog() {
   const form = document.querySelector("#persona-form");
   form.reset();
@@ -1013,21 +955,18 @@ function openPersonaDialog() {
   personaDialog.showModal();
 }
 
-function openConnectionDialog() {
-  const form = document.querySelector("#connection-form");
-  form.reset();
-  form.elements.namedItem("principalId").innerHTML = (state.data.principals || []).map((principal) => `<option value="${escapeAttr(principal.id)}">${escapeHtml(principal.label)} · ${escapeHtml(principal.kind)}</option>`).join("");
-  connectionDialog.showModal();
-}
-
 async function createPersona(event) {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
   const actorMode = String(form.get("actorMode"));
   try {
+    const slackWorkspaceId = String(form.get("slackWorkspaceId") || "").trim();
+    const slackChannelId = String(form.get("slackChannelId") || "").trim();
+    if (Boolean(slackWorkspaceId) !== Boolean(slackChannelId)) throw new Error("Slack workspace and channel IDs must be provided together");
     await request("/personas", { method: "POST", body: JSON.stringify({
       name: String(form.get("name")), kind: String(form.get("kind")), ownerPrincipalId: String(form.get("ownerPrincipalId")), clawId: String(form.get("clawId")),
       actorPolicy: { mode: actorMode, ...(actorMode !== "invoker" ? { servicePrincipalId: String(form.get("servicePrincipalId")) } : {}) },
+      bindings: slackWorkspaceId ? [{ surface: "slack", workspaceId: slackWorkspaceId, channelId: slackChannelId }] : [],
       capabilityIds: form.getAll("capability").map(String), instructions: { identity: String(form.get("identity") || ""), soul: String(form.get("soul") || ""), agents: String(form.get("agents") || "") },
     }) });
     personaDialog.close(); toast("Persona created"); await loadState();
@@ -1044,15 +983,6 @@ async function createSkill(event) {
       files: [{ path: "SKILL.md", content: String(form.get("content")) }],
     }) });
     skillDialog.close(); event.currentTarget.reset(); toast("Draft skill submitted"); await loadState();
-  } catch (error) { toast(error.message, true); }
-}
-
-async function createConnection(event) {
-  event.preventDefault();
-  const form = new FormData(event.currentTarget);
-  try {
-    await request("/connections", { method: "POST", body: JSON.stringify({ principalId: String(form.get("principalId")), provider: "github", label: String(form.get("label")), scopes: form.getAll("scope").map(String), secret: String(form.get("secret")) }) });
-    connectionDialog.close(); event.currentTarget.reset(); toast("GitHub credential encrypted and connected"); await loadState();
   } catch (error) { toast(error.message, true); }
 }
 
@@ -1156,7 +1086,7 @@ function createOutcome(claw) {
 }
 
 function modelOptions(current) {
-  return ["openai/gpt-5.5", "openai/gpt-5.4-mini", "anthropic/claude-sonnet-4.6"]
+  return ["openai/gpt-5.5", "openai/gpt-5.4-mini"]
     .map((model) => `<option value="${escapeAttr(model)}" ${model === current ? "selected" : ""}>${escapeHtml(label(model))}</option>`)
     .join("");
 }

@@ -48,21 +48,30 @@ export class CrabboxWorkspaceBootstrap {
   readonly #brokerToken: string;
   readonly #publicUrl: string;
   readonly #releaseId: string;
+  readonly #archiveId: string;
   readonly #signingSecret: string;
+  readonly #coordinators?: { getByName(name: string): { runtimeStatus(): Promise<{ pending: number; running: number; awaitingDelivery: number }> } };
 
   constructor(options: {
     brokerToken: string;
     publicUrl: string;
     releaseId: string;
+    archiveId: string;
     signingSecret: string;
+    coordinators?: { getByName(name: string): { runtimeStatus(): Promise<{ pending: number; running: number; awaitingDelivery: number }> } };
   }) {
     if (!/^[0-9a-f]{64}$/u.test(options.releaseId)) {
       throw new Error("Crabbox appliance release id must be a SHA-256 digest");
     }
+    if (!/^[0-9a-f]{64}$/u.test(options.archiveId)) {
+      throw new Error("Crabbox appliance archive id must be a SHA-256 digest");
+    }
     this.#brokerToken = options.brokerToken;
     this.#publicUrl = new URL(options.publicUrl).origin;
     this.#releaseId = options.releaseId;
+    this.#archiveId = options.archiveId;
     this.#signingSecret = options.signingSecret;
+    this.#coordinators = options.coordinators;
   }
 
   async command(claw: ClawRecord): Promise<string> {
@@ -74,6 +83,7 @@ export class CrabboxWorkspaceBootstrap {
       this.#signingSecret,
       claw.id,
       this.#releaseId,
+      this.#archiveId,
       Date.now() + BOOTSTRAP_TOKEN_TTL_MS,
     );
     const installUrl = new URL(
@@ -81,14 +91,14 @@ export class CrabboxWorkspaceBootstrap {
       this.#publicUrl,
     );
     installUrl.searchParams.set("model", claw.desired.inference.model);
-    installUrl.searchParams.set("slack", String(claw.desired.channels.slack.enabled));
+    installUrl.searchParams.set("slack", "false");
     return [
       `CRABHELM_BOOTSTRAP_TOKEN=${shellQuote(token)}`,
       "nohup",
       "bash",
       "-c",
       shellQuote(
-        `installer=$(mktemp) && trap 'rm -f "$installer"' EXIT && curl --fail --silent --show-error --location --header "Authorization: Bearer $CRABHELM_BOOTSTRAP_TOKEN" ${shellQuote(installUrl.toString())} -o "$installer" && touch ${shellQuote(this.#retryMarker())} && exec bash "$installer"`,
+        `installer=$(mktemp) && trap 'rm -f "$installer"' EXIT && curl --fail --silent --show-error --location --header "Authorization: Bearer $CRABHELM_BOOTSTRAP_TOKEN" ${shellQuote(installUrl.toString())} -o "$installer" && touch ${shellQuote(this.#retryMarker())} && exec timeout --signal=TERM --kill-after=10s 10m bash "$installer"`,
       ),
       ">/tmp/crabhelm-install.log 2>&1 </dev/null &",
     ].join(" ");
@@ -116,6 +126,7 @@ export class CrabboxWorkspaceBootstrap {
           await this.#launchCommand(claw),
           probeLabel,
           this.#retryMarker(),
+          this.#releaseId,
         ),
         probeLabel,
       );
@@ -200,19 +211,10 @@ export class CrabboxWorkspaceBootstrap {
   }
 
   async disable(claw: ClawRecord): Promise<DisableResult> {
-    if (claw.desired.channels.slack.enabled) {
-      return {
-        applied: false,
-        health: claw.observed.health,
-        message: "Disable refused: Slack ingress needs live child-control evidence",
-        lifecycle: claw.observed.lifecycle,
-        controlLink: claw.observed.controlLink,
-      };
-    }
     return {
       applied: true,
       health: claw.observed.health,
-      message: "No external channel ingress is configured for this workspace",
+      message: "Cloudflare ingress rejects disabled claws",
       lifecycle: claw.observed.lifecycle,
       controlLink: claw.observed.controlLink,
       lastSeenAt: new Date().toISOString(),
@@ -220,15 +222,65 @@ export class CrabboxWorkspaceBootstrap {
     };
   }
 
-  async drain(claw: ClawRecord): Promise<DrainResult> {
-    if (claw.desired.channels.slack.enabled) {
-      throw new Error("Active-run drain needs live child-control evidence when Slack is enabled");
+  runtimeDiagnostics = async (
+    _claw: ClawRecord,
+    workspace: { status: string; attachUrl?: string },
+  ): Promise<{ events: Array<Record<string, unknown>>; processes: string[] }> => {
+    if (workspace.status !== "ready" || !workspace.attachUrl) {
+      throw new Error("runtime diagnostics require a ready workspace terminal");
     }
+    const label = `CRABHELM_DIAGNOSTIC_${crypto.randomUUID().replaceAll("-", "")}`;
+    const raw = await captureTerminalSection(
+      workspace.attachUrl,
+      this.#brokerToken,
+      [
+        `printf '%s_BEGIN\\n' ${shellQuote(label)}`,
+        "tail -n 40 \"$HOME/.openclaw/crabhelm-runtime-bridge.log\" 2>/dev/null || true",
+        "printf 'INSTALL_STAGE %s\\n' \"$(head -n 1 /tmp/crabhelm-install-failed-stage 2>/dev/null || echo missing)\"",
+        "tail -n 20 /tmp/crabhelm-install.log 2>/dev/null | sed -E 's/(Bearer|CRABHELM_RUNTIME_TOKEN=)[^[:space:]]+/\\1[REDACTED]/g; s/[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+/[REDACTED_JWT]/g' | sed 's/^/INSTALL_LOG /' || true",
+        "bridge_pid=$(tr -cd '0-9' <\"$HOME/.openclaw/crabhelm-runtime-bridge.pid\" 2>/dev/null || true)",
+        "printf 'STATE release=%s install_stage=%s turn_file=%s log_bytes=%s bridge_pid=%s stdout=%s bridge_sha256=%s\\n' \"$(head -n 1 \"$HOME/.openclaw/crabhelm-ready\" 2>/dev/null || echo missing)\" \"$(head -n 1 /tmp/crabhelm-install-failed-stage 2>/dev/null || echo missing)\" \"$(test -f \"$HOME/.openclaw/crabhelm-current-turn.json\" && echo present || echo absent)\" \"$(wc -c <\"$HOME/.openclaw/crabhelm-runtime-bridge.log\" 2>/dev/null || echo missing)\" \"${bridge_pid:-missing}\" \"$(readlink \"/proc/${bridge_pid:-0}/fd/1\" 2>/dev/null || echo missing)\" \"$(sha256sum \"$HOME/.local/share/crabhelm/runtime/runtime-bridge.mjs\" 2>/dev/null | cut -d' ' -f1 || echo missing)\"",
+        "ps -eo pid=,ppid=,state=,etimes=,comm= | awk -v parent=\"${bridge_pid:-0}\" '$1 == parent || $2 == parent' | tail -n 10 || true",
+        `printf '%s_END\\n' ${shellQuote(label)}`,
+      ].join("\n"),
+      label,
+    );
+    const events: Array<Record<string, unknown>> = [];
+    const processes: string[] = [];
+    for (const line of raw) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const jsonStart = trimmed.indexOf('{"event"');
+        if (jsonStart < 0) throw new Error("not a metadata event");
+        const value = JSON.parse(trimmed.slice(jsonStart)) as Record<string, unknown>;
+        if (typeof value.event !== "string") continue;
+        const event = Object.fromEntries(["event", "jobId", "ok"].flatMap((key) =>
+          value[key] === undefined ? [] : [[key, value[key]]],
+        ));
+        if (
+          value.event === "runtime_server_rejected_message" &&
+          typeof value.error === "string" &&
+          ["unsupported message type", "job offer is not owned by this runtime", "job is not owned by this runtime", "invalid completion", "runtime refresh was already used"].includes(value.error)
+        ) event.error = value.error;
+        events.push(event);
+      } catch {
+        if (/^(?:STATE\s|INSTALL_(?:STAGE|LOG)\s|\s*\d+\s+\d+\s+[A-Z]\s+\d+\s+)/u.test(line)) {
+          processes.push(trimmed.slice(0, 500));
+        }
+      }
+    }
+    return { events: events.slice(-40), processes: processes.slice(-10) };
+  };
+
+  async drain(claw: ClawRecord): Promise<DrainResult> {
+    const status = await this.#coordinators?.getByName(claw.id).runtimeStatus();
+    const activeRuns = status ? status.pending + status.running + status.awaitingDelivery : 0;
     return {
-      drained: true,
-      activeRuns: 0,
+      drained: activeRuns === 0,
+      activeRuns,
       checkedAt: new Date().toISOString(),
-      message: "No external channel ingress exists; active run count is zero",
+      message: activeRuns === 0 ? "Cloudflare runtime queue is drained" : "Cloudflare runtime queue still has active work",
     };
   }
 
@@ -246,6 +298,7 @@ export async function bootstrapToken(
   secret: string,
   childId: string,
   releaseId: string,
+  archiveId: string,
   expiresAt: number,
 ): Promise<string> {
   const key = await crypto.subtle.importKey(
@@ -255,27 +308,43 @@ export async function bootstrapToken(
     false,
     ["sign"],
   );
-  const payload = `crabhelm:${childId}:${releaseId}:${expiresAt}`;
+  if (!/^[0-9a-f]{64}$/u.test(releaseId) || !/^[0-9a-f]{64}$/u.test(archiveId)) throw new Error("bootstrap release identity is invalid");
+  const payload = `crabhelm:${childId}:${releaseId}:${archiveId}:${expiresAt}`;
   const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(payload));
-  return `${expiresAt}.${base64Url(new Uint8Array(signature))}`;
+  return `${releaseId}.${archiveId}.${expiresAt}.${base64Url(new Uint8Array(signature))}`;
+}
+
+export async function bootstrapTokenClaims(
+  secret: string,
+  childId: string,
+  candidate: string,
+  now = Date.now(),
+): Promise<{ releaseId: string; archiveId: string; expiresAt: number } | undefined> {
+  const match = candidate.match(/^([0-9a-f]{64})\.([0-9a-f]{64})\.([0-9]{13})\.([A-Za-z0-9_-]{43})$/u);
+  if (!match) return undefined;
+  const releaseId = match[1]!;
+  const archiveId = match[2]!;
+  const expiresAt = Number(match[3]);
+  if (!Number.isSafeInteger(expiresAt) || expiresAt <= now || expiresAt - now > BOOTSTRAP_TOKEN_TTL_MS) {
+    return undefined;
+  }
+  const expected = encoder.encode(await bootstrapToken(secret, childId, releaseId, archiveId, expiresAt));
+  const actual = encoder.encode(candidate);
+  return expected.byteLength === actual.byteLength && timingSafeEqual(expected, actual)
+    ? { releaseId, archiveId, expiresAt }
+    : undefined;
 }
 
 export async function validBootstrapToken(
   secret: string,
   childId: string,
   releaseId: string,
+  archiveId: string,
   candidate: string,
   now = Date.now(),
 ): Promise<boolean> {
-  const match = candidate.match(/^([0-9]{13})\.([A-Za-z0-9_-]{43})$/u);
-  if (!match) return false;
-  const expiresAt = Number(match[1]);
-  if (!Number.isSafeInteger(expiresAt) || expiresAt <= now || expiresAt - now > BOOTSTRAP_TOKEN_TTL_MS) {
-    return false;
-  }
-  const expected = encoder.encode(await bootstrapToken(secret, childId, releaseId, expiresAt));
-  const actual = encoder.encode(candidate);
-  return expected.byteLength === actual.byteLength && timingSafeEqual(expected, actual);
+  const claims = await bootstrapTokenClaims(secret, childId, candidate, now);
+  return claims?.releaseId === releaseId && claims.archiveId === archiveId;
 }
 
 async function inspectTerminal(
@@ -377,6 +446,54 @@ async function inspectTerminal(
   });
 }
 
+async function captureTerminalSection(
+  attachUrl: string,
+  brokerToken: string,
+  command: string,
+  label: string,
+): Promise<string[]> {
+  const url = new URL(attachUrl);
+  if (url.protocol !== "wss:") throw new Error("Crabbox terminal URL must use WSS");
+  url.protocol = "https:";
+  const response = await fetch(url, {
+    headers: { authorization: `Bearer ${brokerToken}`, upgrade: "websocket" },
+  }) as Response & { webSocket?: WorkerWebSocket };
+  const socket = response.webSocket;
+  if (response.status !== 101 || !socket) throw new Error(`Crabbox terminal upgrade failed (HTTP ${response.status})`);
+  socket.binaryType = "arraybuffer";
+  socket.accept();
+  return new Promise((resolve, reject) => {
+    let output = "";
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.close(1000, "diagnostics observed");
+      if (error) return reject(error);
+      const plain = output.replaceAll("\r", "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, "");
+      const lines = plain.split("\n").map((line) => line.trimEnd());
+      let begin = -1;
+      for (let index = 0; index < lines.length; index++) {
+        if (lines[index]?.trim() === `${label}_BEGIN`) begin = index;
+      }
+      const end = lines.findIndex((line, index) => index > begin && line.trim() === `${label}_END`);
+      if (begin < 0 || end < 0) return reject(new Error("runtime diagnostics markers were not observed"));
+      resolve(lines.slice(begin + 1, end));
+    };
+    const timer = setTimeout(() => finish(new Error("runtime diagnostics timed out")), 15_000);
+    socket.addEventListener("message", (event: MessageEvent<string | ArrayBuffer>) => {
+      const bytes = typeof event.data === "string" ? encoder.encode(event.data) : new Uint8Array(event.data);
+      socket.send(JSON.stringify({ type: "ack", bytes: bytes.byteLength }));
+      output = `${output}${typeof event.data === "string" ? event.data : decoder.decode(bytes)}`.slice(-64_000);
+      if (hasTerminalLine(output, `${label}_END`)) finish();
+    });
+    socket.addEventListener("close", () => finish(new Error("runtime diagnostics terminal closed")));
+    socket.addEventListener("error", () => finish(new Error("runtime diagnostics terminal failed")));
+    socket.send(`${command}\n`);
+  });
+}
+
 function terminalInferenceFailure(
   output: string,
   probeLabel: string,
@@ -407,11 +524,29 @@ export function bootstrapStatusCommand(
   launchCommand = "",
   statusLabel = "CRABHELM",
   retryMarker = "",
+  releaseId = "",
 ): string {
+  const readyCheck = releaseId
+    ? `grep -Fqx ${shellQuote(releaseId)} "$HOME/.openclaw/crabhelm-ready" 2>/dev/null`
+    : "test -f \"$HOME/.openclaw/crabhelm-ready\"";
   const command = [
     `status_label=${shellQuote(statusLabel)}`,
-    "if test -f \"$HOME/.openclaw/crabhelm-ready\"; then",
+    `if ${readyCheck}; then`,
     "  printf '%s_READY\\n' \"$status_label\"",
+  ];
+  if (launchCommand && retryMarker) {
+    command.push(
+      `elif test ! -e ${shellQuote(retryMarker)} && { pgrep -f '[g]uest-install.sh' >/dev/null || pgrep -f '[b]ootstrap-child.sh' >/dev/null; }; then`,
+      "  for stale_pid in $(pgrep -f '[g]uest-install.sh|[b]ootstrap-child.sh'); do",
+      "    pkill -TERM -P \"$stale_pid\" 2>/dev/null || true",
+      "    kill -TERM \"$stale_pid\" 2>/dev/null || true",
+      "  done",
+      "  sleep 1",
+      `  ${launchCommand}`,
+      "  printf '%s_STARTED\\n' \"$status_label\"",
+    );
+  }
+  command.push(
     "elif pgrep -f '[g]uest-install.sh' >/dev/null; then",
     "  if test -f \"$HOME/.openclaw/.env\"; then",
     "    printf '%s_INSTALLING_BOOTSTRAP\\n' \"$status_label\"",
@@ -425,10 +560,18 @@ export function bootstrapStatusCommand(
     "elif pgrep -x curl >/dev/null; then",
     "  printf '%s_INSTALLING_DOWNLOAD\\n' \"$status_label\"",
     "elif test -s /tmp/crabhelm-install.log; then",
-  ];
+  );
   if (launchCommand && retryMarker) {
     command.push(
       `  if test ! -e ${shellQuote(retryMarker)}; then`,
+      `    ${launchCommand}`,
+      "    printf '%s_STARTED\\n' \"$status_label\"",
+      `  elif test ! -e ${shellQuote(`${retryMarker}.retry`)}; then`,
+      `    touch ${shellQuote(`${retryMarker}.retry`)}`,
+      `    ${launchCommand}`,
+      "    printf '%s_STARTED\\n' \"$status_label\"",
+      `  elif test ! -e ${shellQuote(`${retryMarker}.retry2`)}; then`,
+      `    touch ${shellQuote(`${retryMarker}.retry2`)}`,
       `    ${launchCommand}`,
       "    printf '%s_STARTED\\n' \"$status_label\"",
       "  elif grep -Fqx 'node' /tmp/crabhelm-install-failed-stage 2>/dev/null; then",
@@ -503,6 +646,7 @@ export function inferenceProbeCommand(
   const markerValue = `v2:${model}`;
   const output = "/tmp/crabhelm-inference-probe.json";
   const error = "/tmp/crabhelm-inference-probe.err";
+  const runtimeLauncher = "$HOME/.local/share/crabhelm/runtime/start-runtime-bridge.sh";
   const validateResponse = [
     "const fs = require('node:fs');",
     "const raw = fs.readFileSync(process.argv[1], 'utf8').trim();",
@@ -530,7 +674,7 @@ export function inferenceProbeCommand(
     "openclaw_cli=\"$HOME/.local/share/crabhelm/openclaw-2026.6.11/bin/openclaw\"",
     "export PATH=\"$HOME/.local/share/crabhelm/node-v22.23.1-linux-x64/bin:$HOME/.local/share/crabhelm/openclaw-2026.6.11/bin:$PATH\"",
     `if test -f ${marker} && grep -Fqx ${shellQuote(markerValue)} ${marker}; then`,
-    "  probe_result=READY",
+    `  if /bin/bash ${runtimeLauncher}; then probe_result=READY; else probe_result=RUNTIME_FAILED; fi`,
     "else",
     "  if test ! -x \"$openclaw_cli\"; then",
     "    probe_result=BINARY_FAILED",
@@ -549,9 +693,13 @@ export function inferenceProbeCommand(
     `    node --input-type=commonjs -e ${shellQuote(validateResponse)} ${output} || response_status=$?`,
     "    case \"$response_status\" in",
     "      0)",
-    `        printf '%s\\n' ${shellQuote(markerValue)} >${marker}`,
-    `        chmod 0600 ${marker}`,
-    "        probe_result=READY",
+    `        if /bin/bash ${runtimeLauncher}; then`,
+    `          printf '%s\\n' ${shellQuote(markerValue)} >${marker}`,
+    `          chmod 0600 ${marker}`,
+    "          probe_result=READY",
+    "        else",
+    "          probe_result=RUNTIME_FAILED",
+    "        fi",
     "        ;;",
     "      3) probe_result=OUTPUT_SCHEMA_FAILED ;;",
     "      4) probe_result=OUTPUT_COUNT_FAILED ;;",
