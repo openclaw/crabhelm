@@ -18,12 +18,13 @@ test("Cloudflare workspace bootstrap binds child identity, model, and channel st
     name: "Live child",
     owner: { subject: "github:live", label: "@live", source: "github" },
     inference: { model: "openai/gpt-5.5-mini" },
-    slack: { enabled: false, mode: "socket" },
+    slack: { enabled: true, mode: "socket" },
   });
   const bootstrap = new CrabboxWorkspaceBootstrap({
     brokerToken: "broker-test-token",
     publicUrl: "https://crabhelm.example.test/path-is-ignored",
     releaseId: "a".repeat(64),
+    archiveId: "c".repeat(64),
     signingSecret: "signing-test-secret",
   });
 
@@ -31,16 +32,41 @@ test("Cloudflare workspace bootstrap binds child identity, model, and channel st
   assert.match(command, new RegExp(`/bootstrap/${claw.id}/install\\.sh\\?model=openai%2Fgpt-5\\.5-mini&slack=false`));
   assert.doesNotMatch(command, /signing-test-secret|broker-test-token/);
   assert.match(command, /curl .* -o .* && touch/u);
+  assert.match(command, /timeout --signal=TERM --kill-after=10s 10m bash/u);
   assert.doesNotMatch(command, /^touch /u);
 
   const now = 1_800_000_000_000;
   const releaseId = "a".repeat(64);
-  const token = await bootstrapToken("signing-test-secret", claw.id, releaseId, now + 60_000);
-  assert.equal(await validBootstrapToken("signing-test-secret", claw.id, releaseId, token, now), true);
-  assert.equal(await validBootstrapToken("signing-test-secret", crypto.randomUUID(), releaseId, token, now), false);
-  assert.equal(await validBootstrapToken("different-secret", claw.id, releaseId, token, now), false);
-  assert.equal(await validBootstrapToken("signing-test-secret", claw.id, "b".repeat(64), token, now), false);
-  assert.equal(await validBootstrapToken("signing-test-secret", claw.id, releaseId, token, now + 60_000), false);
+  const archiveId = "c".repeat(64);
+  const token = await bootstrapToken("signing-test-secret", claw.id, releaseId, archiveId, now + 60_000);
+  assert.equal(await validBootstrapToken("signing-test-secret", claw.id, releaseId, archiveId, token, now), true);
+  assert.equal(await validBootstrapToken("signing-test-secret", crypto.randomUUID(), releaseId, archiveId, token, now), false);
+  assert.equal(await validBootstrapToken("different-secret", claw.id, releaseId, archiveId, token, now), false);
+  assert.equal(await validBootstrapToken("signing-test-secret", claw.id, "b".repeat(64), archiveId, token, now), false);
+  assert.equal(await validBootstrapToken("signing-test-secret", claw.id, releaseId, "d".repeat(64), token, now), false);
+  assert.equal(await validBootstrapToken("signing-test-secret", claw.id, releaseId, archiveId, token, now + 60_000), false);
+});
+
+test("Cloudflare workspace lifecycle drains the central runtime queue", async () => {
+  const claw = createClawRecord({
+    name: "Queued child",
+    owner: { subject: "github:queued", label: "@queued", source: "github" },
+    slack: { enabled: true, mode: "socket" },
+  });
+  const bootstrap = new CrabboxWorkspaceBootstrap({
+    brokerToken: "broker-test-token",
+    publicUrl: "https://crabhelm.example.test",
+    releaseId: "a".repeat(64),
+    archiveId: "c".repeat(64),
+    signingSecret: "signing-test-secret",
+    coordinators: { getByName: () => ({ runtimeStatus: async () => ({ pending: 1, running: 2, awaitingDelivery: 1 }) }) },
+  });
+  assert.equal((await bootstrap.disable(claw)).applied, true);
+  const drain = await bootstrap.drain(claw);
+  assert.equal(drain.drained, false);
+  assert.equal(drain.activeRuns, 4);
+  assert.equal(drain.message, "Cloudflare runtime queue still has active work");
+  assert.ok(Date.parse(drain.checkedAt));
 });
 
 test("live inference probe is valid shell", async () => {
@@ -62,4 +88,16 @@ test("terminal evidence is bound to a fresh inspection label", async () => {
   assert.match(status, /status_label='CRABHELM_deadbeef'/u);
   assert.match(inference, /probe_label='CRABHELM_deadbeef_INFERENCE'/u);
   await run("/bin/bash", ["-n", "-c", `${status}\n${inference}`]);
+});
+
+test("workspace readiness is pinned to the reviewed appliance release", async () => {
+  const releaseId = "a".repeat(64);
+  const status = bootstrapStatusCommand("echo launch", "CRABHELM_release", "/tmp/retry", releaseId);
+  assert.match(status, new RegExp(`grep -Fqx '${releaseId}'`));
+  assert.match(status, /test ! -e '\/tmp\/retry'.*pgrep -f '\[g\]uest-install\.sh'/u);
+  assert.match(status, /pkill -TERM -P "\$stale_pid"/u);
+  assert.match(status, /test ! -e '\/tmp\/retry\.retry'[\s\S]*touch '\/tmp\/retry\.retry'[\s\S]*echo launch/u);
+  assert.match(status, /test ! -e '\/tmp\/retry\.retry2'[\s\S]*touch '\/tmp\/retry\.retry2'[\s\S]*echo launch/u);
+  assert.ok(status.indexOf("test ! -e '/tmp/retry'") < status.indexOf("elif pgrep -f '[g]uest-install.sh'"));
+  await run("/bin/bash", ["-n", "-c", status]);
 });

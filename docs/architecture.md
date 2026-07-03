@@ -24,7 +24,7 @@ Cloudflare is the global control plane, not the agent compute substrate. Agent r
 
 ## Cloudflare control plane
 
-The Worker owns HTTP authentication, static assets, bootstrap delivery, security headers, control-plane routing, and the bounded GitHub wrapper. One named organization Durable Object owns fleet and governance records. A separate Durable Object instance per claw atomically registers and consumes one-time invocation grants and tracks active governed runs.
+The Worker owns Cloudflare Access authentication, static assets, signed Slack ingress, bootstrap delivery, security headers, control-plane routing, and the bounded GitHub wrapper. One named organization Durable Object owns fleet and governance records. A separate Durable Object instance per claw owns its outbound runtime health socket, authenticated HTTPS queue, encrypted turn state, replay fence, one-time invocation grants, and active governed runs.
 
 Audit fan-out leaves the request path through a Queue and lands in a dedicated R2 archive. Lifecycle reconciliation remains in the organization object; invocation replay protection and run coordination are already sharded by claw. Moving lifecycle reconciliation into the same per-claw atom is the remaining scale step.
 
@@ -32,9 +32,15 @@ Durable Object storage uses namespaced key-value records with transaction bounda
 
 The private R2 bucket stores a digest-pinned `openclaw-core` appliance. The public bootstrap route never exposes the bucket directly: a child-specific HMAC token gates the installer, bundle, and credential response, all with `no-store` headers.
 
-## Identity-aware invocation
+## Identity-aware ingress and invocation
 
-Ingress accepts the Cloudflare operator credential or a signed, eight-hour principal session minted by an administrator. It resolves one administrator-approved persona. Before governed tool execution, Crabhelm issues a five-minute signed invocation grant containing:
+Browser ingress is protected by Cloudflare Access. The Worker verifies the Access JWT issuer, application audience, signature, and expiry before resolving a canonical email principal. There is no shared operator bearer.
+
+Non-interactive fleet administration uses a named Cloudflare service-binding RPC entrypoint. It is reachable only by another Worker explicitly bound inside the Cloudflare account, exposes a narrow state/persona/runtime/removal surface, and injects the same administrator role and audit principal used by the control plane. It is not routed to a public hostname and does not accept a bearer token. Its production probe posts a labeled Slack parent, routes an encrypted turn through the bound persona and remote runtime, then reports metadata-only execution and delivery status.
+
+Slack uses one organization app. The edge verifies Slack's timestamped HMAC signature over the raw body before parsing it, resolves the requester through Slack, and routes only through an administrator-approved workspace/channel persona binding. The runtime never receives Slack credentials.
+
+For every accepted turn, the per-claw Durable Object encrypts the prompt with AES-GCM and binds it to the job id. The isolated runtime claims, acknowledges, and completes one persona-bound job over one authenticated outbound WebSocket, which also carries health, reconnect, and credential rotation. The runtime invokes the real local OpenClaw Gateway through `openclaw agent`; the turn process does not receive a model-provider credential. Crabhelm's owner-only workload credential expires after ten minutes, rotates through a one-use Durable Object mint fence, persists only for restart recovery, and is not inherited by turn processes. The encrypted refresh response is replayable for the old credential's remaining lifetime, so a Worker reset after consumption cannot strand the runtime. Reset generations sent over the same socket abort the active process group when an administrator resets a runtime. Before governed tool execution, Crabhelm issues a five-minute signed invocation grant containing:
 
 - requester, persona, permitted actor mode, and optional service identity;
 - claw and runtime audience;
@@ -42,11 +48,11 @@ Ingress accepts the Cloudflare operator credential or a signed, eight-hour princ
 - invocation correlation id, issued-at, expiry, target, and exact argument digest;
 - confirmation requirements, without credential material.
 
-The per-claw coordinator registers the grant JTI before release and consumes it atomically once. Prompt text, channel metadata, and runtime-supplied identity claims are never authority. Substrate-native workload attestation remains required before exposing the runtime-token ingress beyond the current bootstrap channel.
+The per-claw coordinator registers the grant JTI before release and consumes it atomically once. Prompt text and runtime-supplied identity claims are never authority. Runtime and turn tokens are audience-bound; the turn fixes requester, persona, claw, and Slack response location.
 
 ## Governed tool path
 
-The agent runtime proposes a capability call; it does not receive a durable OAuth token. The controlled GitHub wrapper verifies and consumes the invocation grant, recomputes capability-specific arguments, enforces actor and confirmation policy, decrypts the selected credential only for the outbound provider request, and returns a bounded result projection. Long-lived grants remain as AES-GCM envelopes in a dedicated private R2 vault; Durable Object state contains metadata only.
+The agent runtime proposes a capability call; it does not receive a durable OAuth token. The controlled GitHub wrapper verifies and consumes the invocation grant, recomputes capability-specific arguments, enforces actor and confirmation policy, decrypts the selected credential only for the outbound provider request, and returns a bounded result projection. Long-lived OAuth grants remain as AES-GCM envelopes in a dedicated private R2 vault; Durable Object state contains metadata only. GitHub connects through the OAuth authorization-code flow; direct credential upload is disabled.
 
 Wrappers may run on Cloudflare or an approved internal substrate. Cloudflare-hosted components use bindings for internal calls where possible; external brokers use outbound mTLS and workload-bound signed requests. No component exposes the vault directly to an agent runtime.
 
@@ -69,16 +75,16 @@ Persona identity, baseline instructions, skill manifests, capability policy, and
 
 `RoutedChildCoreProvider` binds an administrator-defined target id to an exact profile and region. Browser requests select only the target id; they cannot override provider, class, controller URL, executable command, TTL, or credentials.
 
-The current production adapter uses `https://crabbox.openclaw.ai` and target `aws-us-east`. Crabbox creates the workspace and exposes a bearer-authenticated server-to-server terminal. Crabhelm uses Cloudflare's outbound HTTPS WebSocket upgrade to inspect that terminal; no inbound child endpoint exists.
+The current production adapter uses `https://crabbox.openclaw.ai` and target `aws-us-east`. Crabbox creates the workspace and exposes a bearer-authenticated server-to-server terminal. Crabhelm uses Cloudflare's outbound HTTPS WebSocket upgrade to inspect that terminal; no inbound child endpoint exists. The runtime separately initiates one authenticated outbound WebSocket to `crabhelm-runtime.openclaw.ai`, so deployment does not require Cloudflare Tunnel.
 
 ## Agent bootstrap and readiness
 
 1. Registry persists desired state and stable child UUID.
 2. Crabbox creates `crabhelm-<slug>` with an idempotency key equal to that workspace id.
 3. The workspace fetches a private installer from Crabhelm using its deterministic HMAC token.
-4. Installer verifies the manifest and every artifact, activates child-local credentials, writes the exact desired model, starts a loopback-only OpenClaw Gateway, and writes a readiness marker.
+4. Installer verifies the manifest and every artifact, activates child-local model/runtime credentials, writes the exact desired model, starts a loopback-only OpenClaw Gateway, installs the runtime-bridge launcher, and writes a Gateway readiness marker.
 5. Reconciliation attaches through Crabbox, requires exact terminal sentinel lines, writes the exact desired model again, restarts the Gateway, and runs a real `openclaw agent` turn.
-6. Only the exact expected model response creates the inference marker. Crabhelm then reports `ready`, `authReady: true`, and `liveInferenceProbe: true`.
+6. Only the exact expected model response starts the runtime bridge and creates the inference marker. The bridge exchanges its ten-minute workload credential through the redacted authorization header for a 30-second, one-use connection ticket. Only that consumed ticket enters the WebSocket subprotocol; the workload credential rotates through a separate one-use mint fence with encrypted idempotent response replay.
 
 Allocation, echoed command text, HTTP success, and a process existing are not sufficient readiness evidence.
 
@@ -86,7 +92,7 @@ Allocation, echoed command text, HTTP success, and a process existing are not su
 
 One claw equals one provider resource, OpenClaw Gateway, state root, credential file, session store, memory, and OS identity. The control plane stores lifecycle identifiers, desired policy, bounded health evidence, and audit metadata. It does not store prompts, model replies, messages, tool output, child credentials, or opaque upstream bodies.
 
-Operator token, Crabbox token, bootstrap/session/invocation/runtime signing secrets, the OAuth vault master key, and model credentials are Cloudflare Worker secrets. The operator token authenticates only control-plane API requests and is never forwarded to children. Child credential delivery is scoped by the HMAC bootstrap token and occurs only during appliance installation. Admission closes unless all required signing and vault material passes local shape checks.
+Crabbox credentials, Slack credentials, GitHub OAuth client secret, bootstrap/session/invocation/runtime signing secrets, the OAuth vault master key, and model credentials are Cloudflare Worker secrets. Control-plane users authenticate through Cloudflare Access; there is no shared operator-token bypass. Only model and audience-bound runtime credentials enter a child. Child credential delivery is scoped by the HMAC bootstrap token and occurs only during appliance installation. Admission closes unless all required signing and vault material passes local shape checks.
 
 Model credentials still use the fixed bootstrap path because OpenClaw itself calls the model backend. Provider-tool OAuth credentials use the governed vault and never enter the claw. The current GitHub broker and wrapper share one Worker trust boundary; splitting the broker into a separate workload-identity service is optional hardening for additional high-risk providers.
 

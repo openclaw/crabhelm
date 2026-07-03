@@ -9,7 +9,7 @@ die() {
 
 install_stage=initial
 : > /tmp/crabhelm-install-failed-stage
-trap 'printf "%s\n" "$install_stage" > /tmp/crabhelm-install-failed-stage' ERR
+trap 'status=$?; printf "%s\n" "$install_stage" > /tmp/crabhelm-install-failed-stage; printf "crabhelm guest install: stage=%s line=%s status=%s\n" "$install_stage" "$LINENO" "$status" >&2; exit "$status"' ERR
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 manifest="$script_dir/manifest.json"
@@ -78,6 +78,7 @@ const expected = {
   crabhelmFile: "artifacts/crabhelm.tgz",
   bootstrapFile: "bootstrap-child.sh",
   guestInstallFile: "guest-install.sh",
+  runtimeBridgeFile: "runtime-bridge.mjs",
 };
 if (
   manifest.schemaVersion !== expected.schemaVersion || manifest.profile !== expected.profile ||
@@ -86,11 +87,13 @@ if (
   manifest.openclaw?.file !== expected.openclawFile || manifest.slack?.file !== expected.slackFile ||
   manifest.crabhelm?.file !== expected.crabhelmFile ||
   manifest.bootstrap?.file !== expected.bootstrapFile || manifest.guestInstall?.file !== expected.guestInstallFile ||
+  manifest.runtimeBridge?.file !== expected.runtimeBridgeFile ||
   manifest.openclaw?.version !== "2026.6.11" || manifest.slack?.version !== "2026.6.11" ||
   typeof manifest.crabhelm?.version !== "string" || !manifest.crabhelm.version ||
   !sha.test(manifest.node?.sha256) || !sha.test(manifest.openclaw?.sha256) || !sha.test(manifest.slack?.sha256) ||
   !sha.test(manifest.crabhelm?.sha256) ||
-  !sha.test(manifest.bootstrap?.sha256) || !sha.test(manifest.guestInstall?.sha256)
+  !sha.test(manifest.bootstrap?.sha256) || !sha.test(manifest.guestInstall?.sha256) ||
+  !sha.test(manifest.runtimeBridge?.sha256)
 ) process.exit(2);
 for (const value of [
   manifest.node.version,
@@ -103,6 +106,7 @@ for (const value of [
   manifest.crabhelm.sha256,
   manifest.bootstrap.sha256,
   manifest.guestInstall.sha256,
+  manifest.runtimeBridge.sha256,
 ]) process.stdout.write(`${value}\n`);
 NODE
 )" || die "bundle manifest contract is invalid"
@@ -110,7 +114,7 @@ values=()
 while IFS= read -r value; do
   values+=("$value")
 done <<<"$manifest_values"
-[[ "${#values[@]}" = 10 ]] || die "bundle manifest contract is incomplete"
+[[ "${#values[@]}" = 11 ]] || die "bundle manifest contract is incomplete"
 node_version="${values[0]}"
 node_sha256="${values[1]}"
 openclaw_version="${values[2]}"
@@ -121,6 +125,7 @@ crabhelm_version="${values[6]}"
 crabhelm_sha256="${values[7]}"
 bootstrap_sha256="${values[8]}"
 guest_install_sha256="${values[9]}"
+runtime_bridge_sha256="${values[10]}"
 
 verify_artifact() {
   local relative="$1" expected="$2" file actual
@@ -137,6 +142,7 @@ verify_artifact artifacts/slack.tgz "$slack_sha256"
 verify_artifact artifacts/crabhelm.tgz "$crabhelm_sha256"
 verify_artifact bootstrap-child.sh "$bootstrap_sha256"
 verify_artifact guest-install.sh "$guest_install_sha256"
+verify_artifact runtime-bridge.mjs "$runtime_bridge_sha256"
 
 state_dir="${OPENCLAW_STATE_DIR:-$HOME/.openclaw}"
 install_stage=credential
@@ -156,10 +162,10 @@ for (const rawLine of body.split(/\r?\n/)) {
   const match = line.match(/^(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=/);
   if (match) keys.add(match[1]);
 }
-for (const required of ["OPENAI_API_KEY", "CRABHELM_CONTROL_URL", "CRABHELM_RUNTIME_TOKEN"]) {
+for (const required of ["OPENAI_API_KEY", "CRABHELM_CONTROL_URL", "CRABHELM_RUNTIME_TOKEN", "CRABHELM_CHILD_ID"]) {
   if (!keys.has(required)) process.exit(2);
 }
-if (keys.has("SLACK_BOT_TOKEN") !== keys.has("SLACK_APP_TOKEN")) process.exit(2);
+if (keys.has("SLACK_BOT_TOKEN") || keys.has("SLACK_APP_TOKEN")) process.exit(2);
 NODE
 
 previous_umask="$(umask)"
@@ -185,6 +191,12 @@ installed_version="${BASH_REMATCH[1]}"
 [[ "$installed_version" = "$openclaw_version" ]] || die "installed OpenClaw version does not match the bundle (got $installed_version)"
 runtime_path="$openclaw_prefix/bin:$runtime_path"
 
+if [[ -e "$state_dir" || -L "$state_dir" ]]; then
+  [[ -d "$state_dir" && ! -L "$state_dir" && -O "$state_dir" ]] || die "child state directory is unsafe"
+else
+  install -d -m 0700 "$state_dir"
+fi
+
 plugin_env=(
   /usr/bin/env -i
   HOME="$HOME"
@@ -196,29 +208,76 @@ install_stage=plugin
 for plugin_id in crabhelm slack; do
   "${plugin_env[@]}" "$openclaw_binary" plugins uninstall "$plugin_id" --force >/dev/null 2>&1 || true
 done
+"$node_binary" - "$state_dir" <<'NODE' || die "managed plugin replacement is unsafe"
+const { chmod, lstat, readdir, rm } = await import("node:fs/promises");
+const { join } = await import("node:path");
+const root = process.argv[2];
+async function thaw(directory) {
+  const info = await lstat(directory);
+  if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid()) process.exit(2);
+  await chmod(directory, 0o700);
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const child = join(directory, entry.name);
+    if (entry.isDirectory()) await thaw(child);
+  }
+}
+for (const id of ["crabhelm", "slack"]) {
+  const directory = join(root, "extensions", id);
+  try {
+    await thaw(directory);
+    await rm(directory, { recursive: true });
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+}
+NODE
 "${plugin_env[@]}" "$openclaw_binary" plugins install "$script_dir/artifacts/crabhelm.tgz"
 "${plugin_env[@]}" "$openclaw_binary" plugins install "$script_dir/artifacts/slack.tgz"
 
-if [[ -e "$state_dir" || -L "$state_dir" ]]; then
-  [[ -d "$state_dir" && ! -L "$state_dir" && -O "$state_dir" ]] || die "child state directory is unsafe"
-else
-  install -d -m 0700 "$state_dir"
-fi
 credential_file="$state_dir/.env"
+runtime_credential_file="$state_dir/crabhelm-runtime.env"
+runtime_token_file="$state_dir/crabhelm-runtime-token"
 install_stage=credential
-if [[ -e "$credential_file" || -L "$credential_file" ]]; then
-  "$node_binary" - "$credential_file" "$credential_source" <<'NODE' || die "child credential destination is unsafe or differs from the fixed profile"
-const { lstat, readFile } = await import("node:fs/promises");
-const [destination, source] = process.argv.slice(2);
-const info = await lstat(destination);
-if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.getuid() || (info.mode & 0o777) !== 0o600) process.exit(2);
-const withoutRuntimeToken = (body) => body.split(/\r?\n/).filter((line) => !line.startsWith("CRABHELM_RUNTIME_TOKEN=")).join("\n");
-if (withoutRuntimeToken(await readFile(destination, "utf8")) !== withoutRuntimeToken(await readFile(source, "utf8"))) process.exit(2);
-NODE
-  install -m 0600 "$credential_source" "$credential_file"
-else
-  install -m 0600 "$credential_source" "$credential_file"
+credential_refresh_url="${CRABHELM_CREDENTIAL_REFRESH_URL:-}"
+if [[ -n "$credential_refresh_url" ]]; then
+  [[ "$credential_refresh_url" =~ ^https://[^[:space:]]{1,2048}$ ]] || die "child credential refresh URL is invalid"
+  [[ -n "${CRABHELM_BOOTSTRAP_TOKEN:-}" ]] || die "child credential refresh token is unavailable"
+  refreshed_credential="$credential_source.refresh-$$"
+  "$curl_binary" --fail --silent --show-error --location \
+    --header "Authorization: Bearer $CRABHELM_BOOTSTRAP_TOKEN" \
+    "$credential_refresh_url" -o "$refreshed_credential"
+  chmod 0600 "$refreshed_credential"
+  mv -f "$refreshed_credential" "$credential_source"
 fi
+"$node_binary" - "$credential_source" "$credential_file" "$runtime_credential_file" "$runtime_token_file" <<'NODE' || die "child credential destinations are unsafe or invalid"
+const { chmod, lstat, readFile, rename, writeFile } = await import("node:fs/promises");
+const [source, gatewayFile, runtimeFile, tokenFile] = process.argv.slice(2);
+const body = await readFile(source, "utf8");
+const lines = body.split(/\r?\n/).filter(Boolean);
+const keyed = lines.map((line) => ({ line, key: line.match(/^([A-Z][A-Z0-9_]*)=/)?.[1] }));
+const tokenLine = keyed.find(({ key }) => key === "CRABHELM_RUNTIME_TOKEN")?.line;
+const tokenMatch = tokenLine?.match(/^CRABHELM_RUNTIME_TOKEN=(?:'([A-Za-z0-9._-]{18,4096})'|([A-Za-z0-9._-]{18,4096}))$/);
+const token = tokenMatch?.[1] ?? tokenMatch?.[2];
+if (!token) process.exit(2);
+const gatewayBody = `${keyed.filter(({ key }) => key !== "CRABHELM_RUNTIME_TOKEN").map(({ line }) => line).join("\n")}\n`;
+const runtimeKeys = new Set(["CRABHELM_CONTROL_URL", "CRABHELM_CHILD_ID"]);
+const runtimeBody = `${keyed.filter(({ key }) => key && runtimeKeys.has(key)).map(({ line }) => line).join("\n")}\n`;
+async function safeWrite(file, value) {
+  try {
+    const info = await lstat(file);
+    if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.getuid() || (info.mode & 0o777) !== 0o600) process.exit(2);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  const temporary = `${file}.new-${process.pid}`;
+  await writeFile(temporary, value, { mode: 0o600, flag: "wx" });
+  await chmod(temporary, 0o600);
+  await rename(temporary, file);
+}
+await safeWrite(gatewayFile, gatewayBody);
+await safeWrite(runtimeFile, runtimeBody);
+await safeWrite(tokenFile, `${token}\n`);
+NODE
 
 managed_spec_source="${CRABHELM_MANAGED_SPEC_FILE:-}"
 [[ "$managed_spec_source" = /* ]] || die "fixed controller must supply an absolute managed spec path"
@@ -296,6 +355,9 @@ export CRABHELM_EXPECTED_SLACK_PLUGIN_VERSION="$slack_plugin_version"
 export CRABHELM_EXPECTED_VERSION="$crabhelm_version"
 export CRABHELM_OPENCLAW_BINARY="$openclaw_binary"
 export CRABHELM_CURL_BINARY="$curl_binary"
+export CRABHELM_RUNTIME_BRIDGE="$script_dir/runtime-bridge.mjs"
+export CRABHELM_RUNTIME_BRIDGE_SHA256="$runtime_bridge_sha256"
+export CRABHELM_RELEASE_ID="$expected_manifest_sha256"
 export PATH="$runtime_path"
 install_stage=bootstrap
 exec /bin/bash "$script_dir/bootstrap-child.sh"

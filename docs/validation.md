@@ -1,33 +1,38 @@
 # Validation ledger
 
-Live evidence is kept separate from unit and simulator evidence.
+Live evidence is separate from unit and simulator evidence. Last full production pass: 2026-07-03.
 
 | Requirement | Evidence | Status |
 | --- | --- | --- |
-| Cloudflare control plane | Worker version `43004616-ddbd-4310-ba33-f70acd68ded5`; custom domain `crabhelm.openclaw.ai`; OpenClaw account; organization and per-claw Durable Objects; alarm reconciliation | Live |
-| Durable state | Real create persisted across Worker deployments and operator-token rotation | Live |
-| Private appliance | Remote R2 object `crabhelm-appliances/openclaw-core/bundle.tgz`; archive digest `27ddf69937714de62898f17ecdbcce07eb184db7b63b6c7e549efa1c40bfb071`; top-level `bundle/`; manifest digest `26c69e5cf4e74d009c642df975ed9a3aa047c5671008b6c161997b391ac1d3e9` | Live |
-| Real placement | Claw `b3eba8b9-7b06-462b-97f8-55bd1b8653d9`; Crabbox workspace `crabhelm-managed-identity-proof-20260702-1212`; provider resource `cbx_709b24ab37f7`; AWS US East target | Live |
-| OpenClaw child | Gateway `2026.6.11`, loopback readiness, exact desired model `openai/gpt-5.5`, managed persona and read-only instruction delivery | Live |
-| Actual inference | Bounded `openclaw agent` turn returned exact expected marker; `authReady: true`; `liveInferenceProbe: true` | Live |
-| Browser workflow | Existing Chrome profile opened the custom domain and verified Fleet, Personas, Skills, Access, and metadata-only Activity views; the live proof claw rendered policy-converged | Live |
-| No tunnel | Worker calls Crabbox and child terminal outbound; no Cloudflare Tunnel or permanent controller VM | Verified |
-| Identity and delegation | Requester, actor, and persona records; explicit `actAs`; signed sessions and one-use invocation grants; confirmation binding; unconnected invocation failed closed | Live + automated |
-| Secret isolation | OAuth envelope vault in private R2; runtime state exposes no vault keys; browser reports zero active runtime secrets | Live + automated |
-| Audit archive | Queue producer/consumer `crabhelm-audit` and private R2 archive deployed; message handling covered by Worker tests | Deployed |
-| Registry/reconciliation | Domain, governance, policy, routing, concurrency, deletion, bootstrap, and persistence suites | 89 automated tests |
-| Static and Worker build | Node TypeScript, Worker TypeScript, browser JavaScript syntax, Wrangler dry-run, esbuild | Passing |
-| Slack | Optional credentials supported; no production credentials configured in this deployment | Not exercised |
-| GitHub tools | Bounded repository/issue wrappers and encrypted connection path deployed; no production OAuth connection configured | Fail-closed verified |
+| Cloudflare control plane | `crabhelm.openclaw.ai` and `crabhelm-runtime.openclaw.ai`; organization and per-claw Durable Objects; alarm reconciliation | Live |
+| Identity-aware console | Cloudflare Access JWT issuer, audience, signature, and expiry verified before principal resolution; no operator-token prompt | Live |
+| Private appliance | Digest-pinned archive under top-level `bundle/` in private R2; archive and manifest digests enforced before bootstrap | Live |
+| Real placement | Crabbox-created AWS US East workspace with provider resource evidence; no simulator selected in production | Live |
+| OpenClaw child | Gateway `2026.6.11`, loopback readiness, exact model `openai/gpt-5.5`, managed persona, read-only instructions and skills | Live |
+| Actual inference | Bounded `openclaw agent` challenge returned the exact expected marker; `authReady: true`; `liveInferenceProbe: true` | Live |
+| Slack end to end | Production DM route completed and Slack delivered exact probe replies through the remote OpenClaw runtime, including after forced reconnect | Live |
+| Runtime reliability | Single-process appliance lock, authenticated outbound WebSocket dispatch and credential rotation, bounded process-group execution, delivery retry, reset-generation cancellation, and release-pinned in-place appliance rollout | Live + automated |
+| Runtime authentication | Owner-only ten-minute workload credential, one-use refresh rotation, one-use connection tickets, and no credential inheritance by turn processes | Live + automated |
+| GitHub delegation | OAuth grant encrypted in private R2; bounded governed read executed as the connected requester; writes require argument-bound confirmation | Live + automated |
+| Audit archive | Identity-complete metadata through Cloudflare Queue to private R2; prompt and tool content excluded | Deployed + automated |
+| Browser workflow | Existing Chrome profile verified Fleet, Personas, Skills, Access, metadata-only Activity, and runtime status; Slack delivery is separately verified by exact job/delivery metadata because the Chrome automation connector was unavailable for the final reply | Partial live |
+| No tunnel | Worker calls Crabbox outbound; child connects outbound over HTTPS/WSS; no Cloudflare Tunnel or permanent controller VM | Verified |
+| Automated proof | 104 tests covering domain, governance, security, policy, routing, concurrency, deletion, bootstrap, appliance, persistence, static, and Worker checks | Full suite passing |
 
 ## Repeatable checks
 
 ```bash
 pnpm check
-wrangler deploy --dry-run
-curl https://crabhelm.openclaw.ai/healthz
+pnpm exec wrangler deploy --dry-run
+curl --fail https://crabhelm-runtime.openclaw.ai/healthz
 ```
 
-Authenticated state should report the live claw as `ready`, Gateway `2026.6.11`, configured/resolved model `openai/gpt-5.5`, `authReady: true`, and `liveInferenceProbe: true`.
+Authenticated state must show the proof claw as `ready`, Gateway `2026.6.11`, configured and resolved model `openai/gpt-5.5`, `authReady: true`, `liveInferenceProbe: true`, and one connected runtime bridge. Production readiness is never inferred from provider allocation, echoed shell source, or process existence.
 
-Production readiness is not inferred from Crabbox allocation or terminal source text. The inspector accepts exact sentinel lines only; model readiness requires the persisted successful inference marker for the current desired model.
+## 2026-07-03 production proof
+
+- Worker version: `9b5795a6-56af-420e-8119-301d6a071234`.
+- Appliance archive: `543da38f97d6847a092da8ca20dc5b24986952ec0595d661174da2a3d05e4d2c`; manifest: `886e1d118dbfef7474ad7462f0a31cc88237ec7a16d3ad996a4fb0fa0362069e`; runtime bridge: `be1bd7b13ff38e51205117fd25610a258df96b5fa3c4aa361cc584ef72c0395b`.
+- Claw `c461f5eb-ad04-4255-a4e2-bd7bd0ed6e37` reached `ready` with the reviewed release, live inference, and one authenticated outbound runtime connection.
+- Slack jobs `4d570ed2-2a90-4e10-96b3-c59cf3b2393c` (`CRABHELM-PRODUCTION-PROBE-4D570ED2`) and `aa83a063-dbbc-4ab0-b8df-373c2d1d93ee` (`CRABHELM-PRODUCTION-PROBE-AA83A063`) completed and delivered without a protocol rejection; the intervening forced reconnect disconnected exactly one runtime.
+- The same bridge emitted `runtime_token_refreshed` after its five-minute rotation interval and remained connected.

@@ -4,11 +4,13 @@ import { CrabboxChildCoreProvider, RoutedChildCoreProvider } from "../src/provid
 import { CrabhelmReconciler } from "../src/reconciler.js";
 import { CrabhelmRegistry } from "../src/registry.js";
 import { GovernanceRegistry } from "../src/governance-registry.js";
+import { selectSlackPersona } from "../src/governance.js";
 import type {
   ConfirmationRecord,
   GovernanceAuditEvent,
   InvocationRecord,
   OAuthConnectionRecord,
+  OAuthStateRecord,
   PersonaRecord,
   PrincipalRecord,
   SkillRecord,
@@ -24,6 +26,7 @@ import type {
 import { CrabboxWorkspaceBootstrap } from "./bootstrap.js";
 import { DurableObjectStateDatabase } from "./state.js";
 import { GovernanceController } from "./governance-controller.js";
+import { signClaims } from "./security.js";
 
 const maxBodyBytes = 64 * 1024;
 
@@ -33,6 +36,8 @@ export class CrabhelmControlPlane extends DurableObject<Env> {
   readonly #runtime: CrabhelmRuntime;
   readonly #governance: GovernanceRegistry;
   readonly #governanceController: GovernanceController;
+  readonly #provider: CrabboxChildCoreProvider;
+  readonly #releaseIdentity: { archiveId: string; releaseId: string };
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -60,11 +65,18 @@ export class CrabhelmControlPlane extends DurableObject<Env> {
       idleTimeoutSeconds: target.idleTimeoutSeconds,
       workspaceBootstrap: new CrabboxWorkspaceBootstrap({
         brokerToken: env.CRABBOX_TOKEN,
-        publicUrl: env.PUBLIC_URL,
+        publicUrl: env.RUNTIME_URL,
         releaseId: env.APPLIANCE_MANIFEST_SHA256,
+        archiveId: env.APPLIANCE_ARCHIVE_SHA256,
         signingSecret: env.BOOTSTRAP_SIGNING_SECRET,
+        coordinators: env.CLAW_COORDINATOR,
       }),
     });
+    this.#provider = provider;
+    this.#releaseIdentity = {
+      archiveId: env.APPLIANCE_ARCHIVE_SHA256,
+      releaseId: env.APPLIANCE_MANIFEST_SHA256,
+    };
     this.#registry = new CrabhelmRegistry(
       state.store<ClawRecord>("claws-v1", 10_000),
       state.store<AuditEvent>("audit-v1", 50_000, { overflow: "evict-oldest" }),
@@ -86,6 +98,7 @@ export class CrabhelmControlPlane extends DurableObject<Env> {
       personas: state.store<PersonaRecord>("personas-v1", 10_000),
       skills: state.store<SkillRecord>("skills-v1", 10_000),
       connections: state.store<OAuthConnectionRecord>("oauth-connections-v1", 20_000),
+      oauthStates: state.store<OAuthStateRecord>("oauth-states-v1", 10_000, { overflow: "evict-oldest" }),
       confirmations: state.store<ConfirmationRecord>("confirmations-v1", 50_000, { overflow: "evict-oldest" }),
       invocations: state.store<InvocationRecord>("invocations-v1", 50_000, { overflow: "evict-oldest" }),
       events: state.store<GovernanceAuditEvent>("governance-audit-v1", 50_000, { overflow: "evict-oldest" }),
@@ -127,6 +140,15 @@ export class CrabhelmControlPlane extends DurableObject<Env> {
     }
   }
 
+  deploymentIdentity(): { archiveId: string; releaseId: string } {
+    return this.#releaseIdentity;
+  }
+
+  restartForDeployment(): never {
+    this.ctx.abort("Crabhelm deployment requested a control-plane isolate restart");
+    throw new Error("control-plane isolate restart did not abort execution");
+  }
+
   async alarm(): Promise<void> {
     await this.#reconciler.reconcileAll();
     if ((await this.#registry.list()).some((claw) => claw.observed.phase !== "deleted")) {
@@ -138,6 +160,64 @@ export class CrabhelmControlPlane extends DurableObject<Env> {
     return this.#governanceController.managedSpec(clawId);
   }
 
+  async resolveAccessIdentity(identity: { subject: string; email: string; roles: Array<"administrator" | "member">; groups: string[] }): Promise<{ principalId: string; roles: Array<"administrator" | "member"> }> {
+    const principal = await this.#governance.ensureExternalPrincipal({
+      subject: identity.subject,
+      label: identity.email,
+      source: "oidc",
+      roles: identity.roles,
+      departments: identity.groups,
+    });
+    return { principalId: principal.id, roles: principal.roles };
+  }
+
+  async routeSlackTurn(input: {
+    jobId: string;
+    workspaceId: string;
+    channelId: string;
+    threadTs: string;
+    userId: string;
+    email?: string;
+    label: string;
+  }): Promise<{ clawId: string; requesterId: string; personaId: string; turnToken: string }> {
+    const subject = input.email?.trim()
+      ? `email:${input.email.trim().toLowerCase()}`
+      : `slack:${input.workspaceId}:${input.userId}`;
+    const principal = await this.#governance.ensureExternalPrincipal({
+      subject,
+      label: input.email?.trim().toLowerCase() || input.label,
+      source: "slack",
+      roles: ["member"],
+    });
+    const persona = selectSlackPersona(await this.#governance.personas(), input.workspaceId, input.channelId);
+    if (!persona) throw new Error("No Crabhelm persona is bound to this Slack conversation");
+    const claw = await this.#registry.get(persona.clawId);
+    if (!claw.desired.enabled || claw.observed.phase !== "ready") throw new Error("The assigned Crabhelm teammate is not ready");
+    const turnToken = await signClaims<import("../src/governance-types.js").TurnClaims>(this.env.RUNTIME_SIGNING_SECRET, {
+      typ: "turn",
+      aud: "crabhelm-runtime-turn",
+      jobId: input.jobId,
+      clawId: persona.clawId,
+      requesterId: principal.id,
+      personaId: persona.id,
+      surface: "slack",
+      workspaceId: input.workspaceId,
+      channelId: input.channelId,
+      threadTs: input.threadTs,
+    }, 30 * 60);
+    return { clawId: persona.clawId, requesterId: principal.id, personaId: persona.id, turnToken };
+  }
+
+  async decideSlackConfirmation(input: { workspaceId: string; userId: string; email?: string; confirmationId: string; approve: boolean }): Promise<{ status: string; summary: string }> {
+    const subject = input.email?.trim()
+      ? `email:${input.email.trim().toLowerCase()}`
+      : `slack:${input.workspaceId}:${input.userId}`;
+    const principal = await this.#governance.principalBySubject(subject);
+    if (!principal) throw new Error("Slack requester is not linked to a Crabhelm principal");
+    const confirmation = await this.#governance.decideConfirmation(input.confirmationId, principal.id, input.approve);
+    return { status: confirmation.status, summary: confirmation.summary };
+  }
+
   async #route(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const governanceResponse = await this.#governanceController.route(request);
@@ -146,7 +226,23 @@ export class CrabhelmControlPlane extends DurableObject<Env> {
     if (request.method === "GET" && url.pathname === "/api/state") {
       const fleet = await this.#registry.snapshot();
       await Promise.all(fleet.claws.filter((claw) => claw.observed.phase !== "deleted").map((claw) => this.#governance.ensurePersonaForClaw(claw)));
-      return json({ ...fleet, ...(await this.#governance.snapshot()), runtime: this.#runtime });
+      const runtimeStatuses = Object.fromEntries(await Promise.all(fleet.claws.filter((claw) => claw.observed.phase !== "deleted").map(async (claw) => [claw.id, await this.env.CLAW_COORDINATOR.getByName(claw.id).runtimeStatus()])));
+      return json({
+        ...fleet,
+        ...(await this.#governance.snapshot()),
+        runtime: this.#runtime,
+        runtimeStatuses,
+        integrations: {
+          cloudflareAccess: Boolean(this.env.CF_ACCESS_AUD?.trim() && this.env.CF_ACCESS_AUD !== "configure-after-access-app-creation"),
+          slack: Boolean(this.env.SLACK_SIGNING_SECRET?.trim() && this.env.SLACK_BOT_TOKEN?.trim()),
+          githubOAuth: Boolean(this.env.GITHUB_OAUTH_CLIENT_ID?.trim() && this.env.GITHUB_OAUTH_CLIENT_SECRET?.trim()),
+          runtimeBridge: fleet.claws.some((claw) => (runtimeStatuses[claw.id]?.connected ?? 0) > 0),
+        },
+        viewer: {
+          principalId: actor(request),
+          roles: (request.headers.get("x-crabhelm-roles") ?? "").split(",").filter(Boolean),
+        },
+      });
     }
     if (request.method === "POST" && url.pathname === "/api/policies") {
       return json(
@@ -294,6 +390,22 @@ export class CrabhelmControlPlane extends DurableObject<Env> {
     if (action?.startsWith("pairing")) {
       throw new Error("Slack pairing control is unavailable for standalone workspace agents");
     }
+    if (request.method === "POST" && action === "runtime-reconnect") {
+      const claw = await this.#registry.get(id);
+      if (claw.observed.phase === "deleted") throw new Error("deleted claws have no runtime connection");
+      return json({ clawId: id, disconnected: await this.env.CLAW_COORDINATOR.getByName(id).restartRuntimeConnections() });
+    }
+    if (request.method === "POST" && action === "runtime-reset") {
+      const claw = await this.#registry.get(id);
+      if (claw.observed.phase === "deleted") throw new Error("deleted claws have no runtime state");
+      const coordinator = this.env.CLAW_COORDINATOR.getByName(id);
+      const canceled = await coordinator.cancelActiveTurns();
+      const disconnected = await coordinator.restartRuntimeConnections();
+      return json({ clawId: id, canceled, disconnected });
+    }
+    if (request.method === "GET" && action === "runtime-diagnostics") {
+      return json(await this.#provider.runtimeDiagnostics(await this.#registry.get(id)));
+    }
     if (request.method === "GET" && !action) return json(await this.#registry.get(id));
     if (request.method === "PATCH" && !action) {
       const claw = await this.#registry.update(
@@ -316,6 +428,7 @@ export class CrabhelmControlPlane extends DurableObject<Env> {
         actor(request),
       );
       await this.#schedule();
+      if (action === "disable") await this.env.CLAW_COORDINATOR.getByName(id).cancelPending();
       return json(await this.#reconciler.reconcileOne(claw.id), 202);
     }
     if (request.method === "DELETE" && !action) {
@@ -325,6 +438,7 @@ export class CrabhelmControlPlane extends DurableObject<Env> {
         actor(request),
         typeof body.confirmation === "string" ? body.confirmation : "",
       );
+      await this.env.CLAW_COORDINATOR.getByName(id).prepareForRemoval();
       await this.#schedule();
       return json(await this.#reconciler.reconcileOne(claw.id), 202);
     }

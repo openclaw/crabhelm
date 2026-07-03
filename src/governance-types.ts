@@ -112,6 +112,14 @@ export type OAuthConnectionRecord = {
   updatedAt: string;
 };
 
+export type OAuthStateRecord = {
+  id: string;
+  principalId: string;
+  provider: "github";
+  createdAt: string;
+  expiresAt: string;
+};
+
 export type ConfirmationRecord = {
   id: string;
   requesterId: string;
@@ -290,4 +298,33 @@ export type RuntimeClaims = {
   exp: number;
   clawId: string;
   runtimeId: string;
+};
+
+export type RuntimeTicketClaims = {
+  typ: "runtime-ticket";
+  iss: "crabhelm";
+  aud: "crabhelm-runtime-connect";
+  jti: string;
+  iat: number;
+  exp: number;
+  clawId: string;
+  runtimeId: string;
+  refreshJti: string;
+};
+
+export type TurnClaims = {
+  typ: "turn";
+  iss: "crabhelm";
+  aud: "crabhelm-runtime-turn";
+  jti: string;
+  iat: number;
+  exp: number;
+  jobId: string;
+  clawId: string;
+  requesterId: string;
+  personaId: string;
+  surface: "slack" | "web" | "api";
+  workspaceId?: string;
+  channelId?: string;
+  threadTs?: string;
 };

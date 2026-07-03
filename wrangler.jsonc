@@ -7,13 +7,14 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "routes": [
-    { "pattern": "crabhelm.openclaw.ai", "custom_domain": true }
+    { "pattern": "crabhelm.openclaw.ai", "custom_domain": true },
+    { "pattern": "crabhelm-runtime.openclaw.ai", "custom_domain": true }
   ],
   "assets": {
     "directory": "./web",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/bootstrap/*", "/healthz"]
+    "run_worker_first": ["/api/*", "/bootstrap/*", "/slack/*", "/healthz"]
   },
   "durable_objects": {
     "bindings": [
@@ -36,6 +37,12 @@
   },
   "vars": {
     "PUBLIC_URL": "https://crabhelm.openclaw.ai",
+    "RUNTIME_URL": "https://crabhelm-runtime.openclaw.ai",
+    "CF_ACCESS_TEAM_DOMAIN": "https://crabbox-openclaw.cloudflareaccess.com",
+    "CF_ACCESS_AUD": "58e3e038ab3be824021a64db32211756ad18385ff081de241c2e5c93def6d0cf",
+    "CF_ACCESS_ADMIN_EMAILS": "services@openclaw.org",
+    "CF_ACCESS_ADMIN_GROUPS": "",
+    "GITHUB_OAUTH_CLIENT_ID": "Ov23lisSY7TVGdzujzpL",
     "CRABBOX_URL": "https://crabbox.openclaw.ai",
     "CRABBOX_TARGET_ID": "aws-us-east",
     "CRABBOX_TARGET_LABEL": "AWS US East via Crabbox",
@@ -44,8 +51,8 @@
     "CRABBOX_TTL_SECONDS": "14400",
     "CRABBOX_IDLE_TIMEOUT_SECONDS": "14400",
     "NODE_RUNTIME_SHA256": "9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578",
-    "APPLIANCE_ARCHIVE_SHA256": "27ddf69937714de62898f17ecdbcce07eb184db7b63b6c7e549efa1c40bfb071",
-    "APPLIANCE_MANIFEST_SHA256": "26c69e5cf4e74d009c642df975ed9a3aa047c5671008b6c161997b391ac1d3e9"
+    "APPLIANCE_ARCHIVE_SHA256": "543da38f97d6847a092da8ca20dc5b24986952ec0595d661174da2a3d05e4d2c",
+    "APPLIANCE_MANIFEST_SHA256": "886e1d118dbfef7474ad7462f0a31cc88237ec7a16d3ad996a4fb0fa0362069e"
   },
   "observability": {
     "enabled": true,

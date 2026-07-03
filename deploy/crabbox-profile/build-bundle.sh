@@ -168,6 +168,7 @@ chmod 0400 "$artifacts/crabhelm.tgz"
 
 install -m 0500 "$repo_root/deploy/bootstrap-child.sh" "$output/bootstrap-child.sh"
 install -m 0500 "$script_dir/guest-install.sh" "$output/guest-install.sh"
+install -m 0400 "$repo_root/deploy/runtime-bridge.mjs" "$output/runtime-bridge.mjs"
 
 openclaw_sha256="$(sha256sum "$artifacts/openclaw.tgz")"
 openclaw_sha256="${openclaw_sha256%% *}"
@@ -181,10 +182,12 @@ bootstrap_sha256="$(sha256sum "$output/bootstrap-child.sh")"
 bootstrap_sha256="${bootstrap_sha256%% *}"
 guest_install_sha256="$(sha256sum "$output/guest-install.sh")"
 guest_install_sha256="${guest_install_sha256%% *}"
+runtime_bridge_sha256="$(sha256sum "$output/runtime-bridge.mjs")"
+runtime_bridge_sha256="${runtime_bridge_sha256%% *}"
 
 crabhelm_version="$(node -p 'require(process.argv[1]).version' "$repo_root/package.json")"
-node - "$output/manifest.json" "$node_version" "$node_sha256" "$openclaw_version" "$openclaw_sha256" "$slack_plugin_version" "$slack_sha256" "$crabhelm_version" "$crabhelm_sha256" "$bootstrap_sha256" "$guest_install_sha256" <<'NODE'
-const [file, nodeVersion, nodeSha256, openclawVersion, openclawSha256, slackVersion, slackSha256, crabhelmVersion, crabhelmSha256, bootstrapSha256, guestInstallSha256] = process.argv.slice(2);
+node - "$output/manifest.json" "$node_version" "$node_sha256" "$openclaw_version" "$openclaw_sha256" "$slack_plugin_version" "$slack_sha256" "$crabhelm_version" "$crabhelm_sha256" "$bootstrap_sha256" "$guest_install_sha256" "$runtime_bridge_sha256" <<'NODE'
+const [file, nodeVersion, nodeSha256, openclawVersion, openclawSha256, slackVersion, slackSha256, crabhelmVersion, crabhelmSha256, bootstrapSha256, guestInstallSha256, runtimeBridgeSha256] = process.argv.slice(2);
 const manifest = {
   schemaVersion: 1,
   profile: "openclaw-core",
@@ -194,6 +197,7 @@ const manifest = {
   crabhelm: { file: "artifacts/crabhelm.tgz", version: crabhelmVersion, sha256: crabhelmSha256 },
   bootstrap: { file: "bootstrap-child.sh", sha256: bootstrapSha256 },
   guestInstall: { file: "guest-install.sh", sha256: guestInstallSha256 },
+  runtimeBridge: { file: "runtime-bridge.mjs", sha256: runtimeBridgeSha256 },
 };
 await import("node:fs/promises").then(({ writeFile }) => writeFile(file, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o400 }));
 NODE

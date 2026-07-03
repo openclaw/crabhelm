@@ -167,6 +167,34 @@ test("Crabbox stopped status is explicit provider-absence evidence", async () =>
   });
 });
 
+test("Crabbox failed status exposes only allowlisted bootstrap diagnostics", async () => {
+  const provider = new CrabboxChildCoreProvider({
+    baseUrl: "https://crabbox.example.test",
+    token: "test-token",
+    profile: "openclaw-core",
+    ttlSeconds: 14_400,
+    idleTimeoutSeconds: 14_400,
+    fetch: async () => Response.json({ id: "crabhelm-failed", status: "failed", message: "remote output secret=hidden CRABHELM_INSTALL_FAILED_BOOTSTRAP" }),
+  });
+  const claw = createClawRecord({ name: "Failed", owner: { subject: "github:failed", label: "@failed", source: "github" } });
+  claw.observed.lifecycle = { workspaceId: "crabhelm-failed", responseDigest: "digest" };
+  await assert.rejects(provider.inspect(claw), (error: Error) => {
+    assert.match(error.message, /CRABHELM_INSTALL_FAILED_BOOTSTRAP/u);
+    assert.doesNotMatch(error.message, /secret=hidden/u);
+    return true;
+  });
+
+  const categorized = new CrabboxChildCoreProvider({
+    baseUrl: "https://crabbox.example.test", token: "test-token", profile: "openclaw-core", ttlSeconds: 14_400, idleTimeoutSeconds: 14_400,
+    fetch: async () => Response.json({ id: "crabhelm-failed", status: "failed", error: { code: "command_failed", message: "private command exited with status 1 secret=hidden" } }),
+  });
+  await assert.rejects(categorized.inspect(claw), (error: Error) => {
+    assert.match(error.message, /PROVIDER_COMMAND_EXIT/u);
+    assert.doesNotMatch(error.message, /secret=hidden/u);
+    return true;
+  });
+});
+
 test("deletion recovers the deterministic Crabbox identity if provisioning evidence raced", async () => {
   let requestedUrl = "";
   const provider = new CrabboxChildCoreProvider({
@@ -308,7 +336,7 @@ test("Crabbox provider delegates standalone lifecycle evidence to its workspace 
   assert.deepEqual(calls, ["disable", "drain", "revoke"]);
 });
 
-test("standalone workspace refuses ready state when Slack lacks live evidence", async () => {
+test("standalone workspace keeps central Slack ingress out of the child", async () => {
   const claw = createClawRecord({
     name: "Slack standalone",
     owner: { subject: "github:slack", label: "@slack", source: "github" },
@@ -338,9 +366,10 @@ test("standalone workspace refuses ready state when Slack lacks live evidence", 
   });
 
   const result = await provider.inspect(claw);
-  assert.equal(result.phase, "attention");
-  assert.equal(result.health, "degraded");
-  assert.equal(result.probes?.slack.status, "degraded");
+  assert.equal(result.phase, "ready");
+  assert.equal(result.health, "healthy");
+  assert.equal(result.probes?.slack.status, "unconfigured");
+  assert.equal(result.probes?.slack.configured, false);
 });
 
 test("routed provider dispatches only through the exact administrator target tuple", async () => {

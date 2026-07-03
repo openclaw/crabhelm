@@ -20,6 +20,9 @@ model="${CRABHELM_MODEL:-openai/gpt-5.5}"
 slack_enabled="${CRABHELM_SLACK_ENABLED:-false}"
 openclaw_binary="${CRABHELM_OPENCLAW_BINARY:-$(command -v openclaw || true)}"
 curl_binary="${CRABHELM_CURL_BINARY:-$(command -v curl || true)}"
+runtime_bridge="${CRABHELM_RUNTIME_BRIDGE:-}"
+runtime_bridge_sha256="${CRABHELM_RUNTIME_BRIDGE_SHA256:-}"
+release_id="${CRABHELM_RELEASE_ID:-}"
 
 [[ "$child_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || die "invalid child identity"
 if [[ "$standalone" != "true" ]]; then
@@ -45,6 +48,9 @@ elif [[ "$parent_tls" != "false" || "${CRABHELM_ALLOW_PLAINTEXT_PARENT:-false}" 
 fi
 [[ "$openclaw_binary" = /* && -x "$openclaw_binary" ]] || die "fixed profile must install OpenClaw before bootstrap"
 [[ "$curl_binary" = /* && -x "$curl_binary" ]] || die "curl is required"
+[[ "$runtime_bridge" = /* && -f "$runtime_bridge" && ! -L "$runtime_bridge" ]] || die "runtime bridge must be a regular absolute path"
+[[ "$runtime_bridge_sha256" =~ ^[0-9a-f]{64}$ ]] || die "invalid runtime bridge digest"
+[[ "$release_id" =~ ^[0-9a-f]{64}$ ]] || die "invalid appliance release id"
 command -v sha256sum >/dev/null || die "sha256sum is required"
 
 # The child Gateway uses loopback auth=none and the node authenticates through
@@ -56,6 +62,8 @@ actual_sha256="$(sha256sum "$plugin_tarball" | awk '{print $1}')"
 [[ "$actual_sha256" = "$plugin_sha256" ]] || die "plugin tarball digest mismatch"
 actual_slack_sha256="$(sha256sum "$slack_plugin_tarball" | awk '{print $1}')"
 [[ "$actual_slack_sha256" = "$slack_plugin_sha256" ]] || die "Slack plugin tarball digest mismatch"
+actual_runtime_bridge_sha256="$(sha256sum "$runtime_bridge" | awk '{print $1}')"
+[[ "$actual_runtime_bridge_sha256" = "$runtime_bridge_sha256" ]] || die "runtime bridge digest mismatch"
 
 "$openclaw_binary" config set plugins.allow '["crabhelm","slack"]' --strict-json --replace
 "$openclaw_binary" config set plugins.entries.crabhelm.enabled true --strict-json
@@ -95,11 +103,66 @@ if [[ "$standalone" != "true" ]]; then
   "$openclaw_binary" node start
 fi
 
+prepare_runtime_bridge() {
+  local state_dir bridge_home bridge_file launcher_file launcher_temporary pid_file log_file runtime_env runtime_token_file old_pid node_binary
+  state_dir="${OPENCLAW_STATE_DIR:-${HOME:-/tmp}/.openclaw}"
+  bridge_home="$HOME/.local/share/crabhelm/runtime"
+  bridge_file="$bridge_home/runtime-bridge.mjs"
+  launcher_file="$bridge_home/start-runtime-bridge.sh"
+  launcher_temporary="$launcher_file.new-$$"
+  pid_file="$state_dir/crabhelm-runtime-bridge.pid"
+  log_file="$state_dir/crabhelm-runtime-bridge.log"
+  runtime_env="$state_dir/crabhelm-runtime.env"
+  runtime_token_file="$state_dir/crabhelm-runtime-token"
+  node_binary="$(command -v node)"
+  [[ "$node_binary" = /* && -x "$node_binary" ]] || die "runtime Node.js binary is unavailable"
+  [[ -f "$runtime_env" && ! -L "$runtime_env" && -O "$runtime_env" ]] || die "runtime environment is unavailable"
+  [[ -f "$runtime_token_file" && ! -L "$runtime_token_file" && -O "$runtime_token_file" ]] || die "runtime credential is unavailable"
+  install -d -m 0700 "$bridge_home" "$state_dir"
+  install -m 0500 "$runtime_bridge" "$bridge_file"
+  if [[ -f "$pid_file" && ! -L "$pid_file" ]]; then
+    old_pid="$(tr -cd '0-9' <"$pid_file")"
+    if [[ "$old_pid" =~ ^[0-9]+$ && -r "/proc/$old_pid/cmdline" ]] && tr '\0' '\n' <"/proc/$old_pid/cmdline" | grep -Fxq "$bridge_file"; then
+      kill "$old_pid" 2>/dev/null || true
+      for _ in {1..20}; do kill -0 "$old_pid" 2>/dev/null || break; sleep 0.1; done
+    fi
+  fi
+  : >"$log_file"
+  chmod 0600 "$log_file"
+  if ! (set -o noclobber; : >"$launcher_temporary") 2>/dev/null; then
+    die "runtime launcher staging path is unsafe"
+  fi
+  {
+    printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'umask 077'
+    printf 'state_dir=%q\nbridge_file=%q\npid_file=%q\nlog_file=%q\nruntime_env=%q\nruntime_token_file=%q\nnode_binary=%q\nopenclaw_binary=%q\n' \
+      "$state_dir" "$bridge_file" "$pid_file" "$log_file" "$runtime_env" "$runtime_token_file" "$node_binary" "$openclaw_binary"
+    printf '%s\n' \
+      'if [[ -f "$pid_file" && ! -L "$pid_file" ]]; then' \
+      '  old_pid="$(tr -cd '\''0-9'\'' <"$pid_file")"' \
+      '  if [[ "$old_pid" =~ ^[0-9]+$ && -r "/proc/$old_pid/cmdline" ]] && tr '\''\0'\'' '\''\n'\'' <"/proc/$old_pid/cmdline" | grep -Fxq "$bridge_file"; then exit 0; fi' \
+      'fi' \
+      '[[ -f "$runtime_token_file" && ! -L "$runtime_token_file" && -O "$runtime_token_file" ]] || exit 1' \
+      'exec 3<"$runtime_token_file"' \
+      'OPENCLAW_STATE_DIR="$state_dir" CRABHELM_OPENCLAW_BINARY="$openclaw_binary" CRABHELM_RUNTIME_TOKEN_FILE="$runtime_token_file" CRABHELM_RUNTIME_TOKEN_FD=3 nohup "$node_binary" --env-file="$runtime_env" "$bridge_file" 3<&3 >>"$log_file" 2>&1 &' \
+      'bridge_pid=$!' \
+      'exec 3<&-' \
+      'sleep 2' \
+      'kill -0 "$bridge_pid" 2>/dev/null || exit 1' \
+      'temporary_pid="$pid_file.new-$$"' \
+      'printf '\''%s\n'\'' "$bridge_pid" >"$temporary_pid"' \
+      'chmod 0600 "$temporary_pid"' \
+      'mv -f "$temporary_pid" "$pid_file"'
+  } >"$launcher_temporary"
+  chmod 0500 "$launcher_temporary"
+  mv -f "$launcher_temporary" "$launcher_file"
+}
+
 for _ in {1..60}; do
   if "$curl_binary" --fail --silent --show-error --max-time 2 http://127.0.0.1:18789/readyz >/dev/null; then
     if [[ "$standalone" = "true" ]]; then
       install -d -m 0700 "$HOME/.openclaw"
-      printf '%s\n' "ready" >"$HOME/.openclaw/crabhelm-ready"
+      prepare_runtime_bridge
+      printf '%s\n' "$release_id" >"$HOME/.openclaw/crabhelm-ready"
       chmod 0600 "$HOME/.openclaw/crabhelm-ready"
     fi
     exit 0

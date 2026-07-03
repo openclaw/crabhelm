@@ -18,14 +18,14 @@ The builder pins a Linux x64 Node.js `22.23.1` fallback plus OpenClaw and Slack 
 tar -C /path/to/parent -s '|^output|bundle|' -czf /tmp/crabhelm-bundle.tgz output
 ```
 
-Upload the archive to `crabhelm-appliances/openclaw-core/bundle.tgz` in remote R2, then set `APPLIANCE_MANIFEST_SHA256` to the manifest digest and deploy the Worker.
+Upload the archive to content-addressed remote R2 key `crabhelm-appliances/releases/<archive-sha256>.tgz`, verify the remote bytes, set the archive and manifest digests in Wrangler configuration, then deploy the Worker.
 
 ## Guest sequence
 
-1. Cloudflare generates a child-specific HMAC bootstrap URL containing the exact desired model and Slack state.
+1. Cloudflare generates a child-specific HMAC bootstrap URL containing the exact desired model.
 2. Guest downloads the private archive and credential file.
-3. `guest-install.sh` verifies manifest/artifacts, installs pinned packages in sanitized environments, and activates credentials at `$HOME/.openclaw/.env`.
-4. `bootstrap-child.sh` writes exact child config and starts the loopback Gateway.
-5. Crabhelm attaches through Crabbox and requires a real model turn before readiness.
+3. `guest-install.sh` verifies manifest/artifacts, installs pinned packages in sanitized environments, keeps the model credential in `$HOME/.openclaw/.env`, and installs the runtime workload credential owner-only for the bridge launcher. The bridge reads it through a private file descriptor and rotates it before expiry.
+4. `bootstrap-child.sh` writes exact child config, starts the loopback Gateway, and installs a private idempotent runtime-bridge launcher.
+5. Crabhelm attaches through Crabbox and requires a real model turn before readiness, then launches the bridge. The bridge obtains short-lived one-use connection tickets and connects outbound to the per-claw Durable Object.
 
-Required credential: `OPENAI_API_KEY`. Slack tokens are an all-or-none optional pair. Secret values never appear in workspace requests, registry records, audit rows, or terminal evidence.
+Child credentials are `OPENAI_API_KEY`, the audience-bound Crabhelm runtime token, and child id. Slack and provider OAuth credentials stay on Cloudflare. Secret values never appear in workspace requests, registry records, audit rows, or terminal evidence.

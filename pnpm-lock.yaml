@@ -20,6 +20,9 @@ importers:
       esbuild:
         specifier: 0.28.1
         version: 0.28.1
+      jose:
+        specifier: 6.2.3
+        version: 6.2.3
       tsx:
         specifier: 4.22.3
         version: 4.22.3
@@ -494,6 +497,9 @@ packages:
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
     os: [darwin]
 
+  jose@6.2.3:
+    resolution: {integrity: sha512-YYVDInQKFJfR/xa3ojUTl8c2KoTwiL1R5Wg9YCydwH0x0B9grbzlg5HC7mMjCtUJjbQ/YnGEZIhI5tCgfTb4Hw==}
+
   kleur@4.1.5:
     resolution: {integrity: sha512-o+NO+8WrRiQEE4/7nwRJhN1HWpVmJm511pBHUxPLtp0BUISzlBplORYSmTclCnJvQq2tKu/sgl3xVpkc7ZWuQQ==}
     engines: {node: '>=6'}
@@ -885,6 +891,8 @@ snapshots:
 
   fsevents@2.3.3:
     optional: true
+
+  jose@6.2.3: {}
 
   kleur@4.1.5: {}
 
