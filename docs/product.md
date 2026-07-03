@@ -42,9 +42,9 @@ Each meaningful decision records timestamp, requester, persona, selected actor, 
 
 ## Operator flow
 
-Authenticate to Crabhelm → choose a fixed placement target → choose intended user metadata and inference policy → create → watch provider, Gateway, model-auth, and optional-channel evidence converge.
+Authenticate through Cloudflare Access → choose a fixed placement target → choose intended user metadata and inference policy → create → watch provider, Gateway, model-auth, and outbound runtime evidence converge → bind an approved Slack conversation to its persona.
 
-The intended user is materialized as a principal and personal persona. Operator-authenticated APIs may mint a short-lived principal session; channel access remains native to the child OpenClaw instance and never becomes an OAuth grant.
+The intended user is materialized as a principal and personal persona. Slack requester identities merge with Access identities by canonical email. The organization Slack token remains at the edge and never becomes a child credential or OAuth grant.
 
 ## Readiness
 
@@ -80,18 +80,18 @@ Typed-name confirmation starts a staged removal. Crabhelm disables ingress, veri
 - Cloudflare Worker, Durable Object state, private R2 appliance, custom domain.
 - Real Crabbox allocation and deletion.
 - Pinned OpenClaw `2026.6.11` install with exact-model live inference proof.
-- Optional Slack credential delivery; Slack-enabled lifecycle remains closed unless the adapter can return live ingress, drain, and channel evidence.
+- Signed central Slack ingress with DM/app-mention events, persona bindings, threaded delivery, and one-click confirmations.
 - GitHub organization import remains disabled in the Cloudflare runtime.
-- Operator and principal-session authentication; managed OIDC/Cloudflare Access ingress is not yet configured.
-- GitHub repository/issue reads and confirmed issue comments through the controlled wrapper.
+- Cloudflare Access JWT authentication, with break-glass bearer and signed principal sessions retained for operations.
+- GitHub OAuth authorization-code connection, repository/issue reads, and confirmed issue comments through the controlled wrapper.
+- Per-claw encrypted turn queues, short-lived credential rotation, health, and reconnect over one authenticated outbound WebSocket; no tunnel or inbound child service.
 - AES-GCM OAuth vault, per-claw one-use grant coordination, Queue-backed audit archive, and read-only managed runtime specification.
 
 ## Remaining production expansion
 
-1. Configure managed OIDC or Cloudflare Access and Slack request signing so requester sessions originate from approved identity providers.
-2. Bind Slack/web ingress to personas and add channel-administrator workflows.
-3. Add more provider wrappers and, where providers support it, exchange durable grants for provider-native short-lived tokens.
-4. Move lifecycle reconciliation into per-claw Durable Objects for larger fleets.
-5. Add SIEM delivery and substrate-native runtime attestation before enabling direct runtime ingress.
+1. Add more deployment adapters and durable runtime volumes for substrates whose instances expire.
+2. Add more provider wrappers and, where providers support it, exchange durable grants for provider-native short-lived tokens.
+3. Move lifecycle reconciliation into per-claw Durable Objects for larger fleets.
+4. Add SIEM delivery, step-up confirmation, and substrate-native workload attestation.
 
 The local simulator is test-only and visibly labeled.

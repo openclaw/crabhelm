@@ -24,6 +24,7 @@ import path from "node:path";
 import { SqliteStateDatabase } from "./src/state.js";
 import { crabhelmApprovalCopy, createCrabhelmTool, isCrabhelmMutation } from "./src/tool.js";
 import { loadManagedSystemContext } from "./src/managed-context.js";
+import { createGovernedGithubTool } from "./src/governed-tool.js";
 import type {
   AuditEvent,
   ClawRecord,
@@ -45,6 +46,7 @@ export default definePluginEntry({
         return;
       }
       registerChildCommands(api, config.childId);
+      api.registerTool(createGovernedGithubTool(api.runtime.state.resolveStateDir()));
       api.on("before_prompt_build", async () => ({
         prependSystemContext: await loadManagedSystemContext(
           api.runtime.state.resolveStateDir(),

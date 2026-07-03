@@ -68,7 +68,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .parent-card dl div { display: flex; justify-content: space-between; gap: 10px; }
 .parent-card dt, .parent-card dd { margin: 0; font: 500 9px/1.2 var(--mono); }
 .parent-card dt { color: var(--dim); }.parent-card dd { color: var(--muted); }
-.operator { width: 100%; margin-top: 10px; padding: 12px 7px; border: 0; border-top: 1px solid var(--line-soft); background: transparent; display: flex; align-items: center; gap: 10px; cursor: pointer; text-align: left; }
+.operator { width: 100%; margin-top: 10px; padding: 12px 7px; border: 0; border-top: 1px solid var(--line-soft); background: transparent; display: flex; align-items: center; gap: 10px; text-align: left; }
 .operator-avatar { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: var(--paper); color: var(--ink); font: 800 9px/1 var(--mono); }
 .operator strong, .operator small { display: block; }.operator strong { font-size: 11px; }.operator small { color: var(--mint); margin-top: 4px; font: 500 9px/1 var(--mono); }
 .operator b { margin-left: auto; color: var(--dim); }

@@ -239,6 +239,15 @@ export function mayInvokePersona(persona: PersonaRecord, requesterId: string, is
   return isAdministrator || persona.ownerPrincipalId === requesterId || persona.kind === "profile";
 }
 
+export function selectSlackPersona(
+  personas: PersonaRecord[],
+  workspaceId: string,
+  channelId: string,
+): PersonaRecord | undefined {
+  return personas.find((persona) => persona.enabled && persona.bindings.some((binding) =>
+    binding.surface === "slack" && binding.workspaceId === workspaceId && binding.channelId === channelId));
+}
+
 export function resolveInvocationActor(input: {
   requester: PrincipalRecord;
   persona: PersonaRecord;

@@ -11,19 +11,18 @@ The installer receives:
 - the reviewed manifest SHA-256;
 - child UUID;
 - exact desired inference model;
-- desired Slack enabled state;
-- an owner-only credential file with `OPENAI_API_KEY` and, when configured, both Slack tokens;
+- an owner-only credential file with `OPENAI_API_KEY`, child id, control URL, and audience-bound runtime token;
 - verified OpenClaw, Crabhelm, Slack, bootstrap, and installer artifacts.
 
 ## Installation
 
 `guest-install.sh` verifies the manifest contract and every artifact digest before installing anything. Privileged npm runs through an empty environment. The installer activates credentials only after packages and plugins are installed, then delegates to `bootstrap-child.sh`.
 
-`bootstrap-child.sh` writes the exact model, Slack policy, plugin allowlist, child UUID, loopback Gateway mode, and auth mode. In Cloudflare standalone mode it starts only the local Gateway and writes `~/.openclaw/crabhelm-ready` after `/readyz` succeeds. Legacy outbound node enrollment remains available only when standalone mode is off.
+`bootstrap-child.sh` writes the exact model, plugin allowlist, child UUID, loopback Gateway mode, and auth mode. In Cloudflare standalone mode it starts the local Gateway and installs a private idempotent runtime-bridge launcher, then writes `~/.openclaw/crabhelm-ready` after `/readyz` succeeds. Legacy outbound node enrollment remains available only when standalone mode is off.
 
 ## Live proof
 
-The Cloudflare adapter attaches through Crabbox's authenticated server-to-server terminal and accepts only exact sentinel lines. After the Gateway marker appears, it writes the exact desired model, restarts the Gateway, runs a bounded `openclaw agent` turn, and requires the expected response before writing `~/.openclaw/crabhelm-inference-ready`.
+The Cloudflare adapter attaches through Crabbox's authenticated server-to-server terminal and accepts only exact sentinel lines. After the Gateway marker appears, it writes the exact desired model, restarts the Gateway, runs a bounded `openclaw agent` turn, requires the expected response, starts the outbound runtime bridge, then writes `~/.openclaw/crabhelm-inference-ready`.
 
 Provider allocation, echoed shell source, or a process existing is insufficient.
 
@@ -33,5 +32,6 @@ Provider allocation, echoed shell source, or a process existing is insufficient.
 - Bootstrap endpoints require a deterministic child HMAC bearer and return `no-store`.
 - Child Gateway binds loopback only.
 - Raw probe output stays in the workspace and is never projected into Crabhelm state.
-- Slack requires both credentials; partial configuration fails closed.
+- The owner-only runtime workload credential enters the bridge through an inherited file descriptor, expires after ten minutes, and rotates through a one-use refresh fence. Owner-only persistence permits restart recovery; turn processes use the loopback Gateway and receive neither workload nor model-provider credentials.
+- Slack and provider OAuth credentials never enter the child.
 - Changed desired model invalidates the inference marker and forces another live probe.

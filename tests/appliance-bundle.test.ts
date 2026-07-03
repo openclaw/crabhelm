@@ -56,6 +56,51 @@ test("appliance builder pins artifacts and guest install verifies the bundle bef
   assert.equal(manifest.openclaw.sha256, digest(await readFile(path.join(output, manifest.openclaw.file))));
   assert.equal(manifest.slack.sha256, digest(await readFile(path.join(output, manifest.slack.file))));
   assert.equal(manifest.crabhelm.sha256, digest(await readFile(path.join(output, manifest.crabhelm.file))));
+  assert.equal(manifest.runtimeBridge.sha256, digest(await readFile(path.join(output, manifest.runtimeBridge.file))));
+  const guestInstallSource = await readFile(path.join(output, manifest.guestInstall.file), "utf8");
+  assert.match(guestInstallSource, /CRABHELM_CREDENTIAL_REFRESH_URL/u);
+  assert.match(guestInstallSource, /Authorization: Bearer \$CRABHELM_BOOTSTRAP_TOKEN/u);
+  assert.ok(
+    guestInstallSource.indexOf("CRABHELM_CREDENTIAL_REFRESH_URL") < guestInstallSource.indexOf('"$node_binary" - "$credential_source" "$credential_file"'),
+  );
+  const runtimeBridgeSource = await readFile(path.join(output, manifest.runtimeBridge.file), "utf8");
+  assert.match(runtimeBridgeSource, /15 \* 60 \* 1000/u);
+  assert.match(runtimeBridgeSource, /CRABHELM_RUNTIME_TOKEN_FD/u);
+  assert.match(runtimeBridgeSource, /closeSync\(descriptor\)/u);
+  assert.match(runtimeBridgeSource, /new WebSocket\(url, \["crabhelm\.runtime\.v1", `crabhelm\.ticket\.\$\{ticket\}`\]\)/u);
+  assert.match(runtimeBridgeSource, /authorization: `Bearer \$\{runtimeToken\}`/u);
+  assert.match(runtimeBridgeSource, /type: "job\.claim"/u);
+  assert.match(runtimeBridgeSource, /type: "job\.started"/u);
+  assert.match(runtimeBridgeSource, /type: "runtime\.refresh"/u);
+  assert.match(runtimeBridgeSource, /setTimeout\(requestRefresh, 15_000\)/u);
+  assert.match(runtimeBridgeSource, /if \(refreshPending\) requestRefresh\(\)/u);
+  assert.match(runtimeBridgeSource, /binaryType = "arraybuffer"/u);
+  assert.match(runtimeBridgeSource, /message\.type === "job\.ack"/u);
+  assert.doesNotMatch(runtimeBridgeSource, /\/api\/runtime\/(?:claim|ack|complete|control|refresh)/u);
+  assert.match(runtimeBridgeSource, /\/api\/runtime\/ticket/u);
+  assert.match(runtimeBridgeSource, /"agent", "--agent", "main"/u);
+  assert.doesNotMatch(runtimeBridgeSource, /"agent", "--local"/u);
+  assert.doesNotMatch(runtimeBridgeSource, /env\.OPENAI_API_KEY/u);
+  assert.match(runtimeBridgeSource, /process\.kill\(-child\.pid, signal\)/u);
+  assert.match(runtimeBridgeSource, /activeRunCancel\?\.\("runtime reset by administrator"\)/u);
+  assert.match(runtimeBridgeSource, /stdoutReady\?\.\(output\)/u);
+  assert.match(runtimeBridgeSource, /runtime\.client_error/u);
+  assert.match(runtimeBridgeSource, /data instanceof ArrayBuffer/u);
+  assert.match(runtimeBridgeSource, /ArrayBuffer\.isView\(data\)/u);
+  assert.match(runtimeBridgeSource, /typeof data\.text === "function"/u);
+  assert.match(runtimeBridgeSource, /openSync\(file, "wx", 0o600\)/u);
+  assert.match(runtimeBridgeSource, /!raw && Date\.now\(\) - info\.mtimeMs < 30_000/u);
+  assert.match(runtimeBridgeSource, /runtime lock owner is invalid/u);
+  assert.match(runtimeBridgeSource, /process\.kill\(owner, 0\)/u);
+  assert.match(runtimeBridgeSource, /runtime_lock_release_failed/u);
+  assert.match(runtimeBridgeSource, /child\.on\("exit"/u);
+  assert.doesNotMatch(runtimeBridgeSource, /child\.on\("close"/u);
+  assert.doesNotMatch(runtimeBridgeSource, /required\("CRABHELM_RUNTIME_TOKEN"\)/u);
+  assert.match(runtimeBridgeSource, /CRABHELM_RUNTIME_TOKEN_FILE/u);
+  assert.doesNotMatch(runtimeBridgeSource, /crabhelm\.token\./u);
+  assert.doesNotMatch(runtimeBridgeSource, /crabhelm\.auth\./u);
+  assert.match(runtimeBridgeSource, /\/api\/runtime\/connect/u);
+  assert.equal((await stat(path.join(output, manifest.runtimeBridge.file))).mode & 0o777, 0o400);
   const repackedSlack = JSON.parse((await run("tar", [
     "-xOf",
     path.join(output, manifest.slack.file),
@@ -85,7 +130,7 @@ test("appliance builder pins artifacts and guest install verifies the bundle bef
   await mkdir(home);
   await writeFile(
     credentialSource,
-    "OPENAI_API_KEY=test-only\nCRABHELM_CONTROL_URL=https://crabhelm.example.test\nCRABHELM_RUNTIME_TOKEN=test-runtime-token\nSLACK_BOT_TOKEN=test-only\nSLACK_APP_TOKEN=test-only\n",
+    "OPENAI_API_KEY=test-only\nCRABHELM_CONTROL_URL=https://crabhelm.example.test\nCRABHELM_RUNTIME_TOKEN=test-runtime-token\nCRABHELM_CHILD_ID=22222222-2222-4222-8222-222222222222\n",
     { mode: 0o600 },
   );
   await writeFile(managedSpecSource, `${JSON.stringify({
@@ -144,6 +189,13 @@ printf '\n' >>"${log}"
   assert.doesNotMatch(calls, /auth=present/);
   assert.match(calls, /config set plugins\.allow/);
   assert.match(calls, /node install/);
+  const gatewayEnvironment = await readFile(path.join(home, ".openclaw", ".env"), "utf8");
+  const runtimeEnvironment = await readFile(path.join(home, ".openclaw", "crabhelm-runtime.env"), "utf8");
+  assert.match(gatewayEnvironment, /OPENAI_API_KEY=/u);
+  assert.doesNotMatch(gatewayEnvironment, /CRABHELM_RUNTIME_TOKEN/u);
+  assert.match(runtimeEnvironment, /CRABHELM_CONTROL_URL=/u);
+  assert.doesNotMatch(runtimeEnvironment, /OPENAI_API_KEY|CRABHELM_RUNTIME_TOKEN/u);
+  assert.equal(await readFile(path.join(home, ".openclaw", "crabhelm-runtime-token"), "utf8"), "test-runtime-token\n");
   assert.equal(await readFile(path.join(home, ".openclaw", "managed", "IDENTITY.md"), "utf8"), "# Test identity\n");
   assert.equal(await readFile(path.join(home, ".openclaw", "managed", "skills", "test-skill", "SKILL.md"), "utf8"), "# Test skill\n");
   assert.equal((await stat(path.join(home, ".openclaw", "managed", "IDENTITY.md"))).mode & 0o777, 0o444);

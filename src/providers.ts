@@ -204,6 +204,10 @@ export type CrabboxProviderOptions = {
     disable?(claw: ClawRecord): Promise<DisableResult>;
     drain?(claw: ClawRecord): Promise<DrainResult>;
     revokeControl?(claw: ClawRecord): Promise<RevokeControlResult>;
+    runtimeDiagnostics?(
+      claw: ClawRecord,
+      workspace: { status: string; attachUrl?: string },
+    ): Promise<{ events: Array<Record<string, unknown>>; processes: string[] }>;
   };
   fetch?: typeof globalThis.fetch;
 };
@@ -349,7 +353,8 @@ export class CrabboxChildCoreProvider implements ChildCoreProvider {
       return { absent: true, message: `Crabbox provider reports ${status}` };
     }
     if (status === "failed" || status === "error") {
-      throw operationalError("CRABBOX_WORKSPACE_FAILED", "Crabbox workspace reported failure");
+      const diagnostic = crabboxWorkspaceFailureDiagnostic(body, workspace);
+      throw operationalError("CRABBOX_WORKSPACE_FAILED", `Crabbox workspace reported failure${diagnostic ? `: ${diagnostic}` : ""}`);
     }
     if (this.#options.workspaceBootstrap && status === "ready") {
       const bootstrap = await this.#options.workspaceBootstrap.inspect(claw, {
@@ -359,13 +364,10 @@ export class CrabboxChildCoreProvider implements ChildCoreProvider {
       if (bootstrap.ready) {
         const now = new Date().toISOString();
         const probes = workspaceOperationalProbes(claw, now);
-        const slackReady = !claw.desired.channels.slack.enabled || probes.slack.status === "healthy";
         return {
-          phase: slackReady ? "ready" : "attention",
-          health: slackReady ? "healthy" : "degraded",
-          message: slackReady
-            ? bootstrap.message
-            : "OpenClaw Gateway is healthy; live Slack connection evidence is unavailable",
+          phase: "ready",
+          health: "healthy",
+          message: bootstrap.message,
           lifecycle: claw.observed.lifecycle,
           controlLink: {
             status: "paired",
@@ -426,6 +428,22 @@ export class CrabboxChildCoreProvider implements ChildCoreProvider {
       ...(nodeEvidence?.probes ? { probes: nodeEvidence.probes } : {}),
       ...(ready ? { lastSeenAt: new Date().toISOString() } : {}),
     };
+  }
+
+  async runtimeDiagnostics(claw: ClawRecord): Promise<{ events: Array<Record<string, unknown>>; processes: string[] }> {
+    const id = claw.observed.lifecycle?.workspaceId;
+    if (!id) throw new Error("claw has no Crabbox workspace");
+    const response = await this.#request(`/v1/workspaces/${encodeURIComponent(id)}`, { method: "GET" });
+    const body = asRecord(await readBody(response));
+    if (!response.ok) throw new Error(`Crabbox diagnostics inspection failed (HTTP ${response.status})`);
+    const workspace = asRecord(body.workspace);
+    const status = (readString(body, "status") ?? readString(workspace, "status") ?? "").toLowerCase();
+    const attachUrl = readString(body, "attachUrl") ?? readString(workspace, "attachUrl");
+    if (!this.#options.workspaceBootstrap?.runtimeDiagnostics) throw new Error("runtime diagnostics are unavailable");
+    return this.#options.workspaceBootstrap.runtimeDiagnostics(claw, {
+      status,
+      ...(attachUrl ? { attachUrl } : {}),
+    });
   }
 
   async disable(claw: ClawRecord): Promise<DisableResult> {
@@ -586,13 +604,10 @@ function workspaceOperationalProbes(
   return {
     checkedAt,
     slack: {
-      status: claw.desired.channels.slack.enabled ? "degraded" : "unconfigured",
-      configured: claw.desired.channels.slack.enabled,
+      status: "unconfigured",
+      configured: false,
       connected: false,
       accountCount: 0,
-      ...(claw.desired.channels.slack.enabled
-        ? { lastError: "Slack live probe is unavailable on this deployment adapter" }
-        : {}),
     },
     model: {
       status: "ready",
@@ -613,6 +628,37 @@ function workspaceOperationalProbes(
       contentCaptured: false,
     },
   };
+}
+
+function crabboxWorkspaceFailureDiagnostic(...roots: Record<string, unknown>[]): string | undefined {
+  const records = roots.flatMap((root) => [
+    root,
+    asRecord(root.error),
+    asRecord(root.failure),
+    asRecord(root.details),
+  ]);
+  for (const record of records) {
+    const code = (readString(record, "code") ?? readString(record, "reason"))?.toLowerCase();
+    const message = readString(record, "message") ?? (typeof record.error === "string" ? record.error : undefined);
+    const status = message?.match(/\bCRABHELM_[A-Z0-9_]{3,80}\b/u)?.[0];
+    if (status) return status;
+    if (message === "workspace provisioning deadline expired" || message === "workspace provisioning failed") return message;
+    const normalized = `${code ?? ""} ${message?.toLowerCase() ?? ""}`;
+    const category = [
+      ["permission denied", "PROVIDER_PERMISSION_DENIED"],
+      ["no such file", "PROVIDER_FILE_MISSING"],
+      ["not found", "PROVIDER_DEPENDENCY_MISSING"],
+      ["syntax", "PROVIDER_COMMAND_SYNTAX"],
+      ["timed out", "PROVIDER_TIMEOUT"],
+      ["timeout", "PROVIDER_TIMEOUT"],
+      ["exit status", "PROVIDER_COMMAND_EXIT"],
+      ["exited with", "PROVIDER_COMMAND_EXIT"],
+      ["bootstrap", "PROVIDER_BOOTSTRAP_FAILED"],
+      ["capacity", "PROVIDER_CAPACITY"],
+    ].find(([needle]) => normalized?.includes(needle));
+    if (category) return category[1];
+  }
+  return undefined;
 }
 
 export class UnconfiguredChildCoreProvider implements ChildCoreProvider {

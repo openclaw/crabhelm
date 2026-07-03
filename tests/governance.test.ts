@@ -9,6 +9,7 @@ import {
   createSkillRecord,
   mayInvokePersona,
   resolveInvocationActor,
+  selectSlackPersona,
 } from "../src/governance.js";
 import { GovernanceRegistry } from "../src/governance-registry.js";
 import type {
@@ -16,9 +17,11 @@ import type {
   GovernanceAuditEvent,
   InvocationRecord,
   OAuthConnectionRecord,
+  OAuthStateRecord,
   PersonaRecord,
   PrincipalRecord,
   RuntimeClaims,
+  RuntimeTicketClaims,
   SkillRecord,
 } from "../src/governance-types.js";
 import { createMemoryStateStore } from "../src/state.js";
@@ -85,6 +88,11 @@ test("signed runtime claims reject tampering and expiry class mismatch", async (
   const token = await signClaims<RuntimeClaims>(secret, { typ: "runtime", aud: "crabhelm-runtime", clawId: "claw", runtimeId: "runtime" }, 60);
   assert.equal((await verifyClaims<RuntimeClaims>(secret, token, { typ: "runtime", aud: "crabhelm-runtime" })).clawId, "claw");
   await assert.rejects(verifyClaims<RuntimeClaims>(secret, `${token.slice(0, -1)}x`, { typ: "runtime", aud: "crabhelm-runtime" }), /signature/u);
+  const ticket = await signClaims<RuntimeTicketClaims>(secret, {
+    typ: "runtime-ticket", aud: "crabhelm-runtime-connect", clawId: "claw", runtimeId: "runtime", refreshJti: "refresh",
+  }, 30);
+  assert.equal((await verifyClaims<RuntimeTicketClaims>(secret, ticket, { typ: "runtime-ticket", aud: "crabhelm-runtime-connect" })).refreshJti, "refresh");
+  await assert.rejects(verifyClaims<RuntimeClaims>(secret, ticket, { typ: "runtime", aud: "crabhelm-runtime" }), /claims/u);
 });
 
 test("service-backed shared personas require owner or administrator invocation", () => {
@@ -98,12 +106,60 @@ test("service-backed shared personas require owner or administrator invocation",
   assert.equal(mayInvokePersona(profile, requester.id, false), true);
 });
 
+test("Slack routing requires an exact administrator-managed binding, including DMs", () => {
+  const owner = createPrincipalRecord({ subject: "slack:T1:U1", label: "Owner" });
+  const unbound = createPersonaRecord({ name: "Personal", kind: "personal", ownerPrincipalId: owner.id, clawId: "claw" });
+  const bound = createPersonaRecord({
+    name: "Bound", kind: "personal", ownerPrincipalId: owner.id, clawId: "claw",
+    bindings: [{ surface: "slack", workspaceId: "T1", channelId: "D1" }],
+  });
+  assert.equal(selectSlackPersona([unbound], "T1", "D1"), undefined);
+  assert.equal(selectSlackPersona([unbound, bound], "T1", "D1")?.id, bound.id);
+  assert.equal(selectSlackPersona([bound], "T1", "D2"), undefined);
+});
+
+test("Slack identity refresh cannot downgrade an Access administrator", async () => {
+  const registry = registryFixture();
+  const administrator = await registry.ensureExternalPrincipal({
+    subject: "email:admin@example.com",
+    label: "Admin",
+    source: "oidc",
+    roles: ["administrator", "member"],
+    departments: ["platform"],
+  });
+  const refreshed = await registry.ensureExternalPrincipal({
+    subject: "email:admin@example.com",
+    label: "Admin via Slack",
+    source: "slack",
+    roles: ["member"],
+  });
+  assert.equal(refreshed.id, administrator.id);
+  assert.deepEqual(refreshed.roles, ["administrator", "member"]);
+  assert.deepEqual(refreshed.departments, ["platform"]);
+});
+
+test("Access identity refresh revokes stale administrator roles and groups", async () => {
+  const registry = registryFixture();
+  const administrator = await registry.ensureExternalPrincipal({
+    subject: "access:admin", label: "Admin", source: "oidc",
+    roles: ["administrator", "member"], departments: ["platform"],
+  });
+  const refreshed = await registry.ensureExternalPrincipal({
+    subject: "access:admin", label: "Former admin", source: "oidc",
+    roles: ["member"], departments: [],
+  });
+  assert.equal(refreshed.id, administrator.id);
+  assert.deepEqual(refreshed.roles, ["member"]);
+  assert.deepEqual(refreshed.departments, []);
+});
+
 function registryFixture(): GovernanceRegistry {
   return new GovernanceRegistry({
     principals: createMemoryStateStore<PrincipalRecord>(),
     personas: createMemoryStateStore<PersonaRecord>(),
     skills: createMemoryStateStore<SkillRecord>(),
     connections: createMemoryStateStore<OAuthConnectionRecord>(),
+    oauthStates: createMemoryStateStore<OAuthStateRecord>(),
     confirmations: createMemoryStateStore<ConfirmationRecord>(),
     invocations: createMemoryStateStore<InvocationRecord>(),
     events: createMemoryStateStore<GovernanceAuditEvent>(),

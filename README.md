@@ -14,10 +14,13 @@ The execution plane separates requester, persona, and actor; governs skills and 
 - Runtime: Cloudflare Workers + Durable Objects
 - Appliance store: private Cloudflare R2 bucket `crabhelm-appliances`
 - Current deployment target: `aws-us-east` through Crabbox
-- Operator access: bearer token stored in 1Password; never sent to agent machines
+- Operator access: Cloudflare Access identity; no shared operator bearer
+- Automation access: account-scoped Cloudflare service binding; no public administration endpoint
+- Team ingress: one signed Slack app at `crabhelm-runtime.openclaw.ai`; personas bind approved workspaces/channels to claws
+- Provider delegation: GitHub OAuth grants stay encrypted in R2 and are used only by the governed edge wrapper
 - Agent bootstrap: deterministic per-agent HMAC token, short private R2 delivery path, outbound HTTPS/WSS only
 
-The current Crabbox target creates a real workspace, installs pinned OpenClaw and Crabhelm artifacts, installs child-local credentials, starts a loopback Gateway, and reports ready only after terminal evidence confirms the Gateway marker. Simulator code remains for unit tests and local domain testing; production configuration does not select it.
+The current Crabbox target creates a real workspace, installs digest-pinned OpenClaw and Crabhelm artifacts, starts a loopback Gateway, runs a real model challenge, then starts the outbound runtime bridge. A claw reports ready only after the exact inference response and bridge launch succeed. Simulator code remains for tests and local domain development; production never selects it.
 
 ## Deploy
 
@@ -32,7 +35,6 @@ pnpm worker:deploy
 Required Worker secrets:
 
 ```text
-OPERATOR_TOKEN
 BOOTSTRAP_SIGNING_SECRET
 CRABBOX_TOKEN
 OPENAI_API_KEY
@@ -40,11 +42,14 @@ SESSION_SIGNING_SECRET
 INVOCATION_SIGNING_SECRET
 RUNTIME_SIGNING_SECRET
 VAULT_MASTER_KEY
+SLACK_SIGNING_SECRET
+SLACK_BOT_TOKEN
+GITHUB_OAUTH_CLIENT_SECRET
 ```
 
 Signing secrets must contain at least 32 bytes. `VAULT_MASTER_KEY` is a base64url-encoded 32-byte AES key.
 
-Optional Slack secrets are `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN`; configure both or neither. Use `wrangler secret put NAME`. Do not place secret values in `wrangler.jsonc`, `.dev.vars`, logs, or the registry.
+`GITHUB_OAUTH_CLIENT_ID` and Cloudflare Access team/audience settings are non-secret Worker variables. Slack sends signed events to `https://crabhelm-runtime.openclaw.ai/slack/events` and interactions to `https://crabhelm-runtime.openclaw.ai/slack/interactions`. The GitHub OAuth callback is `https://crabhelm.openclaw.ai/api/oauth/github/callback`. Use `wrangler secret put NAME`; never place secret values in `wrangler.jsonc`, `.dev.vars`, logs, or registry state.
 
 Build and upload a reviewed appliance after guest-profile changes:
 
@@ -56,11 +61,11 @@ deploy/crabbox-profile/build-bundle.sh \
   --output /tmp/crabhelm-bundle
 tar -C /tmp -s '|^crabhelm-bundle|bundle|' \
   -czf /tmp/crabhelm-bundle.tgz crabhelm-bundle
-wrangler r2 object put crabhelm-appliances/openclaw-core/bundle.tgz \
+pnpm exec wrangler r2 object put crabhelm-appliances/releases/$APPLIANCE_ARCHIVE_SHA256.tgz \
   --file /tmp/crabhelm-bundle.tgz --remote
 ```
 
-Update `APPLIANCE_MANIFEST_SHA256` to the generated manifest digest before deploying the Worker.
+Verify the remote archive bytes, then update both `APPLIANCE_ARCHIVE_SHA256` and `APPLIANCE_MANIFEST_SHA256` to the generated digests before deploying the Worker.
 
 ## Local development
 
@@ -69,7 +74,7 @@ pnpm install
 pnpm dev
 ```
 
-Open <http://127.0.0.1:4177>. Local development uses the same domain and UI with an explicitly labeled simulator unless Crabbox configuration is supplied.
+Open <http://127.0.0.1:4177>. Local development uses an explicitly labeled simulator. Production Wrangler configuration always uses the real Crabbox adapter.
 
 ## Safety boundaries
 
@@ -77,6 +82,10 @@ Open <http://127.0.0.1:4177>. Local development uses the same domain and UI with
 - A provider resource becomes ready only from live child evidence; allocation alone is not readiness.
 - Registry and audit state exclude prompts, messages, tool output, credential values, and opaque provider response bodies.
 - Bootstrap endpoints require a per-agent HMAC bearer, return `no-store`, and expose only that agent's fixed appliance and credentials.
+- Slack signing is verified before parsing; Cloudflare Access JWTs are verified against the team JWKS and application audience.
+- Access-authenticated clients and enrolled runtimes may redeem governed grants; actor policy, argument digest, expiry, and the one-use fence still apply.
+- Runtime turns, credential rotation, health, and reconnect use one authenticated outbound WebSocket to a per-claw Durable Object; reset generations abort active process groups, and persona-bound job payloads remain encrypted at rest.
+- The owner-only runtime workload credential is audience-bound, expires after ten minutes, rotates through a one-use mint fence with encrypted idempotent response replay, and is never inherited by model/tool processes; persistence permits bridge crash and host restart recovery.
 - Removal remains evidence-driven: disable ingress, drain active work, release the exact provider identity, confirm absence, then revoke the exact control link.
 
 See [architecture](docs/architecture.md), [product contract](docs/product.md), and the [Crabbox appliance profile](deploy/crabbox-profile/README.md) for implementation detail and the identity-aware execution contract.
