@@ -15,23 +15,26 @@ test("appliance builder pins artifacts and guest install verifies the bundle bef
   const source = path.join(root, "source");
   const packageDir = path.join(source, "package");
   const openclawTarball = path.join(root, "openclaw.tgz");
+  const nodeTarball = await createNodeFixture(root);
   const slackSource = path.join(root, "slack-source");
   const slackTarball = path.join(root, "slack.tgz");
   const output = path.join(root, "bundle");
   await mkdir(packageDir, { recursive: true });
   await writeFile(
     path.join(packageDir, "package.json"),
-    `${JSON.stringify({ name: "openclaw", version: "2026.6.11-beta.1" })}\n`,
+    `${JSON.stringify({ name: "openclaw", version: "2026.6.11" })}\n`,
   );
   await run("tar", ["-czf", openclawTarball, "-C", source, "package"]);
   await mkdir(path.join(slackSource, "package"), { recursive: true });
   await writeFile(
     path.join(slackSource, "package", "package.json"),
-    `${JSON.stringify({ name: "@openclaw/slack", version: "2026.6.10" })}\n`,
+    `${JSON.stringify({ name: "@openclaw/slack", version: "2026.6.11" })}\n`,
   );
   await run("tar", ["-czf", slackTarball, "-C", slackSource, "package"]);
 
   const built = await run(builder, [
+    "--node-tarball",
+    nodeTarball,
     "--openclaw-tarball",
     openclawTarball,
     "--slack-tarball",
@@ -44,8 +47,11 @@ test("appliance builder pins artifacts and guest install verifies the bundle bef
   assert.match(built.stdout, /profile=openclaw-core/);
   const manifestBytes = await readFile(path.join(output, "manifest.json"));
   const manifest = JSON.parse(manifestBytes.toString("utf8"));
-  assert.equal(manifest.openclaw.version, "2026.6.11-beta.1");
-  assert.equal(manifest.slack.version, "2026.6.10");
+  assert.equal(manifest.openclaw.version, "2026.6.11");
+  assert.equal(manifest.node.version, "22.23.1");
+  assert.equal(manifest.node.platform, "linux");
+  assert.equal(manifest.node.arch, "x64");
+  assert.equal(manifest.slack.version, "2026.6.11");
   assert.equal(manifest.crabhelm.version, "0.0.0");
   assert.equal(manifest.openclaw.sha256, digest(await readFile(path.join(output, manifest.openclaw.file))));
   assert.equal(manifest.slack.sha256, digest(await readFile(path.join(output, manifest.slack.file))));
@@ -74,13 +80,26 @@ test("appliance builder pins artifacts and guest install verifies the bundle bef
   const log = path.join(root, "guest.log");
   const home = path.join(root, "home");
   const credentialSource = path.join(root, "child-credentials.env");
+  const managedSpecSource = path.join(root, "managed-spec.json");
   await mkdir(bin);
   await mkdir(home);
   await writeFile(
     credentialSource,
-    "OPENAI_API_KEY=test-only\nSLACK_BOT_TOKEN=test-only\nSLACK_APP_TOKEN=test-only\n",
+    "OPENAI_API_KEY=test-only\nCRABHELM_CONTROL_URL=https://crabhelm.example.test\nCRABHELM_RUNTIME_TOKEN=test-runtime-token\nSLACK_BOT_TOKEN=test-only\nSLACK_APP_TOKEN=test-only\n",
     { mode: 0o600 },
   );
+  await writeFile(managedSpecSource, `${JSON.stringify({
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    clawId: "22222222-2222-4222-8222-222222222222",
+    persona: { id: "persona-test", name: "Test agent", slug: "test-agent", kind: "personal", ownerPrincipalId: "principal-test", actorPolicy: { mode: "invoker" } },
+    policyRevision: 1,
+    capabilityIds: ["github.repository.read"],
+    instructions: { identity: "# Test identity\n", soul: "# Test soul\n", agents: "# Test agents\n" },
+    publishedContext: [],
+    skills: [{ id: "skill-test", name: "Test skill", slug: "test-skill", version: 1, digest: "a".repeat(64), files: [{ path: "SKILL.md", content: "# Test skill\n", sha256: "b".repeat(64) }] }],
+    readOnly: true,
+  })}\n`, { mode: 0o600 });
   await executable(path.join(bin, "sudo"), "#!/usr/bin/env bash\n[[ \"${1:-}\" = -n ]] && shift\nexec \"$@\"\n");
   await executable(path.join(bin, "npm"), `#!/usr/bin/env bash
 printf 'npm auth=%s/%s ' "\${OPENCLAW_GATEWAY_TOKEN+present}" "\${OPENCLAW_GATEWAY_PASSWORD+present}" >>"${log}"
@@ -89,7 +108,7 @@ printf '\n' >>"${log}"
 `);
   await executable(path.join(bin, "openclaw"), `#!/usr/bin/env bash
 if [[ "\${1:-}" = --version ]]; then
-  printf '%s\n' 'OpenClaw 2026.6.11-beta.1 (test)'
+  printf '%s\n' 'OpenClaw 2026.6.11 (test)'
   exit 0
 fi
 credential=absent
@@ -105,7 +124,9 @@ printf '\n' >>"${log}"
       HOME: home,
       CRABHELM_TEST_LOG: log,
       CRABHELM_BUNDLE_MANIFEST_SHA256: digest(manifestBytes),
+      CRABHELM_NODE_SHA256: manifest.node.sha256,
       CRABHELM_CREDENTIAL_FILE: credentialSource,
+      CRABHELM_MANAGED_SPEC_FILE: managedSpecSource,
       CRABBOX_ADAPTER_ROOT_SESSION_ID: "22222222-2222-4222-8222-222222222222",
       CRABHELM_PARENT_HOST: "parent.internal.example",
       CRABHELM_PARENT_TLS: "true",
@@ -123,13 +144,25 @@ printf '\n' >>"${log}"
   assert.doesNotMatch(calls, /auth=present/);
   assert.match(calls, /config set plugins\.allow/);
   assert.match(calls, /node install/);
+  assert.equal(await readFile(path.join(home, ".openclaw", "managed", "IDENTITY.md"), "utf8"), "# Test identity\n");
+  assert.equal(await readFile(path.join(home, ".openclaw", "managed", "skills", "test-skill", "SKILL.md"), "utf8"), "# Test skill\n");
+  assert.equal((await stat(path.join(home, ".openclaw", "managed", "IDENTITY.md"))).mode & 0o777, 0o444);
+  assert.equal((await stat(path.join(home, ".openclaw", "managed"))).mode & 0o777, 0o555);
+
+  await run("/bin/bash", [path.join(output, "guest-install.sh")], {
+    env: guestEnv,
+  });
+  const retryCalls = await readFile(log, "utf8");
+  assert.ok(retryCalls.length > calls.length);
+  assert.match(retryCalls, /plugins uninstall crabhelm --force/);
+  assert.match(retryCalls, /plugins uninstall slack --force/);
 
   await chmod(credentialSource, 0o644);
   await assert.rejects(
     run("/bin/bash", [path.join(output, "guest-install.sh")], { env: guestEnv }),
     /child credential source must be owner-only/,
   );
-  assert.equal(await readFile(log, "utf8"), calls);
+  assert.equal(await readFile(log, "utf8"), retryCalls);
   await chmod(credentialSource, 0o600);
 
   const crabhelmArtifact = path.join(output, manifest.crabhelm.file);
@@ -139,7 +172,7 @@ printf '\n' >>"${log}"
     run("/bin/bash", [path.join(output, "guest-install.sh")], { env: guestEnv }),
     /bundle artifact digest mismatch: artifacts\/crabhelm\.tgz/,
   );
-  assert.equal(await readFile(log, "utf8"), calls);
+  assert.equal(await readFile(log, "utf8"), retryCalls);
 });
 
 test("appliance builder rejects a different OpenClaw version", async () => {
@@ -147,6 +180,7 @@ test("appliance builder rejects a different OpenClaw version", async () => {
   const source = path.join(root, "source");
   const packageDir = path.join(source, "package");
   const openclawTarball = path.join(root, "openclaw.tgz");
+  const nodeTarball = await createNodeFixture(root);
   const slackSource = path.join(root, "slack-source");
   const slackTarball = path.join(root, "slack.tgz");
   await mkdir(packageDir, { recursive: true });
@@ -158,11 +192,13 @@ test("appliance builder rejects a different OpenClaw version", async () => {
   await mkdir(path.join(slackSource, "package"), { recursive: true });
   await writeFile(
     path.join(slackSource, "package", "package.json"),
-    `${JSON.stringify({ name: "@openclaw/slack", version: "2026.6.10" })}\n`,
+    `${JSON.stringify({ name: "@openclaw/slack", version: "2026.6.11" })}\n`,
   );
   await run("tar", ["-czf", slackTarball, "-C", slackSource, "package"]);
   await assert.rejects(
     run(builder, [
+      "--node-tarball",
+      nodeTarball,
       "--openclaw-tarball",
       openclawTarball,
       "--slack-tarball",
@@ -170,9 +206,18 @@ test("appliance builder rejects a different OpenClaw version", async () => {
       "--output",
       path.join(root, "bundle"),
     ]),
-    /must contain version 2026\.6\.11-beta\.1/,
+    /must contain version 2026\.6\.11/,
   );
 });
+
+async function createNodeFixture(root: string): Promise<string> {
+  const nodeRoot = path.join(root, "node-v22.23.1-linux-x64");
+  const tarball = path.join(root, "node-v22.23.1-linux-x64.tar.xz");
+  await mkdir(path.join(nodeRoot, "bin"), { recursive: true });
+  await writeFile(path.join(nodeRoot, "bin", "node"), "fixture\n", { mode: 0o755 });
+  await run("tar", ["-cJf", tarball, "-C", root, path.basename(nodeRoot)]);
+  return tarball;
+}
 
 function digest(value: Buffer): string {
   return createHash("sha256").update(value).digest("hex");

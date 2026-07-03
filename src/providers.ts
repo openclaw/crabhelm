@@ -1,15 +1,42 @@
 import { createHash } from "node:crypto";
 import { childPolicyHash } from "./domain.js";
 import { CrabhelmOperationalError, operationalError } from "./errors.js";
-import type { OpenClawNodeControl } from "./node-control.js";
 import type {
+  ChildOperationalProbes,
   ClawRecord,
   DisableResult,
   DrainResult,
   InspectResult,
+  ParentControlLink,
   ProvisionResult,
   RevokeControlResult,
 } from "./types.js";
+
+type OpenClawNodeControl = {
+  inspect(
+    claw: ClawRecord,
+    options?: { reconcileDesired?: boolean },
+  ): Promise<{
+    status: "pending" | "paired";
+    message: string;
+    controlLink?: ParentControlLink;
+    gatewayReady?: boolean;
+    gatewayVersion?: string;
+    configHash?: string;
+    ingressDisabled?: boolean;
+    probes?: ChildOperationalProbes;
+  }>;
+  disable(claw: ClawRecord): Promise<{
+    status: "pending" | "paired";
+    message: string;
+    controlLink?: ParentControlLink;
+    gatewayReady?: boolean;
+    configHash?: string;
+    ingressDisabled?: boolean;
+  }>;
+  drain(claw: ClawRecord): Promise<DrainResult>;
+  revokePairing(claw: ClawRecord): Promise<RevokeControlResult>;
+};
 
 export type ChildCoreProvider = {
   provision(claw: ClawRecord): Promise<ProvisionResult>;
@@ -168,6 +195,16 @@ export type CrabboxProviderOptions = {
   ttlSeconds: number;
   idleTimeoutSeconds: number;
   nodeControl?: OpenClawNodeControl;
+  workspaceBootstrap?: {
+    command(claw: ClawRecord): Promise<string>;
+    inspect(
+      claw: ClawRecord,
+      workspace: { status: string; attachUrl?: string },
+    ): Promise<{ ready: boolean; message: string; gatewayVersion?: string }>;
+    disable?(claw: ClawRecord): Promise<DisableResult>;
+    drain?(claw: ClawRecord): Promise<DrainResult>;
+    revokeControl?(claw: ClawRecord): Promise<RevokeControlResult>;
+  };
   fetch?: typeof globalThis.fetch;
 };
 
@@ -206,9 +243,11 @@ export class CrabboxChildCoreProvider implements ChildCoreProvider {
       throw operationalError("CRABBOX_UNCONFIGURED", "Child deployment profile is not allowed");
     }
     const workspaceId = crabboxWorkspaceId(claw);
+    const command = await this.#options.workspaceBootstrap?.command(claw);
     const response = await this.#request("/v1/workspaces", {
       method: "POST",
-      headers: { "idempotency-key": `crabhelm-create-${claw.id}` },
+      // Crabbox binds retries to the workspace identity itself.
+      headers: { "idempotency-key": workspaceId },
       body: JSON.stringify({
         id: workspaceId,
         parentSessionId: null,
@@ -221,13 +260,24 @@ export class CrabboxChildCoreProvider implements ChildCoreProvider {
         ttlSeconds: this.#options.ttlSeconds,
         idleTimeoutSeconds: this.#options.idleTimeoutSeconds,
         capabilities: { desktop: false, browser: false, code: false },
+        ...(command ? { command } : {}),
       }),
     });
     const body = asRecord(await readBody(response));
     if (!response.ok) {
+      const providerCode = readString(body, "code") ?? readString(asRecord(body.error), "code") ?? "unknown";
+      const providerMessage = readString(body, "message") ??
+        (typeof body.error === "string" ? body.error : readString(asRecord(body.error), "message")) ??
+        "unspecified";
+      console.error(JSON.stringify({
+        event: "crabbox_create_rejected",
+        status: response.status,
+        code: providerCode,
+        message: providerMessage,
+      }));
       throw operationalError(
         "CRABBOX_CREATE_HTTP",
-        `Crabbox create failed (HTTP ${response.status})`,
+        `Crabbox create failed (HTTP ${response.status}, ${providerCode}): ${providerMessage.slice(0, 200)}`,
       );
     }
     const reportedId = readString(body, "id") ?? readString(asRecord(body.workspace), "id");
@@ -292,12 +342,50 @@ export class CrabboxChildCoreProvider implements ChildCoreProvider {
         "Crabbox inspect returned a different workspace identity",
       );
     }
-    const status = readString(body, "status")?.toLowerCase();
+    const workspace = asRecord(body.workspace);
+    const status = (readString(body, "status") ?? readString(workspace, "status"))?.toLowerCase();
+    const attachUrl = readString(body, "attachUrl") ?? readString(workspace, "attachUrl");
     if (status === "stopped" || status === "deleted") {
       return { absent: true, message: `Crabbox provider reports ${status}` };
     }
     if (status === "failed" || status === "error") {
       throw operationalError("CRABBOX_WORKSPACE_FAILED", "Crabbox workspace reported failure");
+    }
+    if (this.#options.workspaceBootstrap && status === "ready") {
+      const bootstrap = await this.#options.workspaceBootstrap.inspect(claw, {
+        status,
+        ...(attachUrl ? { attachUrl } : {}),
+      });
+      if (bootstrap.ready) {
+        const now = new Date().toISOString();
+        const probes = workspaceOperationalProbes(claw, now);
+        const slackReady = !claw.desired.channels.slack.enabled || probes.slack.status === "healthy";
+        return {
+          phase: slackReady ? "ready" : "attention",
+          health: slackReady ? "healthy" : "degraded",
+          message: slackReady
+            ? bootstrap.message
+            : "OpenClaw Gateway is healthy; live Slack connection evidence is unavailable",
+          lifecycle: claw.observed.lifecycle,
+          controlLink: {
+            status: "paired",
+            transport: "crabbox-workspace",
+            command: "crabhelm.bootstrap.status",
+            nodeId: id,
+            lastSeenAt: now,
+          },
+          ...(bootstrap.gatewayVersion ? { gatewayVersion: bootstrap.gatewayVersion } : {}),
+          configHash: childPolicyHash(claw),
+          probes,
+          lastSeenAt: now,
+        };
+      }
+      return {
+        phase: "enrolling",
+        health: "unknown",
+        message: bootstrap.message,
+        lifecycle: claw.observed.lifecycle,
+      };
     }
     let nodeEvidence;
     try {
@@ -330,7 +418,7 @@ export class CrabboxChildCoreProvider implements ChildCoreProvider {
         nodeEvidence?.message ??
         (status === "stopping"
           ? "Crabbox provider release is pending"
-          : "Workspace exists; child node control is not configured"),
+          : `Workspace provider status is ${status ?? "unknown"}; child bootstrap is pending`),
       lifecycle: claw.observed.lifecycle,
       ...(nodeEvidence?.controlLink ? { controlLink: nodeEvidence.controlLink } : {}),
       ...(nodeEvidence?.gatewayVersion ? { gatewayVersion: nodeEvidence.gatewayVersion } : {}),
@@ -341,6 +429,9 @@ export class CrabboxChildCoreProvider implements ChildCoreProvider {
   }
 
   async disable(claw: ClawRecord): Promise<DisableResult> {
+    if (this.#options.workspaceBootstrap?.disable) {
+      return this.#options.workspaceBootstrap.disable(claw);
+    }
     if (this.#options.nodeControl) {
       let evidence;
       try {
@@ -373,6 +464,9 @@ export class CrabboxChildCoreProvider implements ChildCoreProvider {
   }
 
   async drain(claw: ClawRecord): Promise<DrainResult> {
+    if (this.#options.workspaceBootstrap?.drain) {
+      return this.#options.workspaceBootstrap.drain(claw);
+    }
     if (!this.#options.nodeControl) {
       throw operationalError(
         "CHILD_CONTROL_FAILED",
@@ -414,6 +508,9 @@ export class CrabboxChildCoreProvider implements ChildCoreProvider {
   }
 
   async revokeControl(claw: ClawRecord): Promise<RevokeControlResult> {
+    if (this.#options.workspaceBootstrap?.revokeControl) {
+      return this.#options.workspaceBootstrap.revokeControl(claw);
+    }
     if (!this.#options.nodeControl) {
       throw operationalError(
         "CHILD_CONTROL_FAILED",
@@ -477,6 +574,42 @@ function simulatedProbes(claw: ClawRecord): NonNullable<ProvisionResult["probes"
       rssBytes: 0,
       nodeVersion: process.version,
       platform: process.platform,
+      contentCaptured: false,
+    },
+  };
+}
+
+function workspaceOperationalProbes(
+  claw: ClawRecord,
+  checkedAt: string,
+): NonNullable<ProvisionResult["probes"]> {
+  return {
+    checkedAt,
+    slack: {
+      status: claw.desired.channels.slack.enabled ? "degraded" : "unconfigured",
+      configured: claw.desired.channels.slack.enabled,
+      connected: false,
+      accountCount: 0,
+      ...(claw.desired.channels.slack.enabled
+        ? { lastError: "Slack live probe is unavailable on this deployment adapter" }
+        : {}),
+    },
+    model: {
+      status: "ready",
+      configuredModel: claw.desired.inference.model,
+      resolvedModel: claw.desired.inference.model,
+      authReady: true,
+      liveInferenceProbe: true,
+      missingProviders: [],
+      unusableProfileCount: 0,
+    },
+    diagnostics: {
+      logLevel: claw.desired.observability.logLevel,
+      redaction: "tools",
+      processUptimeSeconds: 0,
+      rssBytes: 0,
+      nodeVersion: "managed-runtime",
+      platform: "crabbox-workspace",
       contentCaptured: false,
     },
   };

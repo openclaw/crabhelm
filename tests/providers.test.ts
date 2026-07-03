@@ -40,7 +40,10 @@ test("Crabbox provider sends a fixed OpenClaw appliance request", async () => {
 
   assert.equal(capturedUrl, "https://crabbox.example.test/adapter/v1/workspaces");
   assert.equal(capturedInit?.method, "POST");
-  assert.equal(new Headers(capturedInit?.headers).get("idempotency-key"), `crabhelm-create-${claw.id}`);
+  assert.equal(
+    new Headers(capturedInit?.headers).get("idempotency-key"),
+    "crabhelm-ada",
+  );
   const body = JSON.parse(String(capturedInit?.body));
   assert.equal(body.id, "crabhelm-ada");
   assert.equal(body.profile, "openclaw-core");
@@ -262,6 +265,82 @@ test("Crabbox provider requires exact policy and enabled-ingress evidence for co
   const degraded = await provider.inspect(claw);
   assert.equal(degraded.phase, "attention");
   assert.equal(degraded.health, "degraded");
+});
+
+test("Crabbox provider delegates standalone lifecycle evidence to its workspace adapter", async () => {
+  const claw = createClawRecord({
+    name: "Standalone",
+    owner: { subject: "github:standalone", label: "@standalone", source: "github" },
+  });
+  const calls: string[] = [];
+  const provider = new CrabboxChildCoreProvider({
+    baseUrl: "https://crabbox.example.test",
+    token: "test-token",
+    profile: "openclaw-core",
+    ttlSeconds: 14_400,
+    idleTimeoutSeconds: 14_400,
+    workspaceBootstrap: {
+      async command() { return "true"; },
+      async inspect() { return { ready: true, message: "ready" }; },
+      async disable() {
+        calls.push("disable");
+        return { applied: true, health: "healthy", message: "disabled" };
+      },
+      async drain() {
+        calls.push("drain");
+        return { drained: true, activeRuns: 0, checkedAt: new Date().toISOString(), message: "drained" };
+      },
+      async revokeControl() {
+        calls.push("revoke");
+        return {
+          removedPairedDevice: false,
+          rejectedPendingRequest: false,
+          alreadyAbsent: true,
+          message: "absent",
+        };
+      },
+    },
+  });
+
+  assert.equal((await provider.disable(claw)).applied, true);
+  assert.equal((await provider.drain(claw)).activeRuns, 0);
+  assert.equal((await provider.revokeControl(claw)).alreadyAbsent, true);
+  assert.deepEqual(calls, ["disable", "drain", "revoke"]);
+});
+
+test("standalone workspace refuses ready state when Slack lacks live evidence", async () => {
+  const claw = createClawRecord({
+    name: "Slack standalone",
+    owner: { subject: "github:slack", label: "@slack", source: "github" },
+    slack: { enabled: true, mode: "socket" },
+  });
+  claw.observed.lifecycle = {
+    workspaceId: "crabhelm-slack-standalone",
+    responseDigest: "a".repeat(64),
+  };
+  const provider = new CrabboxChildCoreProvider({
+    baseUrl: "https://crabbox.example.test",
+    token: "test-token",
+    profile: "openclaw-core",
+    ttlSeconds: 14_400,
+    idleTimeoutSeconds: 14_400,
+    workspaceBootstrap: {
+      async command() { return "true"; },
+      async inspect() { return { ready: true, message: "gateway ready" }; },
+    },
+    fetch: async () => Response.json({
+      workspace: {
+        id: "crabhelm-slack-standalone",
+        status: "ready",
+        attachUrl: "wss://crabbox.example.test/attach",
+      },
+    }),
+  });
+
+  const result = await provider.inspect(claw);
+  assert.equal(result.phase, "attention");
+  assert.equal(result.health, "degraded");
+  assert.equal(result.probes?.slack.status, "degraded");
 });
 
 test("routed provider dispatches only through the exact administrator target tuple", async () => {

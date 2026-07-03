@@ -1,0 +1,55 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "crabhelm",
+  "account_id": "91b59577e757131d68d55a471fe32aca",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-07-02",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "routes": [
+    { "pattern": "crabhelm.openclaw.ai", "custom_domain": true }
+  ],
+  "assets": {
+    "directory": "./web",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/bootstrap/*", "/healthz"]
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "CONTROL_PLANE", "class_name": "CrabhelmControlPlane" },
+      { "name": "CLAW_COORDINATOR", "class_name": "CrabhelmClawCoordinator" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["CrabhelmControlPlane"] },
+    { "tag": "v2", "new_sqlite_classes": ["CrabhelmClawCoordinator"] }
+  ],
+  "r2_buckets": [
+    { "binding": "APPLIANCES", "bucket_name": "crabhelm-appliances" },
+    { "binding": "OAUTH_VAULT", "bucket_name": "crabhelm-oauth-vault" },
+    { "binding": "AUDIT_ARCHIVE", "bucket_name": "crabhelm-audit-archive" }
+  ],
+  "queues": {
+    "producers": [{ "binding": "AUDIT_QUEUE", "queue": "crabhelm-audit" }],
+    "consumers": [{ "queue": "crabhelm-audit", "max_batch_size": 10, "max_batch_timeout": 5 }]
+  },
+  "vars": {
+    "PUBLIC_URL": "https://crabhelm.openclaw.ai",
+    "CRABBOX_URL": "https://crabbox.openclaw.ai",
+    "CRABBOX_TARGET_ID": "aws-us-east",
+    "CRABBOX_TARGET_LABEL": "AWS US East via Crabbox",
+    "CRABBOX_TARGET_REGION": "us-east",
+    "CRABBOX_PROFILE": "openclaw-core",
+    "CRABBOX_TTL_SECONDS": "14400",
+    "CRABBOX_IDLE_TIMEOUT_SECONDS": "14400",
+    "NODE_RUNTIME_SHA256": "9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578",
+    "APPLIANCE_ARCHIVE_SHA256": "27ddf69937714de62898f17ecdbcce07eb184db7b63b6c7e549efa1c40bfb071",
+    "APPLIANCE_MANIFEST_SHA256": "26c69e5cf4e74d009c642df975ed9a3aa047c5671008b6c161997b391ac1d3e9"
+  },
+  "observability": {
+    "enabled": true,
+    "logs": { "head_sampling_rate": 1 },
+    "traces": { "enabled": true, "head_sampling_rate": 0.1 }
+  }
+}

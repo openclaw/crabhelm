@@ -23,6 +23,7 @@ import { CrabhelmRegistry } from "./src/registry.js";
 import path from "node:path";
 import { SqliteStateDatabase } from "./src/state.js";
 import { crabhelmApprovalCopy, createCrabhelmTool, isCrabhelmMutation } from "./src/tool.js";
+import { loadManagedSystemContext } from "./src/managed-context.js";
 import type {
   AuditEvent,
   ClawRecord,
@@ -44,6 +45,12 @@ export default definePluginEntry({
         return;
       }
       registerChildCommands(api, config.childId);
+      api.on("before_prompt_build", async () => ({
+        prependSystemContext: await loadManagedSystemContext(
+          api.runtime.state.resolveStateDir(),
+          config.childId!,
+        ),
+      }));
       api.logger.info?.(`Crabhelm child node commands registered for ${config.childId}`);
       return;
     }
