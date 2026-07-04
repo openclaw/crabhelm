@@ -16,6 +16,8 @@ The installer receives:
 
 ## Installation
 
+Before any credential is fetched, the control-plane installer applies an outbound nftables allowlist to the workspace: loopback, established/related replies, DNS, NTP, DHCP, and TCP 443, with the cloud instance-metadata endpoints (`169.254.169.254`, `fd00:ec2::254`) explicitly dropped and a default-deny policy. Install, model, and control traffic are all HTTPS, so the allowlist never blocks the appliance. The mode is set by `CRABHELM_EGRESS_LOCKDOWN`: `attempt` (default; enforce when the guest has `nft` via root or passwordless sudo, otherwise log and continue), `required` (abort provisioning if it cannot be enforced), or `off`.
+
 `guest-install.sh` verifies the manifest contract and every artifact digest before installing anything. Privileged npm runs through an empty environment. The installer activates credentials only after packages and plugins are installed, then delegates to `bootstrap-child.sh`.
 
 `bootstrap-child.sh` writes the exact model, plugin allowlist, child UUID, loopback Gateway mode, and auth mode. In Cloudflare standalone mode it starts the local Gateway and installs a private idempotent runtime-bridge launcher, then writes `~/.openclaw/crabhelm-ready` after `/readyz` succeeds. Legacy outbound node enrollment remains available only when standalone mode is off.
@@ -30,6 +32,7 @@ Provider allocation, echoed shell source, or a process existing is insufficient.
 
 - No operator or Crabbox token enters the child credential file.
 - Bootstrap endpoints require a deterministic child HMAC bearer and return `no-store`.
+- Outbound egress is allowlisted before credentials are written; the instance-metadata service is unreachable from the agent.
 - Child Gateway binds loopback only.
 - Raw probe output stays in the workspace and is never projected into Crabhelm state.
 - The owner-only runtime workload credential enters the bridge through an inherited file descriptor, expires after ten minutes, and rotates through a one-use refresh fence. Owner-only persistence permits restart recovery; turn processes use the loopback Gateway and receive neither workload nor model-provider credentials.

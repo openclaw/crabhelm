@@ -730,6 +730,66 @@ export function inferenceProbeCommand(
   ].join("\n");
 }
 
+export type EgressLockdownMode = "attempt" | "required" | "off";
+
+export function normalizeEgressLockdownMode(value: string | undefined): EgressLockdownMode {
+  // Fail open to "attempt": a configuration typo must not brick provisioning,
+  // and "attempt" still enforces whenever the guest can.
+  return value === "required" || value === "off" ? value : "attempt";
+}
+
+// Outbound-only nftables allowlist for the agent VM: loopback, replies, DNS,
+// NTP, DHCP, and TCP 443. Everything else — including the AWS instance
+// metadata endpoints that vend substrate credentials — is dropped. The guest
+// keeps no inbound listener, and install/model/control traffic is all 443.
+function egressLockdownBlock(mode: EgressLockdownMode): string {
+  if (mode === "off") return "";
+  const failure = mode === "required"
+    ? `  printf '%s\\n' 'crabhelm bootstrap: egress lockdown is required but the allowlist could not be applied' >&2
+  exit 1`
+    : `  printf '%s\\n' 'crabhelm guest egress: skipped (nftables unavailable or not permitted); outbound remains unrestricted'`;
+  return `apply_egress_lockdown() {
+  local ruleset nft_binary
+  local -a runner=()
+  nft_binary="$(command -v nft || true)"
+  if [[ -n "$nft_binary" ]]; then
+    if [[ "$(id -u)" = 0 ]]; then
+      runner=("$nft_binary")
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+      runner=(sudo -n "$nft_binary")
+    fi
+  fi
+  if [[ "\${#runner[@]}" -eq 0 ]]; then
+    return 1
+  fi
+  ruleset="$(mktemp)"
+  cat >"$ruleset" <<'CRABHELM_EGRESS'
+add table inet crabhelm_egress
+flush table inet crabhelm_egress
+add chain inet crabhelm_egress output { type filter hook output priority 0 ; policy drop ; }
+add rule inet crabhelm_egress output oifname "lo" accept
+add rule inet crabhelm_egress output ct state established,related accept
+add rule inet crabhelm_egress output ip daddr 169.254.169.254 counter drop comment "instance metadata credentials"
+add rule inet crabhelm_egress output ip6 daddr fd00:ec2::254 counter drop comment "instance metadata credentials"
+add rule inet crabhelm_egress output meta l4proto ipv6-icmp icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept
+add rule inet crabhelm_egress output udp dport { 53, 67, 68, 123, 546, 547 } accept
+add rule inet crabhelm_egress output tcp dport { 53, 443 } accept
+add rule inet crabhelm_egress output counter drop comment "default egress deny"
+CRABHELM_EGRESS
+  if ! "\${runner[@]}" -f "$ruleset"; then
+    rm -f "$ruleset"
+    return 1
+  fi
+  rm -f "$ruleset"
+}
+if apply_egress_lockdown; then
+  printf '%s\\n' 'crabhelm guest egress: outbound restricted to loopback, replies, DNS, NTP, DHCP, and TCP 443; instance metadata blocked'
+else
+${failure}
+fi
+`;
+}
+
 export function bootstrapInstallScript(options: {
   base: string;
   archiveId: string;
@@ -739,6 +799,7 @@ export function bootstrapInstallScript(options: {
   model: string;
   slack: string;
   credentialsGeneration: number;
+  egressLockdown?: EgressLockdownMode;
 }): string {
   return `#!/usr/bin/env bash
 set -euo pipefail
@@ -746,7 +807,7 @@ umask 077
 : "\${CRABHELM_BOOTSTRAP_TOKEN:?missing bootstrap token}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-auth=(--header "Authorization: Bearer $CRABHELM_BOOTSTRAP_TOKEN")
+${egressLockdownBlock(options.egressLockdown ?? "attempt")}auth=(--header "Authorization: Bearer $CRABHELM_BOOTSTRAP_TOKEN")
 curl --fail --silent --show-error --location "\${auth[@]}" ${shellQuote(`${options.base}/bundle.tgz`)} -o "$work/bundle.tgz"
 actual_archive_sha256="$(sha256sum "$work/bundle.tgz")"
 actual_archive_sha256="\${actual_archive_sha256%% *}"
