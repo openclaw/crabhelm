@@ -4,6 +4,7 @@ import type {
   DrainResult,
   RevokeControlResult,
 } from "../src/types.js";
+import { clawCredentialsGeneration } from "../src/domain.js";
 import { timingSafeEqual } from "node:crypto";
 
 const encoder = new TextEncoder();
@@ -86,26 +87,34 @@ export class CrabboxWorkspaceBootstrap {
       this.#archiveId,
       Date.now() + BOOTSTRAP_TOKEN_TTL_MS,
     );
+    const credentialsGeneration = clawCredentialsGeneration(claw);
     const installUrl = new URL(
       `/bootstrap/${encodeURIComponent(claw.id)}/install.sh`,
       this.#publicUrl,
     );
     installUrl.searchParams.set("model", claw.desired.inference.model);
     installUrl.searchParams.set("slack", "false");
+    if (credentialsGeneration > 1) {
+      installUrl.searchParams.set("credentials", String(credentialsGeneration));
+    }
     return [
       `CRABHELM_BOOTSTRAP_TOKEN=${shellQuote(token)}`,
       "nohup",
       "bash",
       "-c",
       shellQuote(
-        `installer=$(mktemp) && trap 'rm -f "$installer"' EXIT && curl --fail --silent --show-error --location --header "Authorization: Bearer $CRABHELM_BOOTSTRAP_TOKEN" ${shellQuote(installUrl.toString())} -o "$installer" && touch ${shellQuote(this.#retryMarker())} && exec timeout --signal=TERM --kill-after=10s 10m bash "$installer"`,
+        `installer=$(mktemp) && trap 'rm -f "$installer"' EXIT && curl --fail --silent --show-error --location --header "Authorization: Bearer $CRABHELM_BOOTSTRAP_TOKEN" ${shellQuote(installUrl.toString())} -o "$installer" && touch ${shellQuote(this.#retryMarker(credentialsGeneration))} && exec timeout --signal=TERM --kill-after=10s 10m bash "$installer"`,
       ),
       ">/tmp/crabhelm-install.log 2>&1 </dev/null &",
     ].join(" ");
   }
 
-  #retryMarker(): string {
-    return `/tmp/crabhelm-attempt-${this.#releaseId}`;
+  // Epoch 1 keeps the historical marker path so claws installed before
+  // credential rotation existed never relaunch on a Worker deploy.
+  #retryMarker(credentialsGeneration: number): string {
+    return credentialsGeneration > 1
+      ? `/tmp/crabhelm-attempt-${this.#releaseId}-c${credentialsGeneration}`
+      : `/tmp/crabhelm-attempt-${this.#releaseId}`;
   }
 
   async inspect(
@@ -118,6 +127,7 @@ export class CrabboxWorkspaceBootstrap {
     let result: WorkspaceTerminalState;
     try {
       const probeLabel = `CRABHELM_${crypto.randomUUID().replaceAll("-", "")}`;
+      const credentialsGeneration = clawCredentialsGeneration(claw);
       result = await inspectTerminal(
         workspace.attachUrl,
         this.#brokerToken,
@@ -125,8 +135,9 @@ export class CrabboxWorkspaceBootstrap {
         bootstrapStatusCommand(
           await this.#launchCommand(claw),
           probeLabel,
-          this.#retryMarker(),
+          this.#retryMarker(credentialsGeneration),
           this.#releaseId,
+          credentialsGeneration,
         ),
         probeLabel,
       );
@@ -525,9 +536,16 @@ export function bootstrapStatusCommand(
   statusLabel = "CRABHELM",
   retryMarker = "",
   releaseId = "",
+  credentialsGeneration = 1,
 ): string {
+  // Past epoch 1, readiness additionally requires the credential marker the
+  // installer writes after re-fetching credentials.env, so a rotation drives
+  // one release-keyed in-place reinstall before the claw reports ready again.
+  const credentialCheck = credentialsGeneration > 1
+    ? ` && grep -Fqx ${shellQuote(`c${credentialsGeneration}`)} "$HOME/.openclaw/crabhelm-credentials-generation" 2>/dev/null`
+    : "";
   const readyCheck = releaseId
-    ? `grep -Fqx ${shellQuote(releaseId)} "$HOME/.openclaw/crabhelm-ready" 2>/dev/null`
+    ? `grep -Fqx ${shellQuote(releaseId)} "$HOME/.openclaw/crabhelm-ready" 2>/dev/null${credentialCheck}`
     : "test -f \"$HOME/.openclaw/crabhelm-ready\"";
   const command = [
     `status_label=${shellQuote(statusLabel)}`,
@@ -710,6 +728,52 @@ export function inferenceProbeCommand(
     "fi",
     "printf '%s_%s\\n' \"$probe_label\" \"$probe_result\"",
   ].join("\n");
+}
+
+export function bootstrapInstallScript(options: {
+  base: string;
+  archiveId: string;
+  releaseId: string;
+  nodeSha256: string;
+  childId: string;
+  model: string;
+  slack: string;
+  credentialsGeneration: number;
+}): string {
+  return `#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+: "\${CRABHELM_BOOTSTRAP_TOKEN:?missing bootstrap token}"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+auth=(--header "Authorization: Bearer $CRABHELM_BOOTSTRAP_TOKEN")
+curl --fail --silent --show-error --location "\${auth[@]}" ${shellQuote(`${options.base}/bundle.tgz`)} -o "$work/bundle.tgz"
+actual_archive_sha256="$(sha256sum "$work/bundle.tgz")"
+actual_archive_sha256="\${actual_archive_sha256%% *}"
+[[ "$actual_archive_sha256" = ${shellQuote(options.archiveId)} ]] || { printf '%s\\n' 'crabhelm bootstrap: appliance archive digest mismatch' >&2; exit 1; }
+tar -xzf "$work/bundle.tgz" -C "$work"
+curl --fail --silent --show-error --location "\${auth[@]}" ${shellQuote(`${options.base}/credentials.env`)} -o "$work/credentials.env"
+chmod 0600 "$work/credentials.env"
+curl --fail --silent --show-error --location "\${auth[@]}" ${shellQuote(`${options.base}/managed-spec.json`)} -o "$work/managed-spec.json"
+chmod 0600 "$work/managed-spec.json"
+export CRABHELM_BUNDLE_MANIFEST_SHA256=${shellQuote(options.releaseId)}
+export CRABHELM_NODE_SHA256=${shellQuote(options.nodeSha256)}
+export CRABHELM_CREDENTIAL_FILE="$work/credentials.env"
+export CRABHELM_CREDENTIAL_REFRESH_URL=${shellQuote(`${options.base}/credentials.env`)}
+export CRABHELM_MANAGED_SPEC_FILE="$work/managed-spec.json"
+export CRABBOX_ADAPTER_ROOT_SESSION_ID=${shellQuote(options.childId)}
+export CRABHELM_STANDALONE=true
+export CRABHELM_MODEL=${shellQuote(options.model)}
+export CRABHELM_SLACK_ENABLED=${shellQuote(options.slack)}
+export CRABHELM_CREDENTIALS_GENERATION=${shellQuote(String(options.credentialsGeneration))}
+/bin/bash "$work/bundle/guest-install.sh"
+marker_dir="$HOME/.openclaw"
+install -d -m 0700 "$marker_dir"
+marker_temporary="$marker_dir/crabhelm-credentials-generation.new-$$"
+printf 'c%s\\n' ${shellQuote(String(options.credentialsGeneration))} >"$marker_temporary"
+chmod 0600 "$marker_temporary"
+mv -f "$marker_temporary" "$marker_dir/crabhelm-credentials-generation"
+`;
 }
 
 function base64Url(bytes: Uint8Array): string {
