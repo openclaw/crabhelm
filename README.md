@@ -51,6 +51,8 @@ Signing secrets must contain at least 32 bytes. `VAULT_MASTER_KEY` is a base64ur
 
 `GITHUB_OAUTH_CLIENT_ID` and Cloudflare Access team/audience settings are non-secret Worker variables. Slack sends signed events to `https://crabhelm-runtime.openclaw.ai/slack/events` and interactions to `https://crabhelm-runtime.openclaw.ai/slack/interactions`. The GitHub OAuth callback is `https://crabhelm.openclaw.ai/api/oauth/github/callback`. Use `wrangler secret put NAME`; never place secret values in `wrangler.jsonc`, `.dev.vars`, logs, or registry state.
 
+After rotating a delivered secret (for example `OPENAI_API_KEY`), bump the affected claw's credential epoch with the **Rotate credentials** drawer button or `POST /api/claws/<id>/rotate-credentials`. The claw performs one release-pinned in-place reinstall that re-fetches `credentials.env`, then must pass the live inference probe again before it reports ready.
+
 Build and upload a reviewed appliance after guest-profile changes:
 
 ```bash
