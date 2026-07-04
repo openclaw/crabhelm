@@ -88,6 +88,7 @@ Open <http://127.0.0.1:4177>. Local development uses an explicitly labeled simul
 - Access-authenticated clients and enrolled runtimes may redeem governed grants; actor policy, argument digest, expiry, and the one-use fence still apply.
 - Runtime turns, credential rotation, health, and reconnect use one authenticated outbound WebSocket to a per-claw Durable Object; reset generations abort active process groups, and persona-bound job payloads remain encrypted at rest.
 - The owner-only runtime workload credential is audience-bound, expires after ten minutes, rotates through a one-use mint fence with encrypted idempotent response replay, and is never inherited by model/tool processes; persistence permits bridge crash and host restart recovery.
+- The agent workspace installs an outbound nftables allowlist (loopback, established replies, DNS, NTP, DHCP, and TCP 443 only) that drops the cloud instance-metadata endpoints before any credential is written, so a compromised agent cannot exfiltrate over arbitrary ports or read substrate credentials. Set `CRABHELM_EGRESS_LOCKDOWN=required` to fail provisioning when the allowlist cannot be enforced, or `off` to disable it.
 - Removal remains evidence-driven: disable ingress, drain active work, release the exact provider identity, confirm absence, then revoke the exact control link.
 
 See [architecture](docs/architecture.md), [product contract](docs/product.md), and the [Crabbox appliance profile](deploy/crabbox-profile/README.md) for implementation detail and the identity-aware execution contract.
