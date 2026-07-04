@@ -47,7 +47,7 @@ SLACK_BOT_TOKEN
 GITHUB_OAUTH_CLIENT_SECRET
 ```
 
-Signing secrets must contain at least 32 bytes. `VAULT_MASTER_KEY` is a base64url-encoded 32-byte AES key.
+Signing secrets must contain at least 32 bytes. `VAULT_MASTER_KEY` is a base64url-encoded 32-byte AES key. `MODEL_SIGNING_SECRET` (≥32 bytes) is additionally required only when the edge model proxy is enabled (`CRABHELM_MODEL_PROXY=on`).
 
 `GITHUB_OAUTH_CLIENT_ID` and Cloudflare Access team/audience settings are non-secret Worker variables. Slack sends signed events to `https://crabhelm-runtime.openclaw.ai/slack/events` and interactions to `https://crabhelm-runtime.openclaw.ai/slack/interactions`. The GitHub OAuth callback is `https://crabhelm.openclaw.ai/api/oauth/github/callback`. Use `wrangler secret put NAME`; never place secret values in `wrangler.jsonc`, `.dev.vars`, logs, or registry state.
 
@@ -76,6 +76,12 @@ pnpm dev
 
 Open <http://127.0.0.1:4177>. Local development uses an explicitly labeled simulator. Production Wrangler configuration always uses the real Crabbox adapter.
 
+## Edge model proxy (experimental)
+
+By default a claw is delivered the raw `OPENAI_API_KEY`. Setting the `CRABHELM_MODEL_PROXY` Worker var to `on` (and putting the `MODEL_SIGNING_SECRET` secret) instead delivers a per-claw, audience-bound model token plus an edge base URL, and reroutes the child's OpenClaw OpenAI provider through `https://crabhelm-runtime.openclaw.ai/model/v1`. The Worker verifies the token, strips the caller's authorization, injects the real provider key, and forwards to a single fixed upstream over an allowlisted set of endpoints. The raw provider key never reaches the agent VM, and access is revocable per claw rather than org-wide.
+
+This is experimental and default-off: enabling it changes the guest profile (rebuild the appliance) and requires a live inference probe on staging to confirm the rerouted provider works end to end before enabling in production.
+
 ## Safety boundaries
 
 - Placement target, region, profile, TTL, and idle timeout are administrator policy—not browser-supplied provider overrides.
@@ -86,6 +92,7 @@ Open <http://127.0.0.1:4177>. Local development uses an explicitly labeled simul
 - Access-authenticated clients and enrolled runtimes may redeem governed grants; actor policy, argument digest, expiry, and the one-use fence still apply.
 - Runtime turns, credential rotation, health, and reconnect use one authenticated outbound WebSocket to a per-claw Durable Object; reset generations abort active process groups, and persona-bound job payloads remain encrypted at rest.
 - The owner-only runtime workload credential is audience-bound, expires after ten minutes, rotates through a one-use mint fence with encrypted idempotent response replay, and is never inherited by model/tool processes; persistence permits bridge crash and host restart recovery.
+- With the edge model proxy enabled the agent never holds the raw provider key: it presents a per-claw, audience-bound model token that the Worker exchanges for the real key against a single fixed, endpoint-allowlisted upstream.
 - Removal remains evidence-driven: disable ingress, drain active work, release the exact provider identity, confirm absence, then revoke the exact control link.
 
 See [architecture](docs/architecture.md), [product contract](docs/product.md), and the [Crabbox appliance profile](deploy/crabbox-profile/README.md) for implementation detail and the identity-aware execution contract.

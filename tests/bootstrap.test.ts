@@ -49,6 +49,7 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
       CRABHELM_RUNTIME_BRIDGE_SHA256: runtimeBridgeDigest,
       CRABHELM_RELEASE_ID: "b".repeat(64),
       CRABHELM_MODEL: "openai/gpt-5.5-mini",
+      CRABHELM_MODEL_BASE_URL: "https://crabhelm-runtime.openclaw.ai/model/v1",
       CRABHELM_SLACK_ENABLED: "true",
       OPENCLAW_GATEWAY_TOKEN: "must-not-reach-openclaw",
       OPENCLAW_GATEWAY_PASSWORD: "must-not-reach-openclaw",
@@ -61,6 +62,7 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
   assert.match(calls, /plugins\.allow .*crabhelm.*slack/);
   assert.match(calls, /channels\.slack\.mode socket/);
   assert.match(calls, /agents\.defaults\.model\.primary openai\/gpt-5\.5-mini/);
+  assert.match(calls, /config set models\.providers\.openai\.baseUrl https:\/\/crabhelm-runtime\.openclaw\.ai\/model\/v1/);
   assert.match(calls, /agents\.defaults\.workspace .*\.openclaw\/workspace/);
   assert.match(calls, /channels\.slack\.enabled true/);
   assert.match(calls, /channels\.slack\.appToken .*SLACK_APP_TOKEN/);

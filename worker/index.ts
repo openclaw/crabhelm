@@ -2,6 +2,7 @@ import { bootstrapTokenClaims } from "./bootstrap.js";
 import { signClaims, verifyClaims } from "./security.js";
 import type { GovernanceAuditEvent, RuntimeClaims, RuntimeTicketClaims, SessionClaims } from "../src/governance-types.js";
 import { verifyAccessIdentity } from "./access.js";
+import { handleModelProxy, modelCredentialEntries, modelProxyEnabled } from "./model-proxy.js";
 import { handleSlackRequest } from "./slack.js";
 export { CrabhelmControlPlane } from "./control-plane.js";
 export { CrabhelmClawCoordinator } from "./claw-coordinator.js";
@@ -26,6 +27,10 @@ export default {
     if (url.pathname === "/api/runtime/ticket") {
       if (!isRuntimeHost(url, env)) return new Response("not found", { status: 404 });
       return handleRuntimeTicket(request, env);
+    }
+    if (url.pathname.startsWith("/model/")) {
+      if (!isRuntimeHost(url, env)) return new Response("not found", { status: 404 });
+      return handleModelProxy(request, env, url);
     }
     if (url.pathname.startsWith("/api/runtime/")) {
       if (!isRuntimeHost(url, env)) return new Response("not found", { status: 404 });
@@ -102,8 +107,12 @@ async function handleBootstrap(request: Request, env: Env, url: URL): Promise<Re
     }, 10 * 60);
     const claims = await verifyClaims<RuntimeClaims>(env.RUNTIME_SIGNING_SECRET, runtimeToken, { typ: "runtime", aud: "crabhelm-runtime" });
     await env.CLAW_COORDINATOR.getByName(childId).registerRuntimeRefresh({ jti: claims.jti, expiresAt: claims.exp * 1000 });
+    // Model access: with the edge proxy enabled the child receives a per-claw,
+    // audience-bound model token plus a base URL pointing at the Worker, and
+    // never the raw provider key. With it off (default) delivery is unchanged.
+    const modelEntries = await modelCredentialEntries(env, childId);
     const values = [
-      `OPENAI_API_KEY=${shellValue(env.OPENAI_API_KEY)}`,
+      ...modelEntries.map(([key, value]) => `${key}=${shellValue(value)}`),
       `CRABHELM_CONTROL_URL=${shellValue(env.RUNTIME_URL)}`,
       `CRABHELM_RUNTIME_TOKEN=${shellValue(runtimeToken)}`,
       `CRABHELM_CHILD_ID=${shellValue(childId)}`,
@@ -146,7 +155,7 @@ export CRABBOX_ADAPTER_ROOT_SESSION_ID=${shellValue(childId)}
 export CRABHELM_STANDALONE=true
 export CRABHELM_MODEL=${shellValue(model)}
 export CRABHELM_SLACK_ENABLED=${shellValue(slack)}
-/bin/bash "$work/bundle/guest-install.sh"
+${modelProxyEnabled(env) ? `export CRABHELM_MODEL_BASE_URL=${shellValue(`${new URL(env.RUNTIME_URL).origin}/model/v1`)}\n` : ""}/bin/bash "$work/bundle/guest-install.sh"
 `;
   return new Response(script, {
     headers: { ...headers, "content-type": "text/x-shellscript; charset=utf-8" },
