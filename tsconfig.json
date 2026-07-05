@@ -8,5 +8,6 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["index.ts", "src/**/*.ts", "dev/**/*.ts", "tests/**/*.ts"]
+  "include": ["index.ts", "src/**/*.ts", "dev/**/*.ts", "tests/**/*.ts"],
+  "exclude": ["tests/workers/**"]
 }

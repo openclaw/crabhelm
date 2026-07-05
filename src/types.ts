@@ -18,6 +18,17 @@ export type DeploymentSpec = {
   target: string;
   profile: string;
   region?: string;
+  appliance?: ApplianceRelease;
+};
+
+export type ApplianceRelease = {
+  manifestSha256: string;
+  archiveSha256: string;
+  nodeSha256: string;
+};
+
+export type DeploymentInput = Partial<Omit<DeploymentSpec, "appliance">> & {
+  appliance?: ApplianceRelease | null;
 };
 
 export type InferencePolicy = {
@@ -46,6 +57,18 @@ export type ObservabilityPolicy = {
   logLevel: "error" | "warn" | "info" | "debug";
   retentionDays: number;
   metadataOnly: true;
+  otel: OpenTelemetryPolicy;
+};
+
+export type OpenTelemetryPolicy = {
+  enabled: boolean;
+  endpoint?: string;
+  serviceName: string;
+  traces: boolean;
+  metrics: boolean;
+  logs: false;
+  sampleRate: number;
+  flushIntervalMs: number;
 };
 
 export type ManagedPolicySpec = {
@@ -211,21 +234,25 @@ export type CreateClawInput = {
   owner: OwnerRef;
   templateId?: string;
   templateVersion?: number;
-  deployment?: Partial<DeploymentSpec>;
+  deployment?: DeploymentInput;
   inference?: Partial<InferencePolicy>;
   slack?: Partial<SlackPolicy>;
   access?: Partial<AccessPolicy>;
-  observability?: Partial<Omit<ObservabilityPolicy, "metadataOnly">>;
+  observability?: Partial<Omit<ObservabilityPolicy, "metadataOnly" | "otel">> & {
+    otel?: Partial<OpenTelemetryPolicy>;
+  };
 };
 
 export type UpdateClawInput = Partial<
   Pick<ClawDesired, "name" | "templateId" | "templateVersion" | "owner">
 > & {
-  deployment?: Partial<DeploymentSpec>;
+  deployment?: DeploymentInput;
   inference?: Partial<InferencePolicy>;
   slack?: Partial<SlackPolicy>;
   access?: Partial<AccessPolicy>;
-  observability?: Partial<Omit<ObservabilityPolicy, "metadataOnly">>;
+  observability?: Partial<Omit<ObservabilityPolicy, "metadataOnly" | "otel">> & {
+    otel?: Partial<OpenTelemetryPolicy>;
+  };
 };
 
 export type AuditEvent = {

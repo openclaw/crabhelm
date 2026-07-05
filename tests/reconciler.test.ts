@@ -163,6 +163,26 @@ test("deployment placement is immutable after provider allocation", async () => 
   );
 });
 
+test("appliance release can change without moving an allocated workspace", async () => {
+  const { registry, reconciler } = fixture();
+  const created = await registry.create(
+    {
+      name: "Canary",
+      owner: { subject: "github:canary", label: "@canary", source: "github" },
+    },
+    "test-admin",
+  );
+  await reconciler.reconcileOne(created.id);
+  const updated = await registry.update(
+    created.id,
+    { deployment: { appliance: { manifestSha256: "a".repeat(64), archiveSha256: "b".repeat(64), nodeSha256: "c".repeat(64) } } },
+    "test-admin",
+  );
+  assert.equal(updated.desired.deployment.target, created.desired.deployment.target);
+  assert.equal(updated.desired.deployment.appliance?.archiveSha256, "b".repeat(64));
+  assert.equal(updated.desired.generation, created.desired.generation + 1);
+});
+
 test("registry placement fence rejects unreviewed target tuples before persistence", async () => {
   const registry = new CrabhelmRegistry(
     createMemoryStateStore<ClawRecord>(),

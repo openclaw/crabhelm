@@ -8,23 +8,23 @@ The adapter/controller owns machine acquisition, SSH/terminal transport, provide
 
 The installer receives:
 
-- the reviewed manifest SHA-256;
+- the reviewed manifest and archive SHA-256 release identity plus the manifest's bootstrap-Node SHA-256;
 - child UUID;
 - exact desired inference model;
 - an owner-only credential file with `OPENAI_API_KEY`, child id, control URL, and audience-bound runtime token;
-- verified OpenClaw, Crabhelm, Slack, bootstrap, and installer artifacts.
+- verified OpenClaw, Crabhelm, Slack, `diagnostics-otel`, bootstrap, and installer artifacts.
 
 ## Installation
 
-Before any credential is fetched, the control-plane installer applies an outbound nftables allowlist to the workspace: loopback, DNS, NTP, DHCP, and TCP 443, with the cloud instance-metadata endpoints (`169.254.169.254`, `fd00:ec2::254`) explicitly dropped and a default-deny policy. A systemd unit reapplies the managed table before `network-pre.target`, after any distribution nftables service. A versioned readiness marker drives one in-place reinstall when the policy revision or configured mode changes. Install, model, and control traffic are all HTTPS, so the allowlist never blocks the appliance. The mode is set by `CRABHELM_EGRESS_LOCKDOWN`: `attempt` (default; enforce and boot-persist when the guest has `nft`, systemd, and root or passwordless sudo, otherwise log and continue), `required` (abort provisioning if enforcement or persistence fails), or `off` (remove the managed table and boot unit).
+Before any credential is fetched, the control-plane installer applies an outbound nftables allowlist to the workspace: loopback, DNS, NTP, DHCP, and TCP 443, with the cloud instance-metadata endpoints (`169.254.169.254`, `fd00:ec2::254`) explicitly dropped and a default-deny policy. A root-owned systemd unit reapplies and live-verifies the managed table before `network-pre.target`. OpenClaw runs separately as `crabhelm-agent`, an unprivileged system account without sudo; its hardened system service requires the egress unit when enforcement is enabled. Root-owned release, credential-epoch, and policy markers plus the live verifier gate readiness. Policy revision or mode changes drive an in-place reinstall. Unknown configuration values fail closed to `required`; `CRABHELM_EGRESS_LOCKDOWN=off` explicitly removes the managed table and boot unit while retaining runtime-account isolation.
 
 `guest-install.sh` verifies the manifest contract and every artifact digest before installing anything. Privileged npm runs through an empty environment. The installer activates credentials only after packages and plugins are installed, then delegates to `bootstrap-child.sh`.
 
-`bootstrap-child.sh` writes the exact model, plugin allowlist, child UUID, loopback Gateway mode, and auth mode. In Cloudflare standalone mode it starts the local Gateway and installs a private idempotent runtime-bridge launcher, then writes `~/.openclaw/crabhelm-ready` after `/readyz` succeeds. Legacy outbound node enrollment remains available only when standalone mode is off.
+`bootstrap-child.sh` writes the exact model, plugin allowlist, child UUID, loopback Gateway mode, auth mode, and optional metadata-only OTLP policy. In Cloudflare standalone mode it starts the local Gateway and installs a private idempotent runtime-bridge launcher, then writes the complete manifest/archive/Node release identity plus managed bootstrap-policy hash to `~/.openclaw/crabhelm-ready` after `/readyz` succeeds. Legacy outbound node enrollment remains available only when standalone mode is off.
 
 ## Live proof
 
-The Cloudflare adapter attaches through Crabbox's authenticated server-to-server terminal and accepts only exact sentinel lines. After the Gateway marker appears, it writes the exact desired model, restarts the Gateway, runs a bounded `openclaw agent` turn, requires the expected response, starts the outbound runtime bridge, then writes `~/.openclaw/crabhelm-inference-ready`.
+The Cloudflare adapter attaches through Crabbox's authenticated server-to-server terminal and accepts only exact sentinel lines. After the Gateway marker appears, it runs from the selected digest-specific Node runtime, writes the exact desired model, restarts the Gateway, runs a bounded `openclaw agent` turn, requires the expected response, starts the outbound runtime bridge, then writes the complete release identity and model to `~/.openclaw/crabhelm-inference-ready`.
 
 Provider allocation, echoed shell source, or a process existing is insufficient.
 
@@ -36,5 +36,6 @@ Provider allocation, echoed shell source, or a process existing is insufficient.
 - Child Gateway binds loopback only.
 - Raw probe output stays in the workspace and is never projected into Crabhelm state.
 - The owner-only runtime workload credential enters the bridge through an inherited file descriptor, expires after ten minutes, and rotates through a one-use refresh fence. Owner-only persistence permits restart recovery; turn processes use the loopback Gateway and receive neither workload nor model-provider credentials.
+- Model access: by default the child receives the raw `OPENAI_API_KEY`. With the edge model proxy enabled (`CRABHELM_MODEL_PROXY=on`), the child instead receives a per-claw model token as `OPENAI_API_KEY` plus `CRABHELM_MODEL_BASE_URL`, and `bootstrap-child.sh` sets `models.providers.openai.baseUrl` so the built-in `openai/*` provider is rerouted through the Worker; the raw provider key never enters the child.
 - Slack and provider OAuth credentials never enter the child.
 - Changed desired model invalidates the inference marker and forces another live probe.
