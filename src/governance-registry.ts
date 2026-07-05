@@ -298,7 +298,12 @@ export class GovernanceRegistry {
 
   async managedSpecForClaw(claw: ClawRecord): Promise<ManagedAgentSpec> {
     const persona = await this.ensurePersonaForClaw(claw);
-    return buildManagedAgentSpec({ persona, owner: await this.requirePrincipal(persona.ownerPrincipalId), skills: await values(this.#stores.skills) });
+    return buildManagedAgentSpec({
+      persona,
+      owner: await this.requirePrincipal(persona.ownerPrincipalId),
+      skills: await values(this.#stores.skills),
+      observability: claw.desired.observability,
+    });
   }
 
   async requirePrincipal(id: string): Promise<PrincipalRecord> {

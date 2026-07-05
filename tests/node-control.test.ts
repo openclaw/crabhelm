@@ -52,7 +52,7 @@ test("child status command binds evidence to the configured child id", async () 
   assert.equal(response.ok, true);
   assert.equal(response.childId, "child-1");
   assert.equal(response.pluginMode, "child");
-  assert.equal(response.protocolVersion, 1);
+  assert.equal(response.protocolVersion, 2);
   assert.equal(response.gatewayReady, false);
   assert.equal(response.gatewayVersion, "test-version");
   assert.equal(typeof response.managedHash, "string");
@@ -62,6 +62,7 @@ test("child status command binds evidence to the configured child id", async () 
 test("child apply command performs managed-field compare-and-swap", async () => {
   const config: Record<string, unknown> = {
     agents: { defaults: { model: "openai/gpt-5.5" } },
+    plugins: { allow: ["crabhelm", "slack"] },
   };
   const handlers = new Map<string, (params?: string | null) => Promise<string>>();
   registerChildCommands(
@@ -91,6 +92,16 @@ test("child apply command performs managed-field compare-and-swap", async () => 
           dmPolicy: "pairing",
           groupPolicy: "allowlist",
           logLevel: "warn",
+          otel: {
+            enabled: true,
+            endpoint: "https://otel.example.test/v1",
+            serviceName: "crabhelm-child-1",
+            traces: true,
+            metrics: false,
+            logs: false,
+            sampleRate: 0.2,
+            flushIntervalMs: 30_000,
+          },
         },
       }),
     ) ?? "{}",
@@ -103,11 +114,71 @@ test("child apply command performs managed-field compare-and-swap", async () => 
     fallbacks: [],
   });
   assert.equal((config.logging as { level: string }).level, "warn");
+  assert.deepEqual((config.plugins as { allow: string[] }).allow, ["crabhelm", "slack", "diagnostics-otel"]);
+  assert.equal(
+    ((config.plugins as { entries: { "diagnostics-otel": { enabled: boolean } } }).entries["diagnostics-otel"].enabled),
+    true,
+  );
+  assert.deepEqual((config.diagnostics as { enabled: boolean; otel: unknown }), {
+    enabled: true,
+    otel: {
+      enabled: true,
+      endpoint: "https://otel.example.test/v1",
+      tracesEndpoint: "https://otel.example.test/v1/v1/traces",
+      metricsEndpoint: "https://otel.example.test/v1/v1/metrics",
+      protocol: "http/protobuf",
+      serviceName: "crabhelm-child-1",
+      traces: true,
+      metrics: false,
+      logs: false,
+      sampleRate: 0.2,
+      flushIntervalMs: 30_000,
+    },
+  });
   assert.equal(
     (((config.plugins as { entries: { crabhelm: { config: Record<string, unknown> } } }).entries
       .crabhelm.config).appliedDesiredHash),
     "desired-hash",
   );
+  const converged = JSON.parse(
+    await handlers.get(childStatusCommand)?.(JSON.stringify({ clawId: "child-1" })) ?? "{}",
+  );
+  (config.diagnostics as { enabled: boolean }).enabled = false;
+  const disabledGate = JSON.parse(
+    await handlers.get(childStatusCommand)?.(JSON.stringify({ clawId: "child-1" })) ?? "{}",
+  );
+  assert.notEqual(disabledGate.managedHash, converged.managedHash);
+  (config.diagnostics as { enabled: boolean }).enabled = true;
+  const disableOtelStatus = JSON.parse(
+    await handlers.get(childStatusCommand)?.(JSON.stringify({ clawId: "child-1" })) ?? "{}",
+  );
+  const disabled = JSON.parse(
+    await handlers.get(childApplyCommand)?.(JSON.stringify({
+      clawId: "child-1",
+      generation: 4,
+      desiredHash: "disabled-hash",
+      expectedManagedHash: disableOtelStatus.managedHash,
+      desired: {
+        model: "openai/gpt-5.5-mini",
+        fallbackModels: [],
+        slackEnabled: false,
+        dmPolicy: "pairing",
+        groupPolicy: "allowlist",
+        logLevel: "warn",
+        otel: {
+          enabled: false,
+          serviceName: "crabhelm-child-1",
+          traces: true,
+          metrics: false,
+          logs: false,
+          sampleRate: 0.2,
+          flushIntervalMs: 30_000,
+        },
+      },
+    })) ?? "{}",
+  );
+  assert.equal(disabled.ok, true);
+  assert.equal((config.diagnostics as { enabled: boolean }).enabled, true);
 });
 
 test("child ingress command disables and restores existing channel states", async () => {
@@ -303,7 +374,7 @@ test("node control accepts only native status evidence for the exact child", asy
           ok: true,
           childId: claw.id,
             pluginMode: "child",
-            protocolVersion: 1,
+            protocolVersion: 2,
             gatewayReady: false,
             managedHash: "managed-hash",
         },
@@ -322,9 +393,19 @@ test("node control applies desired state before reporting config convergence", a
     name: "Model child",
     owner: { subject: "github:model", label: "@model", source: "github" },
     inference: { model: "openai/gpt-5.5-mini" },
+    observability: {
+      otel: {
+        enabled: true,
+        endpoint: "https://otel.example.test/v1",
+        traces: true,
+        metrics: true,
+        logs: false,
+      },
+    },
   });
   let appliedHash: string | undefined;
   let applyCalls = 0;
+  let appliedOtel: unknown;
   const control = new OpenClawNodeControl({
     async list() {
       return {
@@ -339,7 +420,9 @@ test("node control applies desired state before reporting config convergence", a
     async invoke(params) {
       if (params.command === childApplyCommand) {
         applyCalls += 1;
-        appliedHash = (params.params as { desiredHash: string }).desiredHash;
+        const apply = params.params as { desiredHash: string; desired: { otel: unknown } };
+        appliedHash = apply.desiredHash;
+        appliedOtel = apply.desired.otel;
         return { ok: true, payload: { ok: true } };
       }
       if (params.command === childHealthCommand) {
@@ -363,7 +446,7 @@ test("node control applies desired state before reporting config convergence", a
           ok: true,
           childId: claw.id,
           pluginMode: "child",
-          protocolVersion: 1,
+          protocolVersion: 2,
           gatewayReady: true,
           gatewayVersion: "2026.7.1",
           managedHash: "managed-before",
@@ -375,9 +458,57 @@ test("node control applies desired state before reporting config convergence", a
 
   const result = await control.inspect(claw);
   assert.equal(applyCalls, 1);
+  assert.deepEqual(appliedOtel, claw.desired.observability.otel);
   assert.equal(result.gatewayReady, true);
   assert.equal(result.configHash, appliedHash);
   assert.equal(result.probes?.model.authReady, true);
+});
+
+test("node control requires protocol v2 before enabling OpenTelemetry", async () => {
+  const claw = createClawRecord({
+    name: "Legacy observed child",
+    owner: { subject: "github:legacy-observed", label: "@legacy-observed", source: "github" },
+    observability: {
+      otel: {
+        enabled: true,
+        endpoint: "https://otel.example.test/v1",
+        traces: true,
+        metrics: true,
+        logs: false,
+      },
+    },
+  });
+  let applyCalls = 0;
+  const control = new OpenClawNodeControl({
+    async list() {
+      return { nodes: [{
+        nodeId: childNodeId(claw.id),
+        displayName: childNodeDisplayName(claw.id),
+        connected: true,
+        commands: [childStatusCommand, childApplyCommand],
+      }] };
+    },
+    async invoke(params) {
+      if (params.command === childApplyCommand) applyCalls += 1;
+      return {
+        ok: true,
+        payload: {
+          ok: true,
+          childId: claw.id,
+          pluginMode: "child",
+          protocolVersion: 1,
+          gatewayReady: true,
+          managedHash: "legacy-managed",
+          appliedDesiredHash: "legacy-desired",
+        },
+      };
+    },
+  });
+
+  const result = await control.inspect(claw);
+  assert.equal(result.status, "pending");
+  assert.match(result.message, /plugin upgrade is required/u);
+  assert.equal(applyCalls, 0);
 });
 
 test("node control preserves allowlisted Slack credential failure codes", async () => {

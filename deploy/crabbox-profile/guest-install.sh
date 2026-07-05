@@ -75,6 +75,7 @@ const expected = {
   nodeFile: "artifacts/node-linux-x64.tar.xz",
   openclawFile: "artifacts/openclaw.tgz",
   slackFile: "artifacts/slack.tgz",
+  otelFile: "artifacts/diagnostics-otel.tgz",
   crabhelmFile: "artifacts/crabhelm.tgz",
   bootstrapFile: "bootstrap-child.sh",
   guestInstallFile: "guest-install.sh",
@@ -84,13 +85,13 @@ if (
   manifest.schemaVersion !== expected.schemaVersion || manifest.profile !== expected.profile ||
   manifest.node?.file !== expected.nodeFile || manifest.node?.version !== "22.23.1" ||
   manifest.node?.platform !== "linux" || manifest.node?.arch !== "x64" ||
-  manifest.openclaw?.file !== expected.openclawFile || manifest.slack?.file !== expected.slackFile ||
+  manifest.openclaw?.file !== expected.openclawFile || manifest.slack?.file !== expected.slackFile || manifest.otel?.file !== expected.otelFile ||
   manifest.crabhelm?.file !== expected.crabhelmFile ||
   manifest.bootstrap?.file !== expected.bootstrapFile || manifest.guestInstall?.file !== expected.guestInstallFile ||
   manifest.runtimeBridge?.file !== expected.runtimeBridgeFile ||
-  manifest.openclaw?.version !== "2026.6.11" || manifest.slack?.version !== "2026.6.11" ||
+  manifest.openclaw?.version !== "2026.6.11" || manifest.slack?.version !== "2026.6.11" || manifest.otel?.version !== "2026.6.11" ||
   typeof manifest.crabhelm?.version !== "string" || !manifest.crabhelm.version ||
-  !sha.test(manifest.node?.sha256) || !sha.test(manifest.openclaw?.sha256) || !sha.test(manifest.slack?.sha256) ||
+  !sha.test(manifest.node?.sha256) || !sha.test(manifest.openclaw?.sha256) || !sha.test(manifest.slack?.sha256) || !sha.test(manifest.otel?.sha256) ||
   !sha.test(manifest.crabhelm?.sha256) ||
   !sha.test(manifest.bootstrap?.sha256) || !sha.test(manifest.guestInstall?.sha256) ||
   !sha.test(manifest.runtimeBridge?.sha256)
@@ -102,6 +103,8 @@ for (const value of [
   manifest.openclaw.sha256,
   manifest.slack.version,
   manifest.slack.sha256,
+  manifest.otel.version,
+  manifest.otel.sha256,
   manifest.crabhelm.version,
   manifest.crabhelm.sha256,
   manifest.bootstrap.sha256,
@@ -114,18 +117,20 @@ values=()
 while IFS= read -r value; do
   values+=("$value")
 done <<<"$manifest_values"
-[[ "${#values[@]}" = 11 ]] || die "bundle manifest contract is incomplete"
+[[ "${#values[@]}" = 13 ]] || die "bundle manifest contract is incomplete"
 node_version="${values[0]}"
 node_sha256="${values[1]}"
 openclaw_version="${values[2]}"
 openclaw_sha256="${values[3]}"
 slack_plugin_version="${values[4]}"
 slack_sha256="${values[5]}"
-crabhelm_version="${values[6]}"
-crabhelm_sha256="${values[7]}"
-bootstrap_sha256="${values[8]}"
-guest_install_sha256="${values[9]}"
-runtime_bridge_sha256="${values[10]}"
+otel_plugin_version="${values[6]}"
+otel_sha256="${values[7]}"
+crabhelm_version="${values[8]}"
+crabhelm_sha256="${values[9]}"
+bootstrap_sha256="${values[10]}"
+guest_install_sha256="${values[11]}"
+runtime_bridge_sha256="${values[12]}"
 
 verify_artifact() {
   local relative="$1" expected="$2" file actual
@@ -139,6 +144,7 @@ verify_artifact() {
 verify_artifact artifacts/node-linux-x64.tar.xz "$node_sha256"
 verify_artifact artifacts/openclaw.tgz "$openclaw_sha256"
 verify_artifact artifacts/slack.tgz "$slack_sha256"
+verify_artifact artifacts/diagnostics-otel.tgz "$otel_sha256"
 verify_artifact artifacts/crabhelm.tgz "$crabhelm_sha256"
 verify_artifact bootstrap-child.sh "$bootstrap_sha256"
 verify_artifact guest-install.sh "$guest_install_sha256"
@@ -205,7 +211,7 @@ plugin_env=(
   npm_config_offline=true
 )
 install_stage=plugin
-for plugin_id in crabhelm slack; do
+for plugin_id in crabhelm slack diagnostics-otel; do
   "${plugin_env[@]}" "$openclaw_binary" plugins uninstall "$plugin_id" --force >/dev/null 2>&1 || true
 done
 "$node_binary" - "$state_dir" <<'NODE' || die "managed plugin replacement is unsafe"
@@ -221,7 +227,7 @@ async function thaw(directory) {
     if (entry.isDirectory()) await thaw(child);
   }
 }
-for (const id of ["crabhelm", "slack"]) {
+for (const id of ["crabhelm", "slack", "diagnostics-otel"]) {
   const directory = join(root, "extensions", id);
   try {
     await thaw(directory);
@@ -233,6 +239,7 @@ for (const id of ["crabhelm", "slack"]) {
 NODE
 "${plugin_env[@]}" "$openclaw_binary" plugins install "$script_dir/artifacts/crabhelm.tgz"
 "${plugin_env[@]}" "$openclaw_binary" plugins install "$script_dir/artifacts/slack.tgz"
+"${plugin_env[@]}" "$openclaw_binary" plugins install "$script_dir/artifacts/diagnostics-otel.tgz"
 
 credential_file="$state_dir/.env"
 runtime_credential_file="$state_dir/crabhelm-runtime.env"

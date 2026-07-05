@@ -3,6 +3,8 @@ import { signClaims, verifyClaims } from "./security.js";
 import type { GovernanceAuditEvent, RuntimeClaims, RuntimeTicketClaims, SessionClaims } from "../src/governance-types.js";
 import { verifyAccessIdentity } from "./access.js";
 import { handleSlackRequest } from "./slack.js";
+import { standaloneBootstrapHashFor } from "../src/domain.js";
+import type { ObservabilityPolicy } from "../src/types.js";
 export { CrabhelmControlPlane } from "./control-plane.js";
 export { CrabhelmClawCoordinator } from "./claw-coordinator.js";
 export { CrabhelmAdmin } from "./admin-entrypoint.js";
@@ -86,6 +88,15 @@ async function handleBootstrap(request: Request, env: Env, url: URL): Promise<Re
     return new Response("unauthorized", { status: 401, headers: { "cache-control": "no-store" } });
   }
   const headers = { "cache-control": "no-store, max-age=0", "x-content-type-options": "nosniff" };
+  const model = url.searchParams.get("model") ?? "openai/gpt-5.5";
+  const slack = url.searchParams.get("slack") ?? "false";
+  const policyHash = url.searchParams.get("policyHash") ?? "";
+  if (!/^[a-z0-9][a-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(model)) {
+    return new Response("invalid model", { status: 400, headers });
+  }
+  if (slack !== "true" && slack !== "false") {
+    return new Response("invalid Slack desired state", { status: 400, headers });
+  }
   if (file === "bundle.tgz") {
     const object = await env.APPLIANCES.get(`releases/${release.archiveId}.tgz`);
     if (!object) return new Response("appliance unavailable", { status: 503, headers });
@@ -94,7 +105,16 @@ async function handleBootstrap(request: Request, env: Env, url: URL): Promise<Re
     });
   }
   if (file === "managed-spec.json") {
-    return env.CONTROL_PLANE.getByName("openclaw-org").managedSpec(childId);
+    if (!/^[0-9a-f]{64}$/u.test(policyHash)) {
+      return new Response("invalid managed policy hash", { status: 400, headers });
+    }
+    const response = await env.CONTROL_PLANE.getByName("openclaw-org").managedSpec(childId);
+    if (!response.ok) return response;
+    const spec = await response.json() as { observability?: ObservabilityPolicy };
+    if (!spec.observability || standaloneBootstrapHashFor(model, spec.observability) !== policyHash) {
+      return new Response("managed policy changed", { status: 409, headers });
+    }
+    return Response.json(spec, { headers });
   }
   if (file === "credentials.env") {
     const runtimeToken = await signClaims<RuntimeClaims>(env.RUNTIME_SIGNING_SECRET, {
@@ -112,15 +132,13 @@ async function handleBootstrap(request: Request, env: Env, url: URL): Promise<Re
       headers: { ...headers, "content-type": "text/plain; charset=utf-8" },
     });
   }
-  const model = url.searchParams.get("model") ?? "openai/gpt-5.5";
-  const slack = url.searchParams.get("slack") ?? "false";
-  if (!/^[a-z0-9][a-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(model)) {
-    return new Response("invalid model", { status: 400, headers });
-  }
-  if (slack !== "true" && slack !== "false") {
-    return new Response("invalid Slack desired state", { status: 400, headers });
+  if (!/^[0-9a-f]{64}$/u.test(policyHash)) {
+    return new Response("invalid managed policy hash", { status: 400, headers });
   }
   const base = `${url.origin}/bootstrap/${encodeURIComponent(childId)}`;
+  const managedSpecUrl = new URL(`${base}/managed-spec.json`);
+  managedSpecUrl.searchParams.set("model", model);
+  managedSpecUrl.searchParams.set("policyHash", policyHash);
   const script = `#!/usr/bin/env bash
 set -euo pipefail
 umask 077
@@ -135,13 +153,14 @@ actual_archive_sha256="\${actual_archive_sha256%% *}"
 tar -xzf "$work/bundle.tgz" -C "$work"
 curl --fail --silent --show-error --location "\${auth[@]}" ${shellValue(`${base}/credentials.env`)} -o "$work/credentials.env"
 chmod 0600 "$work/credentials.env"
-curl --fail --silent --show-error --location "\${auth[@]}" ${shellValue(`${base}/managed-spec.json`)} -o "$work/managed-spec.json"
+curl --fail --silent --show-error --location "\${auth[@]}" ${shellValue(managedSpecUrl.toString())} -o "$work/managed-spec.json"
 chmod 0600 "$work/managed-spec.json"
 export CRABHELM_BUNDLE_MANIFEST_SHA256=${shellValue(release.releaseId)}
 export CRABHELM_NODE_SHA256=${shellValue(env.NODE_RUNTIME_SHA256)}
 export CRABHELM_CREDENTIAL_FILE="$work/credentials.env"
 export CRABHELM_CREDENTIAL_REFRESH_URL=${shellValue(`${base}/credentials.env`)}
 export CRABHELM_MANAGED_SPEC_FILE="$work/managed-spec.json"
+export CRABHELM_POLICY_HASH=${shellValue(policyHash)}
 export CRABBOX_ADAPTER_ROOT_SESSION_ID=${shellValue(childId)}
 export CRABHELM_STANDALONE=true
 export CRABHELM_MODEL=${shellValue(model)}

@@ -72,7 +72,7 @@ export class CrabhelmRegistry {
   async list(): Promise<ClawRecord[]> {
     await this.#tail;
     return (await this.#claws.entries())
-      .map((entry) => normalizeRecordRevision(entry.value))
+      .map((entry) => normalizeRecord(entry.value))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
@@ -82,7 +82,7 @@ export class CrabhelmRegistry {
     if (!record) {
       throw new Error("claw not found");
     }
-    return normalizeRecordRevision(record);
+    return normalizeRecord(record);
   }
 
   async snapshot() {
@@ -427,7 +427,7 @@ export class CrabhelmRegistry {
     if (!record) {
       throw new Error("claw not found");
     }
-    return normalizeRecordRevision(record);
+    return normalizeRecord(record);
   }
 
   #requirePolicies(): StateStore<PolicyTemplate> {
@@ -454,10 +454,38 @@ export class CrabhelmRegistry {
   }
 }
 
-function normalizeRecordRevision(record: ClawRecord): ClawRecord {
-  return Number.isSafeInteger(record.revision) && record.revision >= 0
-    ? record
-    : { ...record, revision: 0 };
+function normalizeRecord(record: ClawRecord): ClawRecord {
+  const legacyDesired = record.desired as ClawRecord["desired"] & {
+    observability?: Partial<ClawRecord["desired"]["observability"]> & {
+      otel?: ClawRecord["desired"]["observability"]["otel"];
+    };
+  };
+  const observability = legacyDesired.observability;
+  const revision = Number.isSafeInteger(record.revision) && record.revision >= 0
+    ? record.revision
+    : 0;
+  if (observability?.otel && revision === record.revision) return record;
+  return {
+    ...record,
+    revision,
+    desired: {
+      ...record.desired,
+      observability: {
+        logLevel: observability?.logLevel ?? "info",
+        retentionDays: observability?.retentionDays ?? 30,
+        metadataOnly: true,
+        otel: observability?.otel ?? {
+          enabled: false,
+          serviceName: `crabhelm-${record.desired.slug}`,
+          traces: true,
+          metrics: true,
+          logs: false,
+          sampleRate: 0.1,
+          flushIntervalMs: 60_000,
+        },
+      },
+    },
+  };
 }
 
 function requirePolicyText(value: unknown, label: string, max: number, allowEmpty = false): string {

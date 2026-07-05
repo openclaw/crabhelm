@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import test from "node:test";
 import { promisify } from "node:util";
-import { createClawRecord } from "../src/domain.js";
+import { createClawRecord, standaloneBootstrapHash } from "../src/domain.js";
 import {
   bootstrapStatusCommand,
   bootstrapToken,
@@ -29,7 +29,9 @@ test("Cloudflare workspace bootstrap binds child identity, model, and channel st
   });
 
   const command = await bootstrap.command(claw);
-  assert.match(command, new RegExp(`/bootstrap/${claw.id}/install\\.sh\\?model=openai%2Fgpt-5\\.5-mini&slack=false`));
+  assert.match(command, new RegExp(`/bootstrap/${claw.id}/install\\.sh\\?model=openai%2Fgpt-5\\.5-mini&slack=false&policyHash=${standaloneBootstrapHash(claw)}`));
+  assert.match(command, new RegExp(`CRABHELM_POLICY_HASH='${standaloneBootstrapHash(claw)}'`));
+  assert.match(command, new RegExp(`/tmp/crabhelm-attempt-${"a".repeat(64)}-${standaloneBootstrapHash(claw)}`));
   assert.doesNotMatch(command, /signing-test-secret|broker-test-token/);
   assert.match(command, /curl .* -o .* && touch/u);
   assert.match(command, /timeout --signal=TERM --kill-after=10s 10m bash/u);
@@ -100,4 +102,42 @@ test("workspace readiness is pinned to the reviewed appliance release", async ()
   assert.match(status, /test ! -e '\/tmp\/retry\.retry2'[\s\S]*touch '\/tmp\/retry\.retry2'[\s\S]*echo launch/u);
   assert.ok(status.indexOf("test ! -e '/tmp/retry'") < status.indexOf("elif pgrep -f '[g]uest-install.sh'"));
   await run("/bin/bash", ["-n", "-c", status]);
+});
+
+test("workspace readiness changes with managed child policy", async () => {
+  const releaseId = "a".repeat(64);
+  const claw = createClawRecord({
+    name: "Observed child",
+    owner: { subject: "github:observed", label: "@observed", source: "github" },
+  });
+  const updated = createClawRecord({
+    name: "Observed child",
+    owner: { subject: "github:observed", label: "@observed", source: "github" },
+    observability: {
+      otel: {
+        enabled: true,
+        endpoint: "https://otel.example.test/v1",
+        traces: true,
+        metrics: true,
+        logs: false,
+      },
+    },
+  });
+  const original = bootstrapStatusCommand("echo launch", "CRABHELM_policy", "/tmp/retry", `${releaseId}:${standaloneBootstrapHash(claw)}`);
+  const changed = bootstrapStatusCommand("echo launch", "CRABHELM_policy", "/tmp/retry", `${releaseId}:${standaloneBootstrapHash(updated)}`);
+  assert.notEqual(original, changed);
+  assert.match(changed, new RegExp(`${releaseId}:${standaloneBootstrapHash(updated)}`));
+  await run("/bin/bash", ["-n", "-c", changed]);
+});
+
+test("legacy appliance readiness is safe during the policy-aware rollout", async () => {
+  const releaseId = "a".repeat(64);
+  const policyReadyId = `${releaseId}:${"b".repeat(64)}`;
+  const compatible = bootstrapStatusCommand("echo launch", "CRABHELM_legacy", "/tmp/retry", policyReadyId, releaseId);
+  assert.match(compatible, new RegExp(`grep -Fqx '${policyReadyId}'.*\\|\\| grep -Fqx '${releaseId}'`));
+  const blocked = bootstrapStatusCommand("echo launch", "CRABHELM_legacy", "/tmp/retry", policyReadyId, "", releaseId);
+  assert.match(blocked, /POLICY_UPGRADE_REQUIRED/u);
+  assert.ok(blocked.indexOf("POLICY_UPGRADE_REQUIRED") < blocked.indexOf("echo launch"));
+  await run("/bin/bash", ["-n", "-c", compatible]);
+  await run("/bin/bash", ["-n", "-c", blocked]);
 });

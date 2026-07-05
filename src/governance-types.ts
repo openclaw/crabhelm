@@ -191,6 +191,20 @@ export type ManagedAgentSpec = {
   capabilityIds: string[];
   instructions: PersonaInstructions;
   publishedContext: PublishedContext[];
+  observability: {
+    logLevel: "error" | "warn" | "info" | "debug";
+    metadataOnly: true;
+    otel: {
+      enabled: boolean;
+      endpoint?: string;
+      serviceName: string;
+      traces: boolean;
+      metrics: boolean;
+      logs: false;
+      sampleRate: number;
+      flushIntervalMs: number;
+    };
+  };
   skills: Array<Pick<SkillRecord, "id" | "name" | "slug" | "version" | "digest" | "files">>;
   readOnly: true;
 };

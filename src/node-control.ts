@@ -17,7 +17,7 @@ export const childPairingListCommand = "crabhelm.child.pairing.list" as const;
 export const childPairingApproveCommand = "crabhelm.child.pairing.approve" as const;
 export const childHealthCommand = "crabhelm.child.health" as const;
 export const childDrainCommand = "crabhelm.child.drain.status" as const;
-const protocolVersion = 1;
+const protocolVersion = 2;
 const healthProbeMaxAgeMs = 5 * 60 * 1000;
 const execFileAsync = promisify(execFile);
 
@@ -357,6 +357,16 @@ export class OpenClawNodeControl {
       if (status.ingressDisabled) throw new Error("Child node did not re-enable channel ingress");
     }
     const desiredHash = childPolicyHash(claw);
+    if (claw.desired.observability.otel.enabled && status.protocolVersion < 2) {
+      return {
+        ...this.#evidence(
+          node.nodeId,
+          status,
+          "Child node paired; policy-aware Crabhelm plugin upgrade is required for OpenTelemetry",
+        ),
+        status: "pending",
+      };
+    }
     let appliedNow = false;
     if (options.reconcileDesired !== false && status.appliedDesiredHash !== desiredHash) {
       if (!node.commands.includes(childApplyCommand)) {
@@ -382,6 +392,7 @@ export class OpenClawNodeControl {
             dmPolicy: claw.desired.access.dmPolicy,
             groupPolicy: claw.desired.access.groupPolicy,
             logLevel: claw.desired.observability.logLevel,
+            otel: claw.desired.observability.otel,
           },
         },
         timeoutMs: 15_000,
@@ -472,7 +483,7 @@ export class OpenClawNodeControl {
     if (
       payload.ok !== true ||
       payload.childId !== claw.id ||
-      payload.protocolVersion !== protocolVersion ||
+      !isSupportedChildProtocol(payload.protocolVersion) ||
       !Number.isInteger(activeRuns) ||
       Number(activeRuns) < 0 ||
       typeof payload.drained !== "boolean"
@@ -638,12 +649,13 @@ export class OpenClawNodeControl {
       payload.ok !== true ||
       payload.childId !== claw.id ||
       payload.pluginMode !== "child" ||
-      payload.protocolVersion !== protocolVersion ||
+      !isSupportedChildProtocol(payload.protocolVersion) ||
       typeof payload.managedHash !== "string"
     ) {
       throw operationalError("CHILD_STATUS_INVALID", "Child returned invalid status evidence");
     }
     return {
+      protocolVersion: payload.protocolVersion,
       gatewayReady: payload.gatewayReady === true,
       gatewayVersion: typeof payload.gatewayVersion === "string" ? payload.gatewayVersion : undefined,
       managedHash: payload.managedHash,
@@ -670,7 +682,7 @@ export class OpenClawNodeControl {
     if (
       payload.ok !== true ||
       payload.childId !== claw.id ||
-      payload.protocolVersion !== protocolVersion
+      !isSupportedChildProtocol(payload.protocolVersion)
     ) {
       throw operationalError(
         "CHILD_HEALTH_INVALID",
@@ -714,6 +726,7 @@ export class OpenClawNodeControl {
 }
 
 type ChildStatusPayload = {
+  protocolVersion: 1 | 2;
   gatewayReady: boolean;
   gatewayVersion?: string;
   managedHash: string;
@@ -728,6 +741,16 @@ type ManagedDesired = {
   dmPolicy: "pairing" | "allowlist" | "disabled";
   groupPolicy: "allowlist" | "disabled";
   logLevel: "error" | "warn" | "info" | "debug";
+  otel: {
+    enabled: boolean;
+    endpoint?: string;
+    serviceName: string;
+    traces: boolean;
+    metrics: boolean;
+    logs: boolean;
+    sampleRate: number;
+    flushIntervalMs: number;
+  };
 };
 
 async function childStatus(runtime: ConfigRuntime, childId: string): Promise<Record<string, unknown>> {
@@ -788,7 +811,65 @@ function parseManagedDesired(value: unknown): ManagedDesired {
   if (!(logLevel === "error" || logLevel === "warn" || logLevel === "info" || logLevel === "debug")) {
     throw new Error("desired.logLevel is invalid");
   }
-  return { model, fallbackModels, slackEnabled: input.slackEnabled, dmPolicy, groupPolicy, logLevel };
+  return {
+    model,
+    fallbackModels,
+    slackEnabled: input.slackEnabled,
+    dmPolicy,
+    groupPolicy,
+    logLevel,
+    otel: parseManagedOtel(input.otel),
+  };
+}
+
+function parseManagedOtel(value: unknown): ManagedDesired["otel"] {
+  if (value === undefined) {
+    return {
+      enabled: false,
+      serviceName: "openclaw",
+      traces: true,
+      metrics: true,
+      logs: false,
+      sampleRate: 0.1,
+      flushIntervalMs: 60_000,
+    };
+  }
+  const input = asRecord(value);
+  for (const field of ["enabled", "traces", "metrics"] as const) {
+    if (typeof input[field] !== "boolean") throw new Error(`desired.otel.${field} is required`);
+  }
+  const enabled = input.enabled as boolean;
+  const traces = input.traces as boolean;
+  const metrics = input.metrics as boolean;
+  if (input.logs !== false) throw new Error("desired.otel.logs must be false");
+  const endpoint = typeof input.endpoint === "string" ? input.endpoint.trim() : undefined;
+  if (enabled && !endpoint) throw new Error("desired.otel.endpoint is required");
+  if (endpoint) {
+    const url = new URL(endpoint);
+    if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
+      throw new Error("desired.otel.endpoint is invalid");
+    }
+  }
+  const serviceName = requireString(input.serviceName, "desired.otel.serviceName", 120);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/u.test(serviceName)) {
+    throw new Error("desired.otel.serviceName is invalid");
+  }
+  if (typeof input.sampleRate !== "number" || !Number.isFinite(input.sampleRate) || input.sampleRate < 0 || input.sampleRate > 1) {
+    throw new Error("desired.otel.sampleRate is invalid");
+  }
+  if (!Number.isInteger(input.flushIntervalMs) || (input.flushIntervalMs as number) < 1_000 || (input.flushIntervalMs as number) > 300_000) {
+    throw new Error("desired.otel.flushIntervalMs is invalid");
+  }
+  return {
+    enabled,
+    ...(endpoint ? { endpoint } : {}),
+    serviceName,
+    traces,
+    metrics,
+    logs: false,
+    sampleRate: input.sampleRate,
+    flushIntervalMs: input.flushIntervalMs as number,
+  };
 }
 
 function readManagedState(config: Record<string, unknown>): ManagedDesired {
@@ -806,6 +887,11 @@ function readManagedState(config: Record<string, unknown>): ManagedDesired {
   const hasSlack = channels.slack !== undefined;
   const slack = asRecord(channels.slack);
   const logging = asRecord(config.logging);
+  const diagnostics = asRecord(config.diagnostics);
+  const diagnosticsOtel = asRecord(diagnostics.otel);
+  const plugins = asRecord(config.plugins);
+  const diagnosticsEntry = asRecord(asRecord(plugins.entries)["diagnostics-otel"]);
+  const diagnosticsAllowed = Array.isArray(plugins.allow) && plugins.allow.includes("diagnostics-otel");
   return {
     model,
     fallbackModels: Array.isArray(fallbacks)
@@ -821,6 +907,23 @@ function readManagedState(config: Record<string, unknown>): ManagedDesired {
       logging.level === "error" || logging.level === "warn" || logging.level === "debug"
         ? logging.level
         : "info",
+    otel: {
+      enabled:
+        diagnosticsAllowed &&
+        diagnosticsEntry.enabled === true &&
+        diagnostics.enabled === true &&
+        diagnosticsOtel.enabled === true &&
+        typeof diagnosticsOtel.endpoint === "string" &&
+        diagnosticsOtel.tracesEndpoint === appendOtelSignalPath(diagnosticsOtel.endpoint, "traces") &&
+        diagnosticsOtel.metricsEndpoint === appendOtelSignalPath(diagnosticsOtel.endpoint, "metrics"),
+      ...(typeof diagnosticsOtel.endpoint === "string" ? { endpoint: diagnosticsOtel.endpoint } : {}),
+      serviceName: typeof diagnosticsOtel.serviceName === "string" ? diagnosticsOtel.serviceName : "",
+      traces: diagnosticsOtel.traces === true,
+      metrics: diagnosticsOtel.metrics === true,
+      logs: diagnosticsOtel.logs === true,
+      sampleRate: typeof diagnosticsOtel.sampleRate === "number" ? diagnosticsOtel.sampleRate : -1,
+      flushIntervalMs: typeof diagnosticsOtel.flushIntervalMs === "number" ? diagnosticsOtel.flushIntervalMs : -1,
+    },
   };
 }
 
@@ -834,10 +937,39 @@ function applyManagedDesired(config: Record<string, unknown>, desired: ManagedDe
   slack.dmPolicy = desired.dmPolicy;
   slack.groupPolicy = desired.groupPolicy;
   ensureRecord(config, "logging").level = desired.logLevel;
+  const plugins = ensureRecord(config, "plugins");
+  if (Array.isArray(plugins.allow)) {
+    const allow = plugins.allow.filter((item): item is string => typeof item === "string" && item !== "diagnostics-otel");
+    if (desired.otel.enabled) allow.push("diagnostics-otel");
+    plugins.allow = allow;
+  }
+  const diagnosticsEntry = ensureRecord(ensureRecord(plugins, "entries"), "diagnostics-otel");
+  diagnosticsEntry.enabled = desired.otel.enabled;
+  const diagnostics = ensureRecord(config, "diagnostics");
+  if (desired.otel.enabled) diagnostics.enabled = true;
+  diagnostics.otel = {
+    enabled: desired.otel.enabled,
+    ...(desired.otel.endpoint ? { endpoint: desired.otel.endpoint } : {}),
+    ...(desired.otel.endpoint ? {
+      tracesEndpoint: appendOtelSignalPath(desired.otel.endpoint, "traces"),
+      metricsEndpoint: appendOtelSignalPath(desired.otel.endpoint, "metrics"),
+    } : {}),
+    protocol: "http/protobuf",
+    serviceName: desired.otel.serviceName,
+    traces: desired.otel.traces,
+    metrics: desired.otel.metrics,
+    logs: false,
+    sampleRate: desired.otel.sampleRate,
+    flushIntervalMs: desired.otel.flushIntervalMs,
+  };
 }
 
 function managedHash(value: ManagedDesired): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function appendOtelSignalPath(endpoint: string, signal: "traces" | "metrics"): string {
+  return `${endpoint.replace(/\/+$/u, "")}/v1/${signal}`;
 }
 
 function readPluginConfig(config: Record<string, unknown>): Record<string, unknown> {
@@ -1377,7 +1509,7 @@ function parsePairingRequests(
   if (
     payload.ok !== true ||
     payload.childId !== childId ||
-    payload.protocolVersion !== protocolVersion ||
+    !isSupportedChildProtocol(payload.protocolVersion) ||
     payload.channel !== channel ||
     !Array.isArray(payload.requests)
   ) {
@@ -1422,6 +1554,10 @@ function requirePositiveInteger(value: unknown, label: string): number {
     throw new Error(`${label} must be a positive integer`);
   }
   return value;
+}
+
+function isSupportedChildProtocol(value: unknown): value is 1 | 2 {
+  return value === 1 || value === 2;
 }
 
 function parseRecord(value?: string | null): Record<string, unknown> {

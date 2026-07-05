@@ -58,6 +58,7 @@ deploy/crabbox-profile/build-bundle.sh \
   --node-tarball /absolute/node-v22.23.1-linux-x64.tar.xz \
   --openclaw-tarball /absolute/openclaw.tgz \
   --slack-tarball /absolute/slack.tgz \
+  --otel-tarball /absolute/diagnostics-otel.tgz \
   --output /tmp/crabhelm-bundle
 tar -C /tmp -s '|^crabhelm-bundle|bundle|' \
   -czf /tmp/crabhelm-bundle.tgz crabhelm-bundle

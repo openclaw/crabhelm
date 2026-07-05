@@ -71,6 +71,8 @@ Policies are immutable versions of managed fields: primary/fallback inference mo
 
 Credentials, OAuth state, pairing, sessions, memory, and agent directories are outside managed policy.
 
+Per-claw observability may export traces and metrics to one administrator-managed HTTPS OTLP endpoint through the pinned `diagnostics-otel` plugin. Endpoint, service name, signals, sample rate, and flush interval are versioned desired state. OTLP log export remains disabled under the metadata-only contract.
+
 ## Removal
 
 Typed-name confirmation starts a staged removal. Crabhelm disables ingress, verifies zero active work twice across a quiet period, releases the exact provider workspace, confirms absence, revokes the exact control link, and retains redacted audit evidence.

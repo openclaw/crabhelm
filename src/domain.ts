@@ -119,7 +119,8 @@ function normalizeAccess(input?: Partial<AccessPolicy>): AccessPolicy {
 }
 
 function normalizeObservability(
-  input?: Partial<Omit<ObservabilityPolicy, "metadataOnly">>,
+  input: CreateClawInput["observability"] | undefined,
+  slug = "openclaw",
 ): ObservabilityPolicy {
   const logLevel = input?.logLevel ?? "info";
   if (!(["error", "warn", "info", "debug"] as const).includes(logLevel)) {
@@ -129,7 +130,54 @@ function normalizeObservability(
   if (!Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 365) {
     throw new Error("retention must be between 1 and 365 days");
   }
-  return { logLevel, retentionDays, metadataOnly: true };
+  for (const [field, value] of [
+    ["enabled", input?.otel?.enabled],
+    ["traces", input?.otel?.traces],
+    ["metrics", input?.otel?.metrics],
+  ] as const) {
+    if (value !== undefined && typeof value !== "boolean") {
+      throw new Error(`OpenTelemetry ${field} must be a boolean`);
+    }
+  }
+  const endpoint = input?.otel?.endpoint?.trim();
+  if (endpoint) {
+    const url = new URL(endpoint);
+    if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
+      throw new Error("OpenTelemetry endpoint must be an HTTPS URL without credentials, query, or fragment");
+    }
+  }
+  const enabled = input?.otel?.enabled ?? false;
+  if (enabled && !endpoint) throw new Error("OpenTelemetry endpoint is required when export is enabled");
+  if (input?.otel?.logs !== undefined && input.otel.logs !== false) {
+    throw new Error("OpenTelemetry log export is unavailable under metadata-only policy");
+  }
+  const sampleRate = input?.otel?.sampleRate ?? 0.1;
+  if (!Number.isFinite(sampleRate) || sampleRate < 0 || sampleRate > 1) {
+    throw new Error("OpenTelemetry sample rate must be between 0 and 1");
+  }
+  const flushIntervalMs = input?.otel?.flushIntervalMs ?? 60_000;
+  if (!Number.isInteger(flushIntervalMs) || flushIntervalMs < 1_000 || flushIntervalMs > 300_000) {
+    throw new Error("OpenTelemetry flush interval must be between 1000 and 300000 milliseconds");
+  }
+  const serviceName = requireText(input?.otel?.serviceName ?? `crabhelm-${slug}`, "OpenTelemetry service name", 120);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/u.test(serviceName)) {
+    throw new Error("OpenTelemetry service name contains unsupported characters");
+  }
+  return {
+    logLevel,
+    retentionDays,
+    metadataOnly: true,
+    otel: {
+      enabled,
+      ...(endpoint ? { endpoint } : {}),
+      serviceName,
+      traces: input?.otel?.traces ?? true,
+      metrics: input?.otel?.metrics ?? true,
+      logs: false,
+      sampleRate,
+      flushIntervalMs,
+    },
+  };
 }
 
 export function normalizeManagedPolicySpec(input: ManagedPolicySpec): ManagedPolicySpec {
@@ -214,7 +262,7 @@ export function createClawRecord(input: CreateClawInput, now = new Date()): Claw
       inference: normalizeModels(input.inference),
       channels: { slack: normalizeSlack(input.slack, slug) },
       access: normalizeAccess(input.access),
-      observability: normalizeObservability(input.observability),
+      observability: normalizeObservability(input.observability, slug),
       enabled: true,
     },
     observed: {
@@ -256,7 +304,11 @@ export function updateClawRecord(
       inference,
       slack: { ...record.desired.channels.slack, ...patch.slack },
       access: { ...record.desired.access, ...patch.access },
-      observability: { ...record.desired.observability, ...patch.observability },
+      observability: {
+        ...record.desired.observability,
+        ...patch.observability,
+        otel: { ...record.desired.observability.otel, ...patch.observability?.otel },
+      },
     },
     now,
   );
@@ -308,6 +360,26 @@ export function childPolicyHash(record: ClawRecord): string {
     slackEnabled: record.desired.channels.slack.enabled,
     access: record.desired.access,
     logLevel: record.desired.observability.logLevel,
+    otel: record.desired.observability.otel,
+  });
+  return createHash("sha256").update(serialized).digest("hex");
+}
+
+export function standaloneBootstrapHash(record: ClawRecord): string {
+  return standaloneBootstrapHashFor(
+    record.desired.inference.model,
+    record.desired.observability,
+  );
+}
+
+export function standaloneBootstrapHashFor(
+  model: string,
+  observability: Pick<ObservabilityPolicy, "logLevel" | "otel">,
+): string {
+  const serialized = canonicalJson({
+    model,
+    logLevel: observability.logLevel,
+    otel: observability.otel,
   });
   return createHash("sha256").update(serialized).digest("hex");
 }
