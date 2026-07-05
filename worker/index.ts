@@ -128,7 +128,7 @@ async function handleBootstrap(request: Request, env: Env, url: URL): Promise<Re
     base: `${url.origin}/bootstrap/${encodeURIComponent(childId)}`,
     archiveId: release.archiveId,
     releaseId: release.releaseId,
-    nodeSha256: env.NODE_RUNTIME_SHA256,
+    nodeSha256: release.nodeId,
     childId,
     model,
     slack,
