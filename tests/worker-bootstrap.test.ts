@@ -213,6 +213,7 @@ esac
     model: "openai/gpt-5.5",
     slack: "false",
     credentialsGeneration: 4,
+    egressLockdown: "off",
   });
   await run("/bin/bash", ["-n", "-c", script]);
   assert.ok(
