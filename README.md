@@ -76,6 +76,10 @@ pnpm dev
 
 Open <http://127.0.0.1:4177>. Local development uses an explicitly labeled simulator. Production Wrangler configuration always uses the real Crabbox adapter.
 
+## Testing
+
+`pnpm check` runs both test tiers. `pnpm test` runs the fast Node domain suite (`node:test`). `pnpm test:workers` runs the Worker and both Durable Objects inside workerd via `@cloudflare/vitest-pool-workers` (`tests/workers/`), covering router host-splitting, the Access auth gate, SQLite-backed control-plane state, and the hibernatable runtime-bridge reconnect path against the real runtime.
+
 ## Safety boundaries
 
 - Placement target, region, profile, TTL, and idle timeout are administrator policy—not browser-supplied provider overrides.
