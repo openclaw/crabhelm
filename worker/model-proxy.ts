@@ -26,11 +26,15 @@ const UPSTREAM_ORIGIN = "https://api.openai.com";
 const ALLOWED_ROUTES: ReadonlyArray<{ method: string; path: string }> = [
   { method: "POST", path: "/v1/chat/completions" },
   { method: "POST", path: "/v1/responses" },
+  { method: "POST", path: "/v1/responses/compact" },
   { method: "POST", path: "/v1/embeddings" },
   { method: "GET", path: "/v1/models" },
 ];
 
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
+// Runtime turns may run for 840 seconds; keep a small delivery margin while
+// still bounding stalled upstream requests.
+const UPSTREAM_TIMEOUT_MS = 15 * 60 * 1000;
 
 export function modelProxyEnabled(env: ModelProxyEnv): boolean {
   return env.CRABHELM_MODEL_PROXY === "on";
@@ -169,7 +173,7 @@ export async function handleModelProxy(request: Request, env: ModelProxyEnv, url
       redirect: "manual",
       // Streaming request body pass-through requires half-duplex.
       ...(route.method === "GET" ? {} : { duplex: "half" } as { duplex: "half" }),
-      signal: AbortSignal.timeout(120_000),
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
     });
   } catch {
     return new Response(JSON.stringify({ error: { message: "model upstream is unreachable", type: "crabhelm_model_proxy" } }), {

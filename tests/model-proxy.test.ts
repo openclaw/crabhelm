@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { signClaims, verifyClaims } from "../worker/security.js";
 import {
@@ -117,6 +118,13 @@ test("model proxy allowlists routes and methods", async () => {
   assert.equal((await handleModelProxy(query.req, baseEnv(), query.url)).status, 400);
 });
 
+test("deployment routes model requests through the Worker before assets", async () => {
+  const config = JSON.parse(await readFile("wrangler.jsonc", "utf8")) as {
+    assets?: { run_worker_first?: string[] };
+  };
+  assert.ok(config.assets?.run_worker_first?.includes("/model/*"));
+});
+
 test("model proxy injects the real key, forwards to the fixed upstream, and strips client auth", async () => {
   const token = await mintToken("claw-42");
   const { req, url } = request("/model/v1/chat/completions", {
@@ -159,6 +167,23 @@ test("model proxy never lets the caller redirect the upstream host", async () =>
       await handleModelProxy(req, baseEnv(), url);
       assert.equal(calls[0]!.url, "https://api.openai.com/v1/models");
       assert.equal(new URL(calls[0]!.url).host, "api.openai.com");
+    },
+  );
+});
+
+test("model proxy forwards the pinned runtime's response compaction endpoint", async () => {
+  const token = await mintToken();
+  const { req, url } = request("/model/v1/responses/compact", {
+    method: "POST",
+    body: "{}",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+  });
+  await withStubbedFetch(
+    async () => new Response("{}", { status: 200, headers: { "content-type": "application/json" } }),
+    async (calls) => {
+      const response = await handleModelProxy(req, baseEnv(), url);
+      assert.equal(response.status, 200);
+      assert.equal(calls[0]!.url, "https://api.openai.com/v1/responses/compact");
     },
   );
 });
