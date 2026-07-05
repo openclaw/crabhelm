@@ -18,7 +18,24 @@ test("child bootstrap verifies artifacts, allowlists Crabhelm, and strips ambien
   const slackPlugin = path.join(root, "slack.tgz");
   const runtimeBridge = path.join(root, "runtime-bridge.mjs");
   const log = path.join(root, "openclaw.log");
+  const stateDir = path.join(root, "state");
   await mkdir(bin);
+  await mkdir(path.join(stateDir, "managed"), { recursive: true });
+  await writeFile(path.join(stateDir, "managed", "manifest.json"), `${JSON.stringify({
+    observability: {
+      logLevel: "info",
+      otel: {
+        enabled: true,
+        endpoint: "https://otel.example.test/collect",
+        serviceName: "crabhelm-test",
+        traces: true,
+        metrics: true,
+        logs: false,
+        sampleRate: 0.2,
+        flushIntervalMs: 30_000,
+      },
+    },
+  })}\n`);
   await writeFile(plugin, "pinned plugin artifact\n", { mode: 0o600 });
   await writeFile(slackPlugin, "pinned Slack artifact\n", { mode: 0o600 });
   await writeFile(runtimeBridge, "// pinned runtime bridge\n", { mode: 0o600 });
@@ -35,6 +52,8 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
   await run("/bin/bash", [bootstrap], {
     env: {
       PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+      HOME: root,
+      OPENCLAW_STATE_DIR: stateDir,
       CRABHELM_TEST_LOG: log,
       CRABBOX_ADAPTER_ROOT_SESSION_ID: "11111111-1111-4111-8111-111111111111",
       CRABHELM_PARENT_HOST: "parent.internal.example",
@@ -60,10 +79,17 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
   assert.doesNotMatch(calls, /auth=present/);
   assert.match(calls, /config set plugins\.allow/);
   assert.match(calls, /plugins\.allow .*crabhelm.*slack/);
+  assert.match(calls, /plugins\.allow .*diagnostics-otel/);
+  assert.match(calls, /plugins\.entries\.diagnostics-otel\.enabled true/);
+  assert.match(calls, /diagnostics\.otel .*https:\/\/otel\.example\.test\/collect/);
+  assert.match(calls, /tracesEndpoint.*https:\/\/otel\.example\.test\/collect/);
+  assert.match(calls, /metricsEndpoint.*https:\/\/otel\.example\.test\/collect/);
+  assert.match(calls, /captureContent.*enabled.*false/);
+  assert.match(calls, /config set logging\.level info/);
   assert.match(calls, /channels\.slack\.mode socket/);
   assert.match(calls, /agents\.defaults\.model\.primary openai\/gpt-5\.4-mini/);
   assert.match(calls, /config set models\.providers\.openai\.baseUrl https:\/\/crabhelm-runtime\.openclaw\.ai\/model\/v1/);
-  assert.match(calls, /agents\.defaults\.workspace .*\.openclaw\/workspace/);
+  assert.match(calls, /agents\.defaults\.workspace .*\/state\/workspace/);
   assert.match(calls, /channels\.slack\.enabled true/);
   assert.match(calls, /channels\.slack\.appToken .*SLACK_APP_TOKEN/);
   assert.match(calls, /config set gateway\.auth\.mode none/);
@@ -195,6 +221,7 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
     CRABHELM_RUNTIME_BRIDGE: runtimeBridge,
     CRABHELM_RUNTIME_BRIDGE_SHA256: runtimeBridgeDigest,
     CRABHELM_RELEASE_ID: `${"b".repeat(64)}.${"c".repeat(64)}.${"d".repeat(64)}`,
+    CRABHELM_POLICY_HASH: "c".repeat(64),
   };
   await run("/bin/bash", [bootstrap], { env: bootstrapEnv });
   await run("/bin/bash", [bootstrap], { env: bootstrapEnv });
@@ -210,15 +237,20 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
   await run("/bin/bash", ["-n", launcher]);
   const bootstrapSource = await readFile(bootstrap, "utf8");
   assert.ok(
-    bootstrapSource.lastIndexOf("prepare_runtime_bridge") < bootstrapSource.indexOf('printf \'%s\\n\' "$release_id"'),
+    bootstrapSource.lastIndexOf("prepare_runtime_bridge") < bootstrapSource.indexOf('printf \'%s:%s\\n\' "$release_id" "$policy_hash"'),
     "release readiness must be written only after the runtime launcher is executable",
+  );
+  assert.equal(
+    await readFile(path.join(home, ".openclaw", "crabhelm-ready"), "utf8"),
+    `${"b".repeat(64)}.${"c".repeat(64)}.${"d".repeat(64)}:${"c".repeat(64)}\n`,
   );
   const nodeId = "d".repeat(64);
   const releaseId = `${"b".repeat(64)}.${"c".repeat(64)}.${nodeId}`;
-  const probe = inferenceProbeCommand("openai/gpt-5.5", releaseId, nodeId);
+  const policyHash = "c".repeat(64);
+  const probe = inferenceProbeCommand("openai/gpt-5.5", releaseId, nodeId, "CRABHELM_INFERENCE", 1, policyHash);
   assert.match(probe, /start-runtime-bridge\.sh/u);
   assert.match(probe, new RegExp(`node-v22\\.23\\.1-${nodeId}-linux-x64`));
-  assert.match(probe, new RegExp(`v3:${releaseId}:openai/gpt-5\\.5`));
+  assert.match(probe, new RegExp(`v5:${releaseId}:p${policyHash}:openai/gpt-5\\.5`));
   assert.match(probe, /if \/bin\/bash \$HOME\/\.local\/share\/crabhelm\/runtime\/start-runtime-bridge\.sh; then[\s\S]*crabhelm-inference-ready/u);
 });
 

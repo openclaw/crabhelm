@@ -57,6 +57,18 @@ export type ObservabilityPolicy = {
   logLevel: "error" | "warn" | "info" | "debug";
   retentionDays: number;
   metadataOnly: true;
+  otel: OpenTelemetryPolicy;
+};
+
+export type OpenTelemetryPolicy = {
+  enabled: boolean;
+  endpoint?: string;
+  serviceName: string;
+  traces: boolean;
+  metrics: boolean;
+  logs: false;
+  sampleRate: number;
+  flushIntervalMs: number;
 };
 
 export type ManagedPolicySpec = {
@@ -226,7 +238,9 @@ export type CreateClawInput = {
   inference?: Partial<InferencePolicy>;
   slack?: Partial<SlackPolicy>;
   access?: Partial<AccessPolicy>;
-  observability?: Partial<Omit<ObservabilityPolicy, "metadataOnly">>;
+  observability?: Partial<Omit<ObservabilityPolicy, "metadataOnly" | "otel">> & {
+    otel?: Partial<OpenTelemetryPolicy>;
+  };
 };
 
 export type UpdateClawInput = Partial<
@@ -236,7 +250,9 @@ export type UpdateClawInput = Partial<
   inference?: Partial<InferencePolicy>;
   slack?: Partial<SlackPolicy>;
   access?: Partial<AccessPolicy>;
-  observability?: Partial<Omit<ObservabilityPolicy, "metadataOnly">>;
+  observability?: Partial<Omit<ObservabilityPolicy, "metadataOnly" | "otel">> & {
+    otel?: Partial<OpenTelemetryPolicy>;
+  };
 };
 
 export type AuditEvent = {
