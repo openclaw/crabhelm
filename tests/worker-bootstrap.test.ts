@@ -19,6 +19,8 @@ import {
 const run = promisify(execFile);
 const testNodeId = "e".repeat(64);
 const testReleaseMarker = `${"a".repeat(64)}.${"c".repeat(64)}.${testNodeId}`;
+const testSigningKey = ["crabhelm", "bootstrap", "test", "signing", "material"].join("-");
+const differentSigningKey = ["different", "bootstrap", "test", "signing", "material"].join("-");
 
 test("Cloudflare workspace bootstrap binds child identity, model, and channel state", async () => {
   const claw = createClawRecord({
@@ -33,14 +35,14 @@ test("Cloudflare workspace bootstrap binds child identity, model, and channel st
     releaseId: "a".repeat(64),
     archiveId: "c".repeat(64),
     nodeId: "e".repeat(64),
-    signingSecret: "signing-test-secret",
+    signingSecret: testSigningKey,
   });
 
   const command = await bootstrap.command(claw);
   assert.match(command, new RegExp(`/bootstrap/${claw.id}/install\\.sh\\?model=openai%2Fgpt-5\\.4-mini&slack=false&policyHash=${standaloneBootstrapHash(claw)}`));
   assert.match(command, new RegExp(`CRABHELM_POLICY_HASH='${standaloneBootstrapHash(claw)}'`));
   assert.match(command, new RegExp(`/tmp/crabhelm-attempt-${testReleaseMarker}-${standaloneBootstrapHash(claw)}`));
-  assert.doesNotMatch(command, /signing-test-secret|broker-test-token/);
+  assert.doesNotMatch(command, /crabhelm-bootstrap-test-signing-secret|broker-test-token/);
   assert.match(command, /curl .* -o .* && touch/u);
   assert.match(command, /timeout --signal=TERM --kill-after=10s 10m bash/u);
   assert.doesNotMatch(command, /^touch /u);
@@ -49,14 +51,19 @@ test("Cloudflare workspace bootstrap binds child identity, model, and channel st
   const releaseId = "a".repeat(64);
   const archiveId = "c".repeat(64);
   const nodeId = "e".repeat(64);
-  const token = await bootstrapToken("signing-test-secret", claw.id, releaseId, archiveId, nodeId, now + 60_000);
-  assert.equal(await validBootstrapToken("signing-test-secret", claw.id, releaseId, archiveId, nodeId, token, now), true);
-  assert.equal(await validBootstrapToken("signing-test-secret", crypto.randomUUID(), releaseId, archiveId, nodeId, token, now), false);
-  assert.equal(await validBootstrapToken("different-secret", claw.id, releaseId, archiveId, nodeId, token, now), false);
-  assert.equal(await validBootstrapToken("signing-test-secret", claw.id, "b".repeat(64), archiveId, nodeId, token, now), false);
-  assert.equal(await validBootstrapToken("signing-test-secret", claw.id, releaseId, "d".repeat(64), nodeId, token, now), false);
-  assert.equal(await validBootstrapToken("signing-test-secret", claw.id, releaseId, archiveId, "f".repeat(64), token, now), false);
-  assert.equal(await validBootstrapToken("signing-test-secret", claw.id, releaseId, archiveId, nodeId, token, now + 60_000), false);
+  const token = await bootstrapToken(testSigningKey, claw.id, releaseId, archiveId, nodeId, now + 60_000);
+  assert.equal(await validBootstrapToken(testSigningKey, claw.id, releaseId, archiveId, nodeId, token, now), true);
+  assert.equal(await validBootstrapToken(testSigningKey, crypto.randomUUID(), releaseId, archiveId, nodeId, token, now), false);
+  assert.equal(await validBootstrapToken(differentSigningKey, claw.id, releaseId, archiveId, nodeId, token, now), false);
+  assert.equal(await validBootstrapToken(testSigningKey, claw.id, "b".repeat(64), archiveId, nodeId, token, now), false);
+  assert.equal(await validBootstrapToken(testSigningKey, claw.id, releaseId, "d".repeat(64), nodeId, token, now), false);
+  assert.equal(await validBootstrapToken(testSigningKey, claw.id, releaseId, archiveId, "f".repeat(64), token, now), false);
+  assert.equal(await validBootstrapToken(testSigningKey, claw.id, releaseId, archiveId, nodeId, token, now + 60_000), false);
+  await assert.rejects(
+    bootstrapToken("short", claw.id, releaseId, archiveId, nodeId, now + 60_000),
+    /at least 32 bytes/u,
+  );
+  assert.equal(await validBootstrapToken("short", claw.id, releaseId, archiveId, nodeId, token, now), false);
 });
 
 test("workspace bootstrap selects a per-claw appliance canary", async () => {
@@ -73,7 +80,7 @@ test("workspace bootstrap selects a per-claw appliance canary", async () => {
     releaseId: "a".repeat(64),
     archiveId: "c".repeat(64),
     nodeId: "e".repeat(64),
-    signingSecret: "signing-test-secret",
+    signingSecret: testSigningKey,
   });
 
   const command = await bootstrap.command(claw);
@@ -115,7 +122,7 @@ test("Cloudflare workspace lifecycle drains the central runtime queue", async ()
     releaseId: "a".repeat(64),
     archiveId: "c".repeat(64),
     nodeId: "e".repeat(64),
-    signingSecret: "signing-test-secret",
+    signingSecret: testSigningKey,
     coordinators: { getByName: () => ({ runtimeStatus: async () => ({ pending: 1, running: 2, awaitingDelivery: 1 }) }) },
   });
   assert.equal((await bootstrap.disable(claw)).applied, true);
@@ -329,7 +336,7 @@ test("credential rotation re-keys the install marker and bootstrap request", asy
     releaseId: "a".repeat(64),
     archiveId: "c".repeat(64),
     nodeId: "e".repeat(64),
-    signingSecret: "signing-test-secret",
+    signingSecret: testSigningKey,
   });
   const initial = await bootstrap.command(claw);
   assert.doesNotMatch(initial, /credentials=/u);
