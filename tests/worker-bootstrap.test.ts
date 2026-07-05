@@ -203,6 +203,14 @@ esac
     { mode: 0o755 },
   );
   await chmod(path.join(bin, "curl"), 0o755);
+  for (const [name, body] of [
+    ["nft", "#!/bin/sh\nexit 1\n"],
+    ["systemctl", "#!/bin/sh\nexit 1\n"],
+    ["id", "#!/bin/sh\nprintf '0\\n'\n"],
+  ] as const) {
+    await writeFile(path.join(bin, name), body, { mode: 0o755 });
+    await chmod(path.join(bin, name), 0o755);
+  }
 
   const script = bootstrapInstallScript({
     base: "https://crabhelm-runtime.example.test/bootstrap/child-id",
@@ -214,6 +222,7 @@ esac
     slack: "false",
     credentialsGeneration: 4,
     egressLockdown: "off",
+    egressPersistenceRoot: root,
   });
   await run("/bin/bash", ["-n", "-c", script]);
   assert.ok(

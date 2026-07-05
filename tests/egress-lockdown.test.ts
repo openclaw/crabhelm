@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -10,7 +10,11 @@ import { bootstrapInstallScript, normalizeEgressLockdownMode } from "../worker/b
 
 const run = promisify(execFile);
 
-function installScript(egressLockdown: "attempt" | "required" | "off", archiveId = "c".repeat(64)): string {
+function installScript(
+  egressLockdown: "attempt" | "required" | "off",
+  archiveId = "c".repeat(64),
+  egressPersistenceRoot?: string,
+): string {
   return bootstrapInstallScript({
     base: "https://crabhelm-runtime.example.test/bootstrap/child-id",
     archiveId,
@@ -21,12 +25,13 @@ function installScript(egressLockdown: "attempt" | "required" | "off", archiveId
     slack: "false",
     credentialsGeneration: 1,
     egressLockdown,
+    egressPersistenceRoot,
   });
 }
 
 // Stage a bundle fixture + curl stub so the whole installer runs offline, and
 // return the archive digest plus a bin dir the caller can add tool stubs to.
-async function stageInstall(): Promise<{
+async function stageInstall(systemd = true): Promise<{
   root: string;
   home: string;
   bin: string;
@@ -41,6 +46,7 @@ async function stageInstall(): Promise<{
   await mkdir(path.join(fixtures, "bundle"), { recursive: true });
   await mkdir(home, { recursive: true });
   await mkdir(bin, { recursive: true });
+  if (systemd) await mkdir(path.join(root, "run/systemd/system"), { recursive: true });
   await writeFile(
     path.join(fixtures, "bundle", "guest-install.sh"),
     "#!/usr/bin/env bash\nset -euo pipefail\nprintf 'guest-install ran\\n' >>\"$CRABHELM_TEST_LOG\"\n",
@@ -96,6 +102,9 @@ test("generated installer embeds a metadata-blocking allowlist except when disab
     assert.match(script, /tcp dport \{ 53, 443 \} accept/u);
     assert.match(script, /list table inet crabhelm_egress/u);
     assert.match(script, /flush table inet crabhelm_egress/u);
+    assert.match(script, /Before=network-pre\.target/u);
+    assert.match(script, /After=local-fs\.target nftables\.service/u);
+    assert.match(script, /WantedBy=multi-user\.target/u);
     assert.ok(
       script.indexOf("ip daddr 169.254.169.254") < script.indexOf("ct state established,related accept"),
       "metadata drops must precede established-flow acceptance",
@@ -105,7 +114,8 @@ test("generated installer embeds a metadata-blocking allowlist except when disab
     await run("/bin/bash", ["-n", "-c", script]);
   }
   const off = installScript("off");
-  assert.doesNotMatch(off, /crabhelm_egress/u);
+  assert.match(off, /delete table inet crabhelm_egress/u);
+  assert.match(off, /disable --now crabhelm-egress\.service/u);
   assert.doesNotMatch(off, /169\.254\.169\.254/u);
   await run("/bin/bash", ["-n", "-c", off]);
 });
@@ -126,13 +136,18 @@ async function writeSudoStub(bin: string): Promise<void> {
   await writeStub(path.join(bin, "sudo"), "#!/usr/bin/env bash\n[[ \"$1\" == \"-n\" ]] && shift\nexec \"$@\"\n");
 }
 
+async function writeSystemctlStub(bin: string): Promise<void> {
+  await writeStub(path.join(bin, "systemctl"), "#!/usr/bin/env bash\nexit 0\n");
+}
+
 test("required mode fails closed before install when the allowlist cannot apply", async () => {
-  const { home, bin, guestLog, archiveId } = await stageInstall();
+  const { root, home, bin, guestLog, archiveId } = await stageInstall();
   // nft present but every apply is rejected, and sudo is available: the guest
   // can attempt the lockdown yet cannot enforce it, so required must abort.
   await writeStub(path.join(bin, "nft"), "#!/usr/bin/env bash\nexit 1\n");
   await writeSudoStub(bin);
-  const script = installScript("required", archiveId);
+  await writeSystemctlStub(bin);
+  const script = installScript("required", archiveId, root);
   await assert.rejects(
     run("/bin/bash", ["-c", script], {
       env: {
@@ -148,7 +163,7 @@ test("required mode fails closed before install when the allowlist cannot apply"
 });
 
 test("attempt mode installs the ruleset when nftables is reachable via sudo", async () => {
-  const { home, bin, guestLog, archiveId } = await stageInstall();
+  const { root, home, bin, guestLog, archiveId } = await stageInstall();
   const nftLog = path.join(path.dirname(bin), "nft-ruleset.txt");
   await writeStub(
     path.join(bin, "nft"),
@@ -159,8 +174,9 @@ exit 0
 `,
   );
   await writeSudoStub(bin);
+  await writeSystemctlStub(bin);
 
-  const script = installScript("attempt", archiveId);
+  const script = installScript("attempt", archiveId, root);
   const { stdout } = await run("/bin/bash", ["-c", script], {
     env: {
       PATH: stubPath(bin),
@@ -174,10 +190,16 @@ exit 0
   const ruleset = await readFile(nftLog, "utf8");
   assert.match(ruleset, /ip daddr 169\.254\.169\.254 counter drop/u);
   assert.match(ruleset, /policy drop/u);
+  const applyPath = path.join(root, "usr/local/sbin/crabhelm-egress-apply");
+  const unitPath = path.join(root, "etc/systemd/system/crabhelm-egress.service");
+  assert.equal((await stat(applyPath)).mode & 0o777, 0o500);
+  assert.equal((await stat(unitPath)).mode & 0o777, 0o644);
+  assert.match(await readFile(unitPath, "utf8"), /Before=network-pre\.target/u);
+  assert.match(await readFile(unitPath, "utf8"), new RegExp(`ExecStart=${applyPath}`));
 });
 
 test("lockdown retries atomically replace the existing table rules", async () => {
-  const { home, bin, guestLog, archiveId } = await stageInstall();
+  const { root, home, bin, guestLog, archiveId } = await stageInstall();
   const nftLog = path.join(path.dirname(bin), "nft-ruleset.txt");
   await writeStub(
     path.join(bin, "nft"),
@@ -188,8 +210,9 @@ exit 0
 `,
   );
   await writeSudoStub(bin);
+  await writeSystemctlStub(bin);
 
-  await run("/bin/bash", ["-c", installScript("attempt", archiveId)], {
+  await run("/bin/bash", ["-c", installScript("attempt", archiveId, root)], {
     env: {
       PATH: stubPath(bin),
       HOME: home,
@@ -204,11 +227,197 @@ exit 0
   assert.equal(await readFile(guestLog, "utf8"), "guest-install ran\n");
 });
 
+test("off mode removes the live table and boot persistence", async () => {
+  const { root, home, bin, guestLog, archiveId } = await stageInstall();
+  const nftState = path.join(root, "nft-active");
+  await writeStub(
+    path.join(bin, "nft"),
+    `#!/usr/bin/env bash
+case "\${1:-}" in
+  list) [[ -f ${JSON.stringify(nftState)} ]] ;;
+  delete) rm -f ${JSON.stringify(nftState)} ;;
+  -f) touch ${JSON.stringify(nftState)} ;;
+  *) exit 1 ;;
+esac
+`,
+  );
+  await writeSudoStub(bin);
+  await writeSystemctlStub(bin);
+  const env = {
+    PATH: stubPath(bin),
+    HOME: home,
+    CRABHELM_BOOTSTRAP_TOKEN: "test-token",
+    CRABHELM_TEST_LOG: guestLog,
+  };
+
+  await run("/bin/bash", ["-c", installScript("attempt", archiveId, root)], { env });
+  assert.equal(await readFile(nftState, "utf8"), "");
+  await run("/bin/bash", ["-c", installScript("off", archiveId, root)], { env });
+
+  await assert.rejects(readFile(path.join(root, "usr/local/sbin/crabhelm-egress-apply"), "utf8"), /ENOENT/u);
+  await assert.rejects(readFile(path.join(root, "etc/systemd/system/crabhelm-egress.service"), "utf8"), /ENOENT/u);
+  await assert.rejects(readFile(nftState, "utf8"), /ENOENT/u);
+  assert.equal(await readFile(guestLog, "utf8"), "guest-install ran\nguest-install ran\n");
+});
+
+test("off mode removes a legacy live table without running systemd", async () => {
+  const { root, home, bin, guestLog, archiveId } = await stageInstall(false);
+  const nftState = path.join(root, "nft-active");
+  await writeFile(nftState, "active\n");
+  await writeStub(
+    path.join(bin, "nft"),
+    `#!/usr/bin/env bash
+case "\${1:-}" in
+  list) [[ -f ${JSON.stringify(nftState)} ]] ;;
+  delete) rm -f ${JSON.stringify(nftState)} ;;
+  *) exit 1 ;;
+esac
+`,
+  );
+  await writeSudoStub(bin);
+  await writeStub(path.join(bin, "systemctl"), "#!/usr/bin/env bash\nexit 1\n");
+
+  await run("/bin/bash", ["-c", installScript("off", archiveId, root)], {
+    env: {
+      PATH: stubPath(bin),
+      HOME: home,
+      CRABHELM_BOOTSTRAP_TOKEN: "test-token",
+      CRABHELM_TEST_LOG: guestLog,
+    },
+  });
+  await assert.rejects(readFile(nftState, "utf8"), /ENOENT/u);
+  assert.equal(await readFile(guestLog, "utf8"), "guest-install ran\n");
+});
+
+test("attempt mode skips cleanly when systemd is not running", async () => {
+  const { root, home, bin, guestLog, archiveId } = await stageInstall(false);
+  const nftApply = path.join(root, "nft-applied");
+  await writeStub(
+    path.join(bin, "nft"),
+    `#!/usr/bin/env bash
+if [[ "\${1:-}" == "-f" ]]; then touch ${JSON.stringify(nftApply)}; fi
+exit 0
+`,
+  );
+  await writeSudoStub(bin);
+  await writeSystemctlStub(bin);
+
+  const { stdout } = await run(
+    "/bin/bash",
+    ["-c", installScript("attempt", archiveId, root)],
+    {
+      env: {
+        PATH: stubPath(bin),
+        HOME: home,
+        CRABHELM_BOOTSTRAP_TOKEN: "test-token",
+        CRABHELM_TEST_LOG: guestLog,
+      },
+    },
+  );
+  assert.match(stdout, /skipped \(nftables unavailable or not permitted\)/u);
+  await assert.rejects(readFile(nftApply, "utf8"), /ENOENT/u);
+  await assert.rejects(readFile(path.join(root, "usr/local/sbin/crabhelm-egress-apply"), "utf8"), /ENOENT/u);
+  assert.equal(await readFile(guestLog, "utf8"), "guest-install ran\n");
+});
+
+test("failed persistence upgrade preserves a legacy live-only table", async () => {
+  const { root, home, bin, guestLog, archiveId } = await stageInstall();
+  const nftState = path.join(root, "nft-active");
+  await writeFile(nftState, "active\n");
+  await writeStub(
+    path.join(bin, "nft"),
+    `#!/usr/bin/env bash
+case "\${1:-}" in
+  list) [[ -f ${JSON.stringify(nftState)} ]] ;;
+  delete) rm -f ${JSON.stringify(nftState)} ;;
+  -f) touch ${JSON.stringify(nftState)} ;;
+  *) exit 1 ;;
+esac
+`,
+  );
+  await writeSudoStub(bin);
+  await writeStub(
+    path.join(bin, "systemctl"),
+    "#!/usr/bin/env bash\ncase \"${1:-}\" in enable) exit 1 ;; is-enabled) exit 1 ;; *) exit 0 ;; esac\n",
+  );
+
+  const { stdout } = await run(
+    "/bin/bash",
+    ["-c", installScript("attempt", archiveId, root)],
+    {
+      env: {
+        PATH: stubPath(bin),
+        HOME: home,
+        CRABHELM_BOOTSTRAP_TOKEN: "test-token",
+        CRABHELM_TEST_LOG: guestLog,
+      },
+    },
+  );
+  assert.match(stdout, /skipped \(nftables unavailable or not permitted\)/u);
+  assert.equal(await readFile(nftState, "utf8"), "active\n");
+  await assert.rejects(readFile(path.join(root, "usr/local/sbin/crabhelm-egress-apply"), "utf8"), /ENOENT/u);
+  await assert.rejects(readFile(path.join(root, "etc/systemd/system/crabhelm-egress.service"), "utf8"), /ENOENT/u);
+  assert.equal(await readFile(guestLog, "utf8"), "guest-install ran\n");
+});
+
+test("failed persistence update restores the prior boot configuration", async () => {
+  const { root, home, bin, guestLog, archiveId } = await stageInstall();
+  const applyPath = path.join(root, "usr/local/sbin/crabhelm-egress-apply");
+  const unitPath = path.join(root, "etc/systemd/system/crabhelm-egress.service");
+  const restoredMarker = path.join(root, "restored-old-policy");
+  const enableCounter = path.join(root, "enable-attempted");
+  await mkdir(path.dirname(applyPath), { recursive: true });
+  await mkdir(path.dirname(unitPath), { recursive: true });
+  const oldApply = `#!/bin/bash\ntouch ${JSON.stringify(restoredMarker)}\n`;
+  const oldUnit = "[Unit]\nDescription=prior policy\n";
+  await writeFile(applyPath, oldApply, { mode: 0o500 });
+  await chmod(applyPath, 0o500);
+  await writeFile(unitPath, oldUnit, { mode: 0o644 });
+  await writeStub(
+    path.join(bin, "nft"),
+    "#!/usr/bin/env bash\ncase \"${1:-}\" in list) exit 1 ;; -f) exit 0 ;; *) exit 0 ;; esac\n",
+  );
+  await writeSudoStub(bin);
+  await writeStub(
+    path.join(bin, "systemctl"),
+    `#!/usr/bin/env bash
+case "\${1:-}" in
+  is-enabled|daemon-reload) exit 0 ;;
+  enable)
+    if [[ -e ${JSON.stringify(enableCounter)} ]]; then exit 0; fi
+    touch ${JSON.stringify(enableCounter)}
+    exit 1
+    ;;
+  *) exit 0 ;;
+esac
+`,
+  );
+
+  const { stdout } = await run(
+    "/bin/bash",
+    ["-c", installScript("attempt", archiveId, root)],
+    {
+      env: {
+        PATH: stubPath(bin),
+        HOME: home,
+        CRABHELM_BOOTSTRAP_TOKEN: "test-token",
+        CRABHELM_TEST_LOG: guestLog,
+      },
+    },
+  );
+  assert.match(stdout, /skipped \(nftables unavailable or not permitted\)/u);
+  assert.equal(await readFile(applyPath, "utf8"), oldApply);
+  assert.equal(await readFile(unitPath, "utf8"), oldUnit);
+  assert.equal(await readFile(restoredMarker, "utf8"), "");
+  assert.equal(await readFile(guestLog, "utf8"), "guest-install ran\n");
+});
+
 test("attempt mode continues when nftables cannot be applied", async () => {
-  const { home, bin, guestLog, archiveId } = await stageInstall();
+  const { root, home, bin, guestLog, archiveId } = await stageInstall();
   await writeStub(path.join(bin, "nft"), "#!/usr/bin/env bash\nexit 1\n");
   await writeSudoStub(bin);
-  const script = installScript("attempt", archiveId);
+  await writeSystemctlStub(bin);
+  const script = installScript("attempt", archiveId, root);
   const { stdout } = await run("/bin/bash", ["-c", script], {
     env: {
       PATH: stubPath(bin),

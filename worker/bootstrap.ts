@@ -742,38 +742,148 @@ export function normalizeEgressLockdownMode(value: string | undefined): EgressLo
 // NTP, DHCP, and TCP 443. Everything else — including the AWS instance
 // metadata endpoints that vend substrate credentials — is dropped. The guest
 // keeps no inbound listener, and install/model/control traffic is all 443.
-function egressLockdownBlock(mode: EgressLockdownMode): string {
-  if (mode === "off") return "";
+function egressLockdownBlock(mode: EgressLockdownMode, persistenceRoot?: string): string {
+  if (persistenceRoot && !/^\/[A-Za-z0-9._/-]+$/u.test(persistenceRoot)) {
+    throw new Error("egress persistence root must be an absolute path");
+  }
+  const root = persistenceRoot?.replace(/\/+$/u, "") ?? "";
+  const applyDirectory = `${root}/usr/local/sbin`;
+  const unitDirectory = `${root}/etc/systemd/system`;
+  const linkDirectory = `${root}/etc/systemd/system/multi-user.target.wants`;
+  const applyPath = `${root}/usr/local/sbin/crabhelm-egress-apply`;
+  const unitPath = `${root}/etc/systemd/system/crabhelm-egress.service`;
+  const linkPath = `${root}/etc/systemd/system/multi-user.target.wants/crabhelm-egress.service`;
+  const systemdRuntimeDirectory = `${root}/run/systemd/system`;
+  const binaryResolver = persistenceRoot
+    ? `find_egress_binary() { command -v "$1" || true; }`
+    : `find_egress_binary() {
+  local name candidate
+  name="$1"
+  case "$name" in
+    nft) set -- /usr/sbin/nft /usr/bin/nft /sbin/nft /bin/nft ;;
+    systemctl) set -- /usr/bin/systemctl /bin/systemctl ;;
+    sudo) set -- /usr/bin/sudo /bin/sudo ;;
+    install) set -- /usr/bin/install /bin/install ;;
+    cp) set -- /usr/bin/cp /bin/cp ;;
+    mv) set -- /usr/bin/mv /bin/mv ;;
+    rm) set -- /usr/bin/rm /bin/rm ;;
+    id) set -- /usr/bin/id /bin/id ;;
+    env) set -- /usr/bin/env /bin/env ;;
+    true) set -- /usr/bin/true /bin/true ;;
+    *) return 1 ;;
+  esac
+  for candidate in "$@"; do
+    if [[ -f "$candidate" && -x "$candidate" ]]; then
+      printf '%s\\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}`;
+  const disable = `${binaryResolver}
+egress_apply_dir=${shellQuote(applyDirectory)}
+egress_unit_dir=${shellQuote(unitDirectory)}
+egress_link_dir=${shellQuote(linkDirectory)}
+egress_apply_path=${shellQuote(applyPath)}
+egress_unit_path=${shellQuote(unitPath)}
+egress_link_path=${shellQuote(linkPath)}
+egress_systemd_runtime_dir=${shellQuote(systemdRuntimeDirectory)}
+egress_privileged=()
+set_egress_privileged() {
+  local id_binary env_binary sudo_binary true_binary
+  id_binary="$(find_egress_binary id || true)"
+  env_binary="$(find_egress_binary env || true)"
+  [[ -n "$id_binary" && -n "$env_binary" ]] || return 1
+  if [[ "$("$id_binary" -u)" = 0 ]]; then
+    # Bash 3.2 treats an empty array expansion as unbound under set -u.
+    egress_privileged=("$env_binary")
+    return 0
+  fi
+  sudo_binary="$(find_egress_binary sudo || true)"
+  true_binary="$(find_egress_binary true || true)"
+  if [[ -n "$sudo_binary" && -n "$true_binary" ]] && "$sudo_binary" -n "$true_binary" 2>/dev/null; then
+    egress_privileged=("$sudo_binary" -n)
+    return 0
+  fi
+  return 1
+}
+disable_egress_lockdown() {
+  local nft_binary systemctl_binary rm_binary cleanup_failed=0
+  nft_binary="$(find_egress_binary nft || true)"
+  systemctl_binary="$(find_egress_binary systemctl || true)"
+  rm_binary="$(find_egress_binary rm || true)"
+  if [[ ! -e "$egress_apply_path" && ! -e "$egress_unit_path" && ! -e "$egress_link_path" && -z "$nft_binary" ]]; then
+    return 0
+  fi
+  set_egress_privileged || return 1
+  [[ -n "$rm_binary" ]] || return 1
+  if [[ -e "$egress_unit_path" && -n "$systemctl_binary" && -d "$egress_systemd_runtime_dir" ]]; then
+    "\${egress_privileged[@]}" "$systemctl_binary" disable --now crabhelm-egress.service >/dev/null 2>&1 || true
+  fi
+  "\${egress_privileged[@]}" "$rm_binary" -f "$egress_apply_path" "$egress_unit_path" "$egress_link_path" || cleanup_failed=1
+  if [[ -n "$systemctl_binary" && -d "$egress_systemd_runtime_dir" ]]; then
+    "\${egress_privileged[@]}" "$systemctl_binary" daemon-reload >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$nft_binary" ]] && "\${egress_privileged[@]}" "$nft_binary" list table inet crabhelm_egress >/dev/null 2>&1; then
+    "\${egress_privileged[@]}" "$nft_binary" delete table inet crabhelm_egress || cleanup_failed=1
+  fi
+  if [[ -n "$nft_binary" ]] && "\${egress_privileged[@]}" "$nft_binary" list table inet crabhelm_egress >/dev/null 2>&1; then
+    cleanup_failed=1
+  fi
+  [[ "$cleanup_failed" = 0 ]]
+}
+`;
+  if (mode === "off") {
+    return `${disable}if disable_egress_lockdown; then
+  printf '%s\\n' 'crabhelm guest egress: managed lockdown disabled'
+else
+  printf '%s\\n' 'crabhelm bootstrap: could not disable the managed egress lockdown' >&2
+  exit 1
+fi
+`;
+  }
   const failure = mode === "required"
     ? `  printf '%s\\n' 'crabhelm bootstrap: egress lockdown is required but the allowlist could not be applied' >&2
   exit 1`
     : `  printf '%s\\n' 'crabhelm guest egress: skipped (nftables unavailable or not permitted); outbound remains unrestricted'`;
-  return `apply_egress_lockdown() {
-  local ruleset nft_binary
-  local -a runner=()
-  nft_binary="$(command -v nft || true)"
-  if [[ -n "$nft_binary" ]]; then
-    if [[ "$(id -u)" = 0 ]]; then
-      runner=("$nft_binary")
-    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-      runner=(sudo -n "$nft_binary")
-    fi
-  fi
-  if [[ "\${#runner[@]}" -eq 0 ]]; then
+  return `${disable}install_egress_lockdown() {
+  local nft_binary systemctl_binary install_binary cp_binary mv_binary rm_binary apply_temporary unit_temporary apply_staged unit_staged apply_backup unit_backup
+  local had_apply=0 had_unit=0 had_live_table=0 was_enabled=0
+  nft_binary="$(find_egress_binary nft || true)"
+  systemctl_binary="$(find_egress_binary systemctl || true)"
+  install_binary="$(find_egress_binary install || true)"
+  cp_binary="$(find_egress_binary cp || true)"
+  mv_binary="$(find_egress_binary mv || true)"
+  rm_binary="$(find_egress_binary rm || true)"
+  if [[ ! -d "$egress_systemd_runtime_dir" || -z "$nft_binary" || -z "$systemctl_binary" || -z "$install_binary" || -z "$cp_binary" || -z "$mv_binary" || -z "$rm_binary" ]] || ! set_egress_privileged; then
     return 1
   fi
-  ruleset="$(mktemp)"
-  if "\${runner[@]}" list table inet crabhelm_egress >/dev/null 2>&1; then
+  if "\${egress_privileged[@]}" "$nft_binary" list table inet crabhelm_egress >/dev/null 2>&1; then
+    had_live_table=1
+  fi
+  apply_temporary="$(mktemp)"
+  unit_temporary="$(mktemp)"
+  apply_staged="$egress_apply_path.new-$$"
+  unit_staged="$egress_unit_path.new-$$"
+  apply_backup="$egress_apply_path.backup-$$"
+  unit_backup="$egress_unit_path.backup-$$"
+  {
+    printf '%s\\n' '#!/bin/bash' 'set -euo pipefail' 'umask 077' 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' 'export PATH'
+    printf 'nft_binary=%q\\n' "$nft_binary"
+    cat <<'CRABHELM_EGRESS_APPLY'
+ruleset="$(mktemp)"
+trap 'rm -f "$ruleset"' EXIT
+if "$nft_binary" list table inet crabhelm_egress >/dev/null 2>&1; then
     cat >"$ruleset" <<'CRABHELM_EGRESS_EXISTING'
 flush table inet crabhelm_egress
 CRABHELM_EGRESS_EXISTING
-  else
+else
     cat >"$ruleset" <<'CRABHELM_EGRESS_NEW'
 add table inet crabhelm_egress
 add chain inet crabhelm_egress output { type filter hook output priority 0 ; policy drop ; }
 CRABHELM_EGRESS_NEW
-  fi
-  cat >>"$ruleset" <<'CRABHELM_EGRESS_RULES'
+fi
+cat >>"$ruleset" <<'CRABHELM_EGRESS_RULES'
 add rule inet crabhelm_egress output oifname "lo" accept
 add rule inet crabhelm_egress output ip daddr 169.254.169.254 counter drop comment "instance metadata credentials"
 add rule inet crabhelm_egress output ip6 daddr fd00:ec2::254 counter drop comment "instance metadata credentials"
@@ -783,15 +893,105 @@ add rule inet crabhelm_egress output udp dport { 53, 67, 68, 123, 546, 547 } acc
 add rule inet crabhelm_egress output tcp dport { 53, 443 } accept
 add rule inet crabhelm_egress output counter drop comment "default egress deny"
 CRABHELM_EGRESS_RULES
-  if ! "\${runner[@]}" -f "$ruleset"; then
-    rm -f "$ruleset"
+"$nft_binary" -f "$ruleset"
+CRABHELM_EGRESS_APPLY
+  } >"$apply_temporary"
+  cat >"$unit_temporary" <<CRABHELM_EGRESS_UNIT
+[Unit]
+Description=Crabhelm managed egress allowlist
+DefaultDependencies=no
+After=local-fs.target nftables.service
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=$egress_apply_path
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+CRABHELM_EGRESS_UNIT
+  if ! "\${egress_privileged[@]}" "$install_binary" -d -m 0755 "$egress_apply_dir" "$egress_unit_dir" "$egress_link_dir" ||
+    ! "\${egress_privileged[@]}" "$install_binary" -m 0500 "$apply_temporary" "$apply_staged" ||
+    ! "\${egress_privileged[@]}" "$install_binary" -m 0644 "$unit_temporary" "$unit_staged" ||
+    ! "\${egress_privileged[@]}" "$apply_staged"; then
+    "$rm_binary" -f "$apply_temporary" "$unit_temporary"
+    "\${egress_privileged[@]}" "$rm_binary" -f "$apply_staged" "$unit_staged" >/dev/null 2>&1 || true
     return 1
   fi
-  rm -f "$ruleset"
+  if [[ -e "$egress_apply_path" ]]; then
+    had_apply=1
+    if ! "\${egress_privileged[@]}" "$cp_binary" -p "$egress_apply_path" "$apply_backup"; then
+      "\${egress_privileged[@]}" "$egress_apply_path" >/dev/null 2>&1 || return 2
+      return 1
+    fi
+  fi
+  if [[ -e "$egress_unit_path" ]]; then
+    had_unit=1
+    if ! "\${egress_privileged[@]}" "$cp_binary" -p "$egress_unit_path" "$unit_backup"; then
+      "\${egress_privileged[@]}" "$rm_binary" -f "$apply_backup" >/dev/null 2>&1 || true
+      if [[ "$had_apply" = 1 ]]; then
+        "\${egress_privileged[@]}" "$egress_apply_path" >/dev/null 2>&1 || return 2
+      elif [[ "$had_live_table" = 0 ]] && "\${egress_privileged[@]}" "$nft_binary" list table inet crabhelm_egress >/dev/null 2>&1; then
+        "\${egress_privileged[@]}" "$nft_binary" delete table inet crabhelm_egress || return 2
+      fi
+      return 1
+    fi
+  fi
+  if "\${egress_privileged[@]}" "$systemctl_binary" is-enabled --quiet crabhelm-egress.service >/dev/null 2>&1; then
+    was_enabled=1
+  fi
+  rollback_egress_install() {
+    local rollback_failed=0
+    if [[ "$was_enabled" = 0 ]]; then
+      "\${egress_privileged[@]}" "$systemctl_binary" disable --now crabhelm-egress.service >/dev/null 2>&1 || true
+      "\${egress_privileged[@]}" "$rm_binary" -f "$egress_link_path" || rollback_failed=1
+    fi
+    if [[ "$had_apply" = 1 ]]; then
+      "\${egress_privileged[@]}" "$mv_binary" -f "$apply_backup" "$egress_apply_path" || rollback_failed=1
+    else
+      "\${egress_privileged[@]}" "$rm_binary" -f "$egress_apply_path" || rollback_failed=1
+    fi
+    if [[ "$had_unit" = 1 ]]; then
+      "\${egress_privileged[@]}" "$mv_binary" -f "$unit_backup" "$egress_unit_path" || rollback_failed=1
+    else
+      "\${egress_privileged[@]}" "$rm_binary" -f "$egress_unit_path" || rollback_failed=1
+    fi
+    "\${egress_privileged[@]}" "$systemctl_binary" daemon-reload >/dev/null 2>&1 || true
+    if [[ "$was_enabled" = 1 ]]; then
+      "\${egress_privileged[@]}" "$systemctl_binary" is-enabled --quiet crabhelm-egress.service >/dev/null 2>&1 || rollback_failed=1
+    elif "\${egress_privileged[@]}" "$systemctl_binary" is-enabled --quiet crabhelm-egress.service >/dev/null 2>&1; then
+      rollback_failed=1
+    fi
+    if [[ "$had_apply" = 1 && -x "$egress_apply_path" ]]; then
+      "\${egress_privileged[@]}" "$egress_apply_path" >/dev/null 2>&1 || rollback_failed=1
+    elif [[ "$had_live_table" = 0 ]] && "\${egress_privileged[@]}" "$nft_binary" list table inet crabhelm_egress >/dev/null 2>&1; then
+      "\${egress_privileged[@]}" "$nft_binary" delete table inet crabhelm_egress || rollback_failed=1
+    fi
+    [[ "$rollback_failed" = 0 ]]
+  }
+  if ! "\${egress_privileged[@]}" "$mv_binary" -f "$apply_staged" "$egress_apply_path" ||
+    ! "\${egress_privileged[@]}" "$mv_binary" -f "$unit_staged" "$egress_unit_path" ||
+    ! "\${egress_privileged[@]}" "$systemctl_binary" daemon-reload >/dev/null ||
+    ! "\${egress_privileged[@]}" "$systemctl_binary" enable crabhelm-egress.service >/dev/null ||
+    ! "\${egress_privileged[@]}" "$systemctl_binary" is-enabled --quiet crabhelm-egress.service >/dev/null 2>&1; then
+    rollback_egress_install || return 2
+    "$rm_binary" -f "$apply_temporary" "$unit_temporary"
+    "\${egress_privileged[@]}" "$rm_binary" -f "$apply_staged" "$unit_staged" "$apply_backup" "$unit_backup" >/dev/null 2>&1 || true
+    return 1
+  fi
+  "$rm_binary" -f "$apply_temporary" "$unit_temporary"
+  "\${egress_privileged[@]}" "$rm_binary" -f "$apply_backup" "$unit_backup" >/dev/null 2>&1 || true
 }
-if apply_egress_lockdown; then
+if install_egress_lockdown; then
   printf '%s\\n' 'crabhelm guest egress: outbound restricted to loopback, replies, DNS, NTP, DHCP, and TCP 443; instance metadata blocked'
 else
+  install_status=$?
+  if [[ "$install_status" = 2 ]]; then
+    printf '%s\\n' 'crabhelm bootstrap: egress lockdown setup failed and prior state could not be restored' >&2
+    exit 1
+  fi
 ${failure}
 fi
 `;
@@ -807,6 +1007,8 @@ export function bootstrapInstallScript(options: {
   slack: string;
   credentialsGeneration: number;
   egressLockdown?: EgressLockdownMode;
+  // Tests redirect system paths into a temporary root; production omits this.
+  egressPersistenceRoot?: string;
 }): string {
   return `#!/usr/bin/env bash
 set -euo pipefail
@@ -814,7 +1016,7 @@ umask 077
 : "\${CRABHELM_BOOTSTRAP_TOKEN:?missing bootstrap token}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-${egressLockdownBlock(options.egressLockdown ?? "attempt")}auth=(--header "Authorization: Bearer $CRABHELM_BOOTSTRAP_TOKEN")
+${egressLockdownBlock(options.egressLockdown ?? "attempt", options.egressPersistenceRoot)}auth=(--header "Authorization: Bearer $CRABHELM_BOOTSTRAP_TOKEN")
 curl --fail --silent --show-error --location "\${auth[@]}" ${shellQuote(`${options.base}/bundle.tgz`)} -o "$work/bundle.tgz"
 actual_archive_sha256="$(sha256sum "$work/bundle.tgz")"
 actual_archive_sha256="\${actual_archive_sha256%% *}"
