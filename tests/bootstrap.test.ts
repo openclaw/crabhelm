@@ -47,7 +47,7 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
       CRABHELM_SLACK_PLUGIN_SHA256: slackDigest,
       CRABHELM_RUNTIME_BRIDGE: runtimeBridge,
       CRABHELM_RUNTIME_BRIDGE_SHA256: runtimeBridgeDigest,
-      CRABHELM_RELEASE_ID: "b".repeat(64),
+      CRABHELM_RELEASE_ID: `${"b".repeat(64)}.${"c".repeat(64)}.${"d".repeat(64)}`,
       CRABHELM_MODEL: "openai/gpt-5.5-mini",
       CRABHELM_MODEL_BASE_URL: "https://crabhelm-runtime.openclaw.ai/model/v1",
       CRABHELM_SLACK_ENABLED: "true",
@@ -104,7 +104,7 @@ printf 'called\n' >>"$CRABHELM_TEST_LOG"
         CRABHELM_SLACK_PLUGIN_SHA256: slackDigest,
         CRABHELM_RUNTIME_BRIDGE: runtimeBridge,
         CRABHELM_RUNTIME_BRIDGE_SHA256: runtimeBridgeDigest,
-        CRABHELM_RELEASE_ID: "b".repeat(64),
+        CRABHELM_RELEASE_ID: `${"b".repeat(64)}.${"c".repeat(64)}.${"d".repeat(64)}`,
       },
     }),
     /plugin tarball digest mismatch/,
@@ -147,7 +147,7 @@ fi
       CRABHELM_SLACK_PLUGIN_SHA256: slackDigest,
       CRABHELM_RUNTIME_BRIDGE: runtimeBridge,
       CRABHELM_RUNTIME_BRIDGE_SHA256: runtimeBridgeDigest,
-      CRABHELM_RELEASE_ID: "b".repeat(64),
+      CRABHELM_RELEASE_ID: `${"b".repeat(64)}.${"c".repeat(64)}.${"d".repeat(64)}`,
     },
   });
   const calls = await readFile(log, "utf8");
@@ -194,7 +194,7 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
     CRABHELM_SLACK_PLUGIN_SHA256: slackDigest,
     CRABHELM_RUNTIME_BRIDGE: runtimeBridge,
     CRABHELM_RUNTIME_BRIDGE_SHA256: runtimeBridgeDigest,
-    CRABHELM_RELEASE_ID: "b".repeat(64),
+    CRABHELM_RELEASE_ID: `${"b".repeat(64)}.${"c".repeat(64)}.${"d".repeat(64)}`,
   };
   await run("/bin/bash", [bootstrap], { env: bootstrapEnv });
   await run("/bin/bash", [bootstrap], { env: bootstrapEnv });
@@ -213,8 +213,12 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
     bootstrapSource.lastIndexOf("prepare_runtime_bridge") < bootstrapSource.indexOf('printf \'%s\\n\' "$release_id"'),
     "release readiness must be written only after the runtime launcher is executable",
   );
-  const probe = inferenceProbeCommand("openai/gpt-5.5");
+  const nodeId = "d".repeat(64);
+  const releaseId = `${"b".repeat(64)}.${"c".repeat(64)}.${nodeId}`;
+  const probe = inferenceProbeCommand("openai/gpt-5.5", releaseId, nodeId);
   assert.match(probe, /start-runtime-bridge\.sh/u);
+  assert.match(probe, new RegExp(`node-v22\\.23\\.1-${nodeId}-linux-x64`));
+  assert.match(probe, new RegExp(`v3:${releaseId}:openai/gpt-5\\.5`));
   assert.match(probe, /if \/bin\/bash \$HOME\/\.local\/share\/crabhelm\/runtime\/start-runtime-bridge\.sh; then[\s\S]*crabhelm-inference-ready/u);
 });
 

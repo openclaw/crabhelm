@@ -51,6 +51,8 @@ Signing secrets must contain at least 32 bytes. `VAULT_MASTER_KEY` is a base64ur
 
 `GITHUB_OAUTH_CLIENT_ID` and Cloudflare Access team/audience settings are non-secret Worker variables. Slack sends signed events to `https://crabhelm-runtime.openclaw.ai/slack/events` and interactions to `https://crabhelm-runtime.openclaw.ai/slack/interactions`. The GitHub OAuth callback is `https://crabhelm.openclaw.ai/api/oauth/github/callback`. Use `wrangler secret put NAME`; never place secret values in `wrangler.jsonc`, `.dev.vars`, logs, or registry state.
 
+After rotating a delivered secret (for example `OPENAI_API_KEY`), bump the affected claw's credential epoch with the **Rotate credentials** drawer button or `POST /api/claws/<id>/rotate-credentials`. The claw performs one release-pinned in-place reinstall that re-fetches `credentials.env`, then must pass the live inference probe again before it reports ready.
+
 Build and upload a reviewed appliance after guest-profile changes:
 
 ```bash
@@ -80,7 +82,11 @@ Open <http://127.0.0.1:4177>. Local development uses an explicitly labeled simul
 
 By default a claw is delivered the raw `OPENAI_API_KEY`. Setting the `CRABHELM_MODEL_PROXY` Worker var to `on` (and putting the `MODEL_SIGNING_SECRET` secret) instead delivers a per-claw, audience-bound model token plus an edge base URL, and reroutes the child's OpenClaw OpenAI provider through `https://crabhelm-runtime.openclaw.ai/model/v1`. The Worker verifies the token, strips the caller's authorization, injects the real provider key, and forwards to a single fixed upstream over an allowlisted set of endpoints. The raw provider key never reaches the agent VM, and each claw's access is independently scoped and bounded to its substrate lifetime rather than sharing one fleet-wide credential.
 
-This is experimental and default-off: changing modes requires an appliance rebuild and re-pin so existing claws reinstall the managed provider base URL. The proxy continues accepting previously issued model tokens while new issuance is off, allowing a rolling rollback; keep `MODEL_SIGNING_SECRET` configured through the longest previously issued token lifetime (four hours by default, at most 24 hours). Confirm the existing live inference probe on staging before enabling in production.
+This is experimental and default-off. First enablement requires an appliance built from this version; after that appliance is pinned, change modes by rotating each claw's credential epoch so the managed provider base URL and credential are reinstalled together. The proxy continues accepting previously issued model tokens while new issuance is off, allowing a rolling rollback; keep `MODEL_SIGNING_SECRET` configured through the longest previously issued token lifetime (four hours by default, at most 24 hours). Confirm the existing live inference probe on staging before enabling in production.
+
+## Testing
+
+`pnpm check` runs both test tiers. `pnpm test` runs the fast Node domain suite (`node:test`). `pnpm test:workers` runs the Worker and both Durable Objects inside workerd via `@cloudflare/vitest-pool-workers` (`tests/workers/`), covering router host-splitting, the Access auth gate, SQLite-backed control-plane state, and the hibernatable runtime-bridge reconnect path against the real runtime.
 
 ## Safety boundaries
 

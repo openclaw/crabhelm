@@ -54,7 +54,7 @@ fi
 [[ "$curl_binary" = /* && -x "$curl_binary" ]] || die "curl is required"
 [[ "$runtime_bridge" = /* && -f "$runtime_bridge" && ! -L "$runtime_bridge" ]] || die "runtime bridge must be a regular absolute path"
 [[ "$runtime_bridge_sha256" =~ ^[0-9a-f]{64}$ ]] || die "invalid runtime bridge digest"
-[[ "$release_id" =~ ^[0-9a-f]{64}$ ]] || die "invalid appliance release id"
+[[ "$release_id" =~ ^[0-9a-f]{64}\.[0-9a-f]{64}\.[0-9a-f]{64}$ ]] || die "invalid appliance release identity"
 command -v sha256sum >/dev/null || die "sha256sum is required"
 
 # The child Gateway uses loopback auth=none and the node authenticates through

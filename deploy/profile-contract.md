@@ -8,7 +8,7 @@ The adapter/controller owns machine acquisition, SSH/terminal transport, provide
 
 The installer receives:
 
-- the reviewed manifest SHA-256;
+- the reviewed manifest and archive SHA-256 release identity plus the manifest's bootstrap-Node SHA-256;
 - child UUID;
 - exact desired inference model;
 - an owner-only credential file with `OPENAI_API_KEY`, child id, control URL, and audience-bound runtime token;
@@ -18,11 +18,11 @@ The installer receives:
 
 `guest-install.sh` verifies the manifest contract and every artifact digest before installing anything. Privileged npm runs through an empty environment. The installer activates credentials only after packages and plugins are installed, then delegates to `bootstrap-child.sh`.
 
-`bootstrap-child.sh` writes the exact model, plugin allowlist, child UUID, loopback Gateway mode, and auth mode. In Cloudflare standalone mode it starts the local Gateway and installs a private idempotent runtime-bridge launcher, then writes `~/.openclaw/crabhelm-ready` after `/readyz` succeeds. Legacy outbound node enrollment remains available only when standalone mode is off.
+`bootstrap-child.sh` writes the exact model, plugin allowlist, child UUID, loopback Gateway mode, and auth mode. In Cloudflare standalone mode it starts the local Gateway and installs a private idempotent runtime-bridge launcher, then writes the complete manifest/archive/Node release identity to `~/.openclaw/crabhelm-ready` after `/readyz` succeeds. Legacy outbound node enrollment remains available only when standalone mode is off.
 
 ## Live proof
 
-The Cloudflare adapter attaches through Crabbox's authenticated server-to-server terminal and accepts only exact sentinel lines. After the Gateway marker appears, it writes the exact desired model, restarts the Gateway, runs a bounded `openclaw agent` turn, requires the expected response, starts the outbound runtime bridge, then writes `~/.openclaw/crabhelm-inference-ready`.
+The Cloudflare adapter attaches through Crabbox's authenticated server-to-server terminal and accepts only exact sentinel lines. After the Gateway marker appears, it runs from the selected digest-specific Node runtime, writes the exact desired model, restarts the Gateway, runs a bounded `openclaw agent` turn, requires the expected response, starts the outbound runtime bridge, then writes the complete release identity and model to `~/.openclaw/crabhelm-inference-ready`.
 
 Provider allocation, echoed shell source, or a process existing is insufficient.
 

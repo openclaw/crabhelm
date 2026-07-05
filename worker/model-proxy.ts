@@ -71,6 +71,10 @@ export function modelProxyReady(env: ModelProxyEnv): boolean {
   return modelProxyEnabled(env) && modelProxyConfigured(env);
 }
 
+export function modelProxyAdmissionReady(env: ModelProxyEnv): boolean {
+  return !modelProxyEnabled(env) || modelProxyConfigured(env);
+}
+
 function modelProxyConfigured(env: ModelProxyEnv): boolean {
   return typeof env.MODEL_SIGNING_SECRET === "string" &&
     new TextEncoder().encode(env.MODEL_SIGNING_SECRET).byteLength >= 32 &&

@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import {
+  clawCredentialsGeneration,
   createClawRecord,
   fleetSummary,
   managedPolicyDiff,
   managedPolicyPatch,
   normalizeManagedPolicySpec,
+  rotateClawCredentials,
   setClawEnabled,
   updateClawRecord,
 } from "./domain.js";
@@ -284,7 +286,7 @@ export class CrabhelmRegistry {
       if (next === current) return current;
       if (
         current.observed.lifecycle &&
-        JSON.stringify(next.desired.deployment) !== JSON.stringify(current.desired.deployment)
+        JSON.stringify(deploymentPlacement(next)) !== JSON.stringify(deploymentPlacement(current))
       ) {
         throw new Error("deployment placement is immutable after workspace allocation; replace the claw instead");
       }
@@ -313,6 +315,7 @@ export class CrabhelmRegistry {
         ...(input.deployment?.region ?? configured?.region ?? this.#defaultDeployment.region
           ? { region: input.deployment?.region ?? configured?.region ?? this.#defaultDeployment.region }
           : {}),
+        ...(input.deployment?.appliance ? { appliance: input.deployment.appliance } : {}),
       },
     };
   }
@@ -348,6 +351,30 @@ export class CrabhelmRegistry {
         action: enabled ? "claw.enable" : "claw.disable",
         outcome: "requested",
         summary: `${enabled ? "Enabled" : "Disabled"} ${next.desired.name}`,
+        generation: next.desired.generation,
+      });
+      return next;
+    });
+  }
+
+  async rotateCredentials(id: string, actor: string): Promise<ClawRecord> {
+    return this.#serialize(async () => {
+      const current = await this.#require(id);
+      if (
+        current.observed.phase === "deleted" ||
+        current.observed.phase === "deleting" ||
+        current.observed.deletion
+      ) {
+        throw new Error("cannot rotate credentials for a deleting or deleted claw");
+      }
+      const next = rotateClawCredentials(current);
+      await this.#claws.register(id, next);
+      await this.#audit({
+        clawId: id,
+        actor,
+        action: "claw.rotate-credentials",
+        outcome: "requested",
+        summary: `Requested credential re-delivery for ${next.desired.name} (epoch ${clawCredentialsGeneration(next)})`,
         generation: next.desired.generation,
       });
       return next;
@@ -452,6 +479,11 @@ export class CrabhelmRegistry {
     this.#tail = next.catch(() => undefined);
     return next;
   }
+}
+
+function deploymentPlacement(record: ClawRecord): Pick<ClawRecord["desired"]["deployment"], "target" | "profile" | "region"> {
+  const { target, profile, region } = record.desired.deployment;
+  return { target, profile, ...(region ? { region } : {}) };
 }
 
 function normalizeRecordRevision(record: ClawRecord): ClawRecord {

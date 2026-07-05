@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { childPolicyHash, createClawRecord, updateClawRecord } from "../src/domain.js";
+import {
+  childPolicyHash,
+  clawCredentialsGeneration,
+  createClawRecord,
+  rotateClawCredentials,
+  updateClawRecord,
+} from "../src/domain.js";
+import type { ClawRecord } from "../src/types.js";
 
 test("creates an independent child-core desired state with safe defaults", () => {
   const claw = createClawRecord({
@@ -59,6 +66,70 @@ test("semantic no-op updates do not advance generation", () => {
   assert.equal(updated.revision, claw.revision);
 });
 
+test("validates and hashes per-claw appliance release overrides", () => {
+  const claw = createClawRecord({
+    name: "Canary",
+    owner: { subject: "github:canary", label: "@canary", source: "github" },
+  });
+  const canary = updateClawRecord(claw, {
+    deployment: {
+      appliance: { manifestSha256: "a".repeat(64), archiveSha256: "b".repeat(64), nodeSha256: "c".repeat(64) },
+    },
+  });
+  assert.equal(canary.desired.deployment.appliance?.manifestSha256, "a".repeat(64));
+  assert.notEqual(childPolicyHash(canary), childPolicyHash(claw));
+  const reverted = updateClawRecord(canary, { deployment: { appliance: null } });
+  assert.equal(reverted.desired.deployment.appliance, undefined);
+  assert.notEqual(childPolicyHash(reverted), childPolicyHash(canary));
+  assert.throws(
+    () => updateClawRecord(claw, {
+      deployment: { appliance: { manifestSha256: "not-a-digest", archiveSha256: "b".repeat(64), nodeSha256: "c".repeat(64) } },
+    }),
+    /lowercase SHA-256/,
+  );
+});
+
+test("credential rotation advances the epoch, generation, and policy hash", () => {
+  const claw = createClawRecord({
+    name: "Rotated Claw",
+    owner: { subject: "github:rotated", label: "@rotated", source: "github" },
+  });
+  assert.equal(clawCredentialsGeneration(claw), 1);
+  const rotated = rotateClawCredentials(claw);
+  assert.equal(clawCredentialsGeneration(rotated), 2);
+  assert.equal(rotated.desired.generation, claw.desired.generation + 1);
+  assert.equal(rotated.revision, claw.revision + 1);
+  assert.notEqual(childPolicyHash(rotated), childPolicyHash(claw));
+  const again = rotateClawCredentials(rotated);
+  assert.equal(clawCredentialsGeneration(again), 3);
+  assert.notEqual(childPolicyHash(again), childPolicyHash(rotated));
+});
+
+test("desired updates preserve the credential epoch", () => {
+  const claw = rotateClawCredentials(createClawRecord({
+    name: "Sticky Epoch",
+    owner: { subject: "github:sticky", label: "@sticky", source: "github" },
+  }));
+  const updated = updateClawRecord(claw, {
+    inference: { model: "anthropic/claude-sonnet-4.6" },
+  });
+  assert.equal(clawCredentialsGeneration(updated), 2);
+});
+
+test("records persisted before the credential epoch behave as epoch one", () => {
+  const modern = createClawRecord({
+    name: "Legacy Claw",
+    owner: { subject: "github:legacy", label: "@legacy", source: "github" },
+  });
+  const { credentialsGeneration: _omitted, ...legacyDesired } = modern.desired;
+  const legacy = { ...modern, desired: legacyDesired } as ClawRecord;
+  assert.equal(clawCredentialsGeneration(legacy), 1);
+  assert.equal(childPolicyHash(legacy), childPolicyHash(modern));
+  const noop = updateClawRecord(legacy, { name: "Legacy Claw" });
+  assert.equal(noop, legacy);
+  const rotated = rotateClawCredentials(legacy);
+  assert.equal(clawCredentialsGeneration(rotated), 2);
+});
 test("rejects an inference provider that disagrees with the model", () => {
   assert.throws(
     () =>

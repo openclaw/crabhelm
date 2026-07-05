@@ -272,3 +272,60 @@ test("GitHub import preview stays behind the parent API and returns stable membe
     );
   }
 });
+
+test("credential rotation is exposed through the parent API and reconverges", async () => {
+  const registry = new CrabhelmRegistry(
+    createMemoryStateStore<ClawRecord>(),
+    createMemoryStateStore<AuditEvent>(),
+  );
+  const handler = createCrabhelmApiHandler({
+    registry,
+    reconciler: new CrabhelmReconciler(registry, new SimulatorChildCoreProvider()),
+    runtime: {
+      mode: "simulator",
+      defaultTarget: "default",
+      targets: [
+        { id: "default", label: "Default", region: "us-west", profile: "openclaw-core", ttlSeconds: 14_400, idleTimeoutSeconds: 14_400, admissionOpen: true },
+      ],
+      githubImport: false,
+    },
+  });
+  const server = createServer(async (req, res) => {
+    if (!(await handler(req, res))) res.writeHead(404).end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const base = `http://127.0.0.1:${address.port}/plugins/crabhelm/api/claws`;
+  try {
+    const created = await fetch(base, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "Rotation Target",
+        owner: { subject: "manual:rotation", label: "Rotation", source: "manual" },
+      }),
+    });
+    assert.equal(created.status, 202);
+    const claw = await created.json() as ClawRecord;
+    assert.equal(claw.desired.credentialsGeneration, 1);
+
+    const rotated = await fetch(`${base}/${claw.id}/rotate-credentials`, { method: "POST" });
+    assert.equal(rotated.status, 202);
+    const record = await rotated.json() as ClawRecord;
+    assert.equal(record.desired.credentialsGeneration, 2);
+    assert.equal(record.desired.generation, 2);
+    assert.equal(record.observed.phase, "ready");
+    assert.equal(record.observed.generation, 2);
+
+    const events = (await registry.snapshot()).events;
+    assert.ok(events.some((event) => event.action === "claw.rotate-credentials"));
+
+    const missing = await fetch(`${base}/does-not-exist/rotate-credentials`, { method: "POST" });
+    assert.equal(missing.status, 422);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => error ? reject(error) : resolve()),
+    );
+  }
+});

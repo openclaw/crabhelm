@@ -1,4 +1,4 @@
-import { bootstrapTokenClaims } from "./bootstrap.js";
+import { bootstrapInstallScript, bootstrapTokenClaims } from "./bootstrap.js";
 import { signClaims, verifyClaims } from "./security.js";
 import type { GovernanceAuditEvent, RuntimeClaims, RuntimeTicketClaims, SessionClaims } from "../src/governance-types.js";
 import { verifyAccessIdentity } from "./access.js";
@@ -123,40 +123,29 @@ async function handleBootstrap(request: Request, env: Env, url: URL): Promise<Re
   }
   const model = url.searchParams.get("model") ?? "openai/gpt-5.5";
   const slack = url.searchParams.get("slack") ?? "false";
+  const credentials = url.searchParams.get("credentials") ?? "1";
   if (!/^[a-z0-9][a-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(model)) {
     return new Response("invalid model", { status: 400, headers });
   }
   if (slack !== "true" && slack !== "false") {
     return new Response("invalid Slack desired state", { status: 400, headers });
   }
-  const base = `${url.origin}/bootstrap/${encodeURIComponent(childId)}`;
-  const script = `#!/usr/bin/env bash
-set -euo pipefail
-umask 077
-: "\${CRABHELM_BOOTSTRAP_TOKEN:?missing bootstrap token}"
-work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
-auth=(--header "Authorization: Bearer $CRABHELM_BOOTSTRAP_TOKEN")
-curl --fail --silent --show-error --location "\${auth[@]}" ${shellValue(`${base}/bundle.tgz`)} -o "$work/bundle.tgz"
-actual_archive_sha256="$(sha256sum "$work/bundle.tgz")"
-actual_archive_sha256="\${actual_archive_sha256%% *}"
-[[ "$actual_archive_sha256" = ${shellValue(release.archiveId)} ]] || { printf '%s\n' 'crabhelm bootstrap: appliance archive digest mismatch' >&2; exit 1; }
-tar -xzf "$work/bundle.tgz" -C "$work"
-curl --fail --silent --show-error --location "\${auth[@]}" ${shellValue(`${base}/credentials.env`)} -o "$work/credentials.env"
-chmod 0600 "$work/credentials.env"
-curl --fail --silent --show-error --location "\${auth[@]}" ${shellValue(`${base}/managed-spec.json`)} -o "$work/managed-spec.json"
-chmod 0600 "$work/managed-spec.json"
-export CRABHELM_BUNDLE_MANIFEST_SHA256=${shellValue(release.releaseId)}
-export CRABHELM_NODE_SHA256=${shellValue(env.NODE_RUNTIME_SHA256)}
-export CRABHELM_CREDENTIAL_FILE="$work/credentials.env"
-export CRABHELM_CREDENTIAL_REFRESH_URL=${shellValue(`${base}/credentials.env`)}
-export CRABHELM_MANAGED_SPEC_FILE="$work/managed-spec.json"
-export CRABBOX_ADAPTER_ROOT_SESSION_ID=${shellValue(childId)}
-export CRABHELM_STANDALONE=true
-export CRABHELM_MODEL=${shellValue(model)}
-export CRABHELM_SLACK_ENABLED=${shellValue(slack)}
-${modelProxyEnabled(env) ? `export CRABHELM_MODEL_BASE_URL=${shellValue(`${new URL(env.RUNTIME_URL).origin}/model/v1`)}\n` : ""}/bin/bash "$work/bundle/guest-install.sh"
-`;
+  if (!/^[1-9][0-9]{0,8}$/u.test(credentials)) {
+    return new Response("invalid credentials generation", { status: 400, headers });
+  }
+  const script = bootstrapInstallScript({
+    base: `${url.origin}/bootstrap/${encodeURIComponent(childId)}`,
+    archiveId: release.archiveId,
+    releaseId: release.releaseId,
+    nodeSha256: release.nodeId,
+    childId,
+    model,
+    slack,
+    credentialsGeneration: Number(credentials),
+    ...(modelProxyEnabled(env)
+      ? { modelBaseUrl: `${new URL(env.RUNTIME_URL).origin}/model/v1` }
+      : {}),
+  });
   return new Response(script, {
     headers: { ...headers, "content-type": "text/x-shellscript; charset=utf-8" },
   });

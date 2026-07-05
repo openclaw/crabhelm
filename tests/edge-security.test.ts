@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { createHmac, randomBytes } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { slackIdentity } from "../src/slack-identity.js";
 import { verifySlackRequest } from "../worker/slack-signature.js";
@@ -39,8 +38,6 @@ test("Slack delivery retry policy terminates permanent errors", () => {
   assert.equal(slackDeliveryRetryable(401, "invalid_auth"), false);
 });
 
-test("runtime reconnect replaces a stale socket instead of rejecting the new bridge", async () => {
-  const source = await readFile("worker/claw-coordinator.ts", "utf8");
-  assert.doesNotMatch(source, /runtime already connected/u);
-  assert.match(source, /socket\.close\(4001, "runtime reconnected"\)/u);
-});
+// Runtime reconnect behaviour (stale socket evicted with close 4001 instead of
+// rejecting the new bridge) is verified against the real Durable Object in
+// workerd — see tests/workers/runtime-reconnect.test.ts.

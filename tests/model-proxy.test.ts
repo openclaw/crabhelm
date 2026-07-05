@@ -4,6 +4,7 @@ import test from "node:test";
 import { signClaims, verifyClaims } from "../worker/security.js";
 import {
   handleModelProxy,
+  modelProxyAdmissionReady,
   modelCredentialEntries,
   type ModelProxyEnv,
   modelProxyEnabled,
@@ -57,6 +58,10 @@ test("model proxy readiness gates on flag, secret, and provider key", () => {
   assert.equal(modelProxyReady(baseEnv({ MODEL_SIGNING_SECRET: "short" })), false);
   assert.equal(modelProxyReady(baseEnv({ OPENAI_API_KEY: "" })), false);
   assert.equal(modelProxyReady(baseEnv({ CRABHELM_MODEL_PROXY: "off" })), false);
+  assert.equal(modelProxyAdmissionReady(baseEnv({ CRABHELM_MODEL_PROXY: "off", MODEL_SIGNING_SECRET: undefined, OPENAI_API_KEY: "" })), true);
+  assert.equal(modelProxyAdmissionReady(baseEnv()), true);
+  assert.equal(modelProxyAdmissionReady(baseEnv({ MODEL_SIGNING_SECRET: undefined })), false);
+  assert.equal(modelProxyAdmissionReady(baseEnv({ OPENAI_API_KEY: "" })), false);
 });
 
 test("model proxy returns 503 until it is configured", async () => {
