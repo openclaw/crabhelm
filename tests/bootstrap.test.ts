@@ -49,6 +49,7 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
       CRABHELM_RUNTIME_BRIDGE_SHA256: runtimeBridgeDigest,
       CRABHELM_RELEASE_ID: `${"b".repeat(64)}.${"c".repeat(64)}.${"d".repeat(64)}`,
       CRABHELM_MODEL: "openai/gpt-5.4-mini",
+      CRABHELM_MODEL_BASE_URL: "https://crabhelm-runtime.example.com/model/v1",
       CRABHELM_SLACK_ENABLED: "true",
       OPENCLAW_GATEWAY_TOKEN: "must-not-reach-openclaw",
       OPENCLAW_GATEWAY_PASSWORD: "must-not-reach-openclaw",
@@ -61,6 +62,7 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
   assert.match(calls, /plugins\.allow .*crabhelm.*slack/);
   assert.match(calls, /channels\.slack\.mode socket/);
   assert.match(calls, /agents\.defaults\.model\.primary openai\/gpt-5\.4-mini/);
+  assert.match(calls, /config set models\.providers\.openai\.baseUrl https:\/\/crabhelm-runtime\.openclaw\.ai\/model\/v1/);
   assert.match(calls, /agents\.defaults\.workspace .*\.openclaw\/workspace/);
   assert.match(calls, /channels\.slack\.enabled true/);
   assert.match(calls, /channels\.slack\.appToken .*SLACK_APP_TOKEN/);
@@ -124,6 +126,9 @@ test("child bootstrap supports Web PKI TLS without a pinned certificate", async 
   await executable(path.join(bin, "openclaw"), `#!/usr/bin/env bash
 printf '%q ' "$@" >>"$CRABHELM_TEST_LOG"
 printf '\n' >>"$CRABHELM_TEST_LOG"
+if [[ "$1 $2 $3" = "config get models.providers.openai.baseUrl" ]]; then
+  exit 1
+fi
 `);
   await executable(path.join(bin, "curl"), "#!/usr/bin/env bash\nexit 0\n");
   const digest = createHash("sha256").update(await readFile(plugin)).digest("hex");
@@ -148,6 +153,8 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
   const calls = await readFile(log, "utf8");
   assert.match(calls, /node install .*--tls/);
   assert.doesNotMatch(calls, /--tls-fingerprint/);
+  assert.match(calls, /config get models\.providers\.openai\.baseUrl/);
+  assert.doesNotMatch(calls, /config unset models\.providers\.openai\.baseUrl/);
 });
 
 test("standalone bootstrap defers the runtime bridge until inference readiness", async () => {
