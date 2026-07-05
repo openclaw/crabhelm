@@ -85,7 +85,9 @@ if [[ -n "$model_base_url" ]]; then
 else
   # A proxy rollback must remove the managed override before the raw provider
   # key is restored, otherwise this claw remains pointed at the edge route.
-  "$openclaw_binary" config unset models.providers.openai.baseUrl
+  if "$openclaw_binary" config get models.providers.openai.baseUrl >/dev/null 2>&1; then
+    "$openclaw_binary" config unset models.providers.openai.baseUrl
+  fi
 fi
 "$openclaw_binary" config set agents.defaults.workspace "${OPENCLAW_STATE_DIR:-${HOME:-/tmp}/.openclaw}/workspace"
 "$openclaw_binary" config set channels.slack.enabled "$slack_enabled" --strict-json

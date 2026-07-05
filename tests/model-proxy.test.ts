@@ -202,14 +202,36 @@ test("model proxy surfaces an unreachable upstream as 502", async () => {
   assert.equal(response.status, 502);
 });
 
-test("model proxy enforces the body limit without a content-length header", async () => {
+test("model proxy streams valid multimodal-sized bodies without buffering", async () => {
   const token = await mintToken();
+  const body = new Uint8Array(3 * 1024 * 1024);
   const { req, url } = request("/model/v1/responses", {
     method: "POST",
-    body: new Uint8Array(2 * 1024 * 1024 + 1),
+    body,
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
   });
   assert.equal(req.headers.get("content-length"), null);
+  const response = await withStubbedFetch(
+    async (_input, init) => {
+      assert.equal((await new Response(init?.body).arrayBuffer()).byteLength, body.byteLength);
+      return new Response("{}", { status: 200 });
+    },
+    async () => handleModelProxy(req, baseEnv(), url),
+  );
+  assert.equal(response.status, 200);
+});
+
+test("model proxy rejects declared bodies above the Cloudflare floor", async () => {
+  const token = await mintToken();
+  const { req, url } = request("/model/v1/responses", {
+    method: "POST",
+    body: "{}",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "content-length": String(100 * 1024 * 1024 + 1),
+    },
+  });
   let called = false;
   const response = await withStubbedFetch(
     async () => {
@@ -220,6 +242,35 @@ test("model proxy enforces the body limit without a content-length header", asyn
   );
   assert.equal(response.status, 413);
   assert.equal(called, false);
+});
+
+test("model proxy stops an undeclared streamed body at the Cloudflare floor", async () => {
+  const token = await mintToken();
+  let chunks = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (chunks++ <= 100) controller.enqueue(new Uint8Array(1024 * 1024));
+      else controller.close();
+    },
+  });
+  const { req, url } = request("/model/v1/responses", {
+    method: "POST",
+    body,
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    duplex: "half",
+  } as RequestInit & { duplex: "half" });
+  assert.equal(req.headers.get("content-length"), null);
+  const response = await withStubbedFetch(
+    async (_input, init) => {
+      const reader = (init?.body as ReadableStream<Uint8Array>).getReader();
+      while (!(await reader.read()).done) {
+        // Consume as the upstream fetch would; the limiter errors at 100 MiB.
+      }
+      return new Response("{}", { status: 200 });
+    },
+    async () => handleModelProxy(req, baseEnv(), url),
+  );
+  assert.equal(response.status, 413);
 });
 
 test("credential delivery keeps the raw key when the proxy is off", async () => {

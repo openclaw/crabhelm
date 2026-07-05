@@ -31,7 +31,9 @@ const ALLOWED_ROUTES: ReadonlyArray<{ method: string; path: string }> = [
   { method: "GET", path: "/v1/models" },
 ];
 
-const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
+// Match Cloudflare's lowest request-body ceiling. Enforce it again while
+// streaming because higher account plans accept larger bodies at the edge.
+const MAX_REQUEST_BYTES = 100 * 1024 * 1024;
 // Runtime turns may run for 840 seconds; keep a small delivery margin while
 // still bounding stalled upstream requests.
 const UPSTREAM_TIMEOUT_MS = 15 * 60 * 1000;
@@ -75,35 +77,54 @@ function modelProxyConfigured(env: ModelProxyEnv): boolean {
     Boolean(env.OPENAI_API_KEY?.trim());
 }
 
-async function limitedRequestBody(request: Request): Promise<Uint8Array | undefined> {
-  if (!request.body) return new Uint8Array();
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > MAX_REQUEST_BYTES) {
-      await reader.cancel().catch(() => undefined);
-      return undefined;
-    }
-    chunks.push(value);
-  }
-  const body = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    body.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return body;
-}
-
 function unauthorized(message: string): Response {
   return new Response(JSON.stringify({ error: { message, type: "crabhelm_model_proxy" } }), {
     status: 401,
     headers: { "content-type": "application/json", "cache-control": "no-store", "www-authenticate": "Bearer" },
   });
+}
+
+function requestTooLarge(): Response {
+  return new Response(JSON.stringify({ error: { message: "request body too large", type: "crabhelm_model_proxy" } }), {
+    status: 413,
+    headers: { "content-type": "application/json", "cache-control": "no-store" },
+  });
+}
+
+function limitedRequestBody(body: ReadableStream<Uint8Array>): {
+  stream: ReadableStream<Uint8Array>;
+  exceeded: () => boolean;
+} {
+  const reader = body.getReader();
+  let total = 0;
+  let tooLarge = false;
+  return {
+    exceeded: () => tooLarge,
+    stream: new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const { done, value } = await reader.read();
+          if (done) {
+            controller.close();
+            return;
+          }
+          total += value.byteLength;
+          if (total > MAX_REQUEST_BYTES) {
+            tooLarge = true;
+            await reader.cancel("request body too large").catch(() => undefined);
+            controller.error(new Error("request body too large"));
+            return;
+          }
+          controller.enqueue(value);
+        } catch (error) {
+          controller.error(error);
+        }
+      },
+      async cancel(reason) {
+        await reader.cancel(reason).catch(() => undefined);
+      },
+    }),
+  };
 }
 
 export async function handleModelProxy(request: Request, env: ModelProxyEnv, url: URL): Promise<Response> {
@@ -140,18 +161,10 @@ export async function handleModelProxy(request: Request, env: ModelProxyEnv, url
 
   const declaredLength = Number(request.headers.get("content-length") ?? 0);
   if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BYTES) {
-    return new Response(JSON.stringify({ error: { message: "request body too large", type: "crabhelm_model_proxy" } }), {
-      status: 413,
-      headers: { "content-type": "application/json", "cache-control": "no-store" },
-    });
+    return requestTooLarge();
   }
-  const body = route.method === "GET" ? undefined : await limitedRequestBody(request);
-  if (route.method !== "GET" && body === undefined) {
-    return new Response(JSON.stringify({ error: { message: "request body too large", type: "crabhelm_model_proxy" } }), {
-      status: 413,
-      headers: { "content-type": "application/json", "cache-control": "no-store" },
-    });
-  }
+  const limitedBody = route.method === "GET" || !request.body ? undefined : limitedRequestBody(request.body);
+  const body = limitedBody?.stream;
 
   // Build the upstream request against a fixed origin/path — never a
   // caller-influenced host — with a freshly minted Authorization header.
@@ -176,6 +189,7 @@ export async function handleModelProxy(request: Request, env: ModelProxyEnv, url
       signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
     });
   } catch {
+    if (limitedBody?.exceeded()) return requestTooLarge();
     return new Response(JSON.stringify({ error: { message: "model upstream is unreachable", type: "crabhelm_model_proxy" } }), {
       status: 502,
       headers: { "content-type": "application/json", "cache-control": "no-store" },

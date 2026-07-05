@@ -126,6 +126,9 @@ test("child bootstrap supports Web PKI TLS without a pinned certificate", async 
   await executable(path.join(bin, "openclaw"), `#!/usr/bin/env bash
 printf '%q ' "$@" >>"$CRABHELM_TEST_LOG"
 printf '\n' >>"$CRABHELM_TEST_LOG"
+if [[ "$1 $2 $3" = "config get models.providers.openai.baseUrl" ]]; then
+  exit 1
+fi
 `);
   await executable(path.join(bin, "curl"), "#!/usr/bin/env bash\nexit 0\n");
   const digest = createHash("sha256").update(await readFile(plugin)).digest("hex");
@@ -150,7 +153,8 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
   const calls = await readFile(log, "utf8");
   assert.match(calls, /node install .*--tls/);
   assert.doesNotMatch(calls, /--tls-fingerprint/);
-  assert.match(calls, /config unset models\.providers\.openai\.baseUrl/);
+  assert.match(calls, /config get models\.providers\.openai\.baseUrl/);
+  assert.doesNotMatch(calls, /config unset models\.providers\.openai\.baseUrl/);
 });
 
 test("standalone bootstrap defers the runtime bridge until inference readiness", async () => {
