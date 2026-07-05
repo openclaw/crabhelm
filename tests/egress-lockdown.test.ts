@@ -31,7 +31,10 @@ function installScript(
 
 // Stage a bundle fixture + curl stub so the whole installer runs offline, and
 // return the archive digest plus a bin dir the caller can add tool stubs to.
-async function stageInstall(systemd = true): Promise<{
+async function stageInstall(
+  systemd = true,
+  guestBody = "#!/usr/bin/env bash\nset -euo pipefail\nprintf 'guest-install ran\\n' >>\"$CRABHELM_TEST_LOG\"\n",
+): Promise<{
   root: string;
   home: string;
   bin: string;
@@ -49,7 +52,7 @@ async function stageInstall(systemd = true): Promise<{
   if (systemd) await mkdir(path.join(root, "run/systemd/system"), { recursive: true });
   await writeFile(
     path.join(fixtures, "bundle", "guest-install.sh"),
-    "#!/usr/bin/env bash\nset -euo pipefail\nprintf 'guest-install ran\\n' >>\"$CRABHELM_TEST_LOG\"\n",
+    guestBody,
     { mode: 0o755 },
   );
   await chmod(path.join(fixtures, "bundle", "guest-install.sh"), 0o755);
@@ -254,7 +257,49 @@ esac
   await assert.rejects(readFile(path.join(root, "usr/local/sbin/crabhelm-egress-apply"), "utf8"), /ENOENT/u);
   await assert.rejects(readFile(path.join(root, "etc/systemd/system/crabhelm-egress.service"), "utf8"), /ENOENT/u);
   await assert.rejects(readFile(nftState, "utf8"), /ENOENT/u);
+  const marker = path.join(home, ".openclaw", "crabhelm-egress-policy");
+  assert.equal(await readFile(marker, "utf8"), "v1:off\n");
+  assert.equal((await stat(marker)).mode & 0o777, 0o600);
+  const trustedMarker = path.join(root, "var/lib/crabhelm/egress-policy");
+  assert.equal(await readFile(trustedMarker, "utf8"), "v1:off\n");
+  assert.equal((await stat(trustedMarker)).mode & 0o777, 0o644);
   assert.equal(await readFile(guestLog, "utf8"), "guest-install ran\nguest-install ran\n");
+});
+
+test("failed mode change leaves no stale trusted policy marker", async () => {
+  const failingGuest = "#!/usr/bin/env bash\nset -euo pipefail\nexit 1\n";
+  const { root, home, bin, guestLog, archiveId } = await stageInstall(true, failingGuest);
+  const nftState = path.join(root, "nft-active");
+  const trustedMarker = path.join(root, "var/lib/crabhelm/egress-policy");
+  await mkdir(path.dirname(trustedMarker), { recursive: true });
+  await writeFile(trustedMarker, "v1:required\n", { mode: 0o644 });
+  await writeFile(nftState, "active\n");
+  await writeStub(
+    path.join(bin, "nft"),
+    `#!/usr/bin/env bash
+case "\${1:-}" in
+  list) [[ -f ${JSON.stringify(nftState)} ]] ;;
+  delete) rm -f ${JSON.stringify(nftState)} ;;
+  *) exit 1 ;;
+esac
+`,
+  );
+  await writeSudoStub(bin);
+  await writeSystemctlStub(bin);
+
+  await assert.rejects(
+    run("/bin/bash", ["-c", installScript("off", archiveId, root)], {
+      env: {
+        PATH: stubPath(bin),
+        HOME: home,
+        CRABHELM_BOOTSTRAP_TOKEN: "test-token",
+        CRABHELM_TEST_LOG: guestLog,
+      },
+    }),
+  );
+  await assert.rejects(readFile(trustedMarker, "utf8"), /ENOENT/u);
+  await assert.rejects(readFile(nftState, "utf8"), /ENOENT/u);
+  await assert.rejects(readFile(path.join(home, ".openclaw", "crabhelm-egress-policy"), "utf8"), /ENOENT/u);
 });
 
 test("off mode removes a legacy live table without running systemd", async () => {
