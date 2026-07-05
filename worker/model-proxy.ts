@@ -152,9 +152,8 @@ export async function handleModelProxy(request: Request, env: ModelProxyEnv, url
 
   const bearer = request.headers.get("authorization")?.match(/^Bearer ([^\s]+)$/u)?.[1];
   if (!bearer) return unauthorized("model token required");
-  let claims: ModelClaims;
   try {
-    claims = await verifyClaims<ModelClaims>(env.MODEL_SIGNING_SECRET!, bearer, { typ: "model", aud: "crabhelm-model" });
+    await verifyClaims<ModelClaims>(env.MODEL_SIGNING_SECRET!, bearer, { typ: "model", aud: "crabhelm-model" });
   } catch {
     return unauthorized("model token is invalid");
   }
@@ -175,7 +174,6 @@ export async function handleModelProxy(request: Request, env: ModelProxyEnv, url
   const accept = request.headers.get("accept");
   if (accept) headers.set("accept", accept);
   headers.set("authorization", `Bearer ${env.OPENAI_API_KEY}`);
-  headers.set("x-crabhelm-claw", claims.clawId);
 
   let upstreamResponse: Response;
   try {

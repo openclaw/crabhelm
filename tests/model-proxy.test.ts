@@ -143,7 +143,7 @@ test("model proxy injects the real key, forwards to the fixed upstream, and stri
       assert.equal(sent.get("authorization"), `Bearer ${RAW_KEY}`);
       assert.equal(sent.get("content-type"), "application/json");
       assert.equal(sent.get("accept"), "text/event-stream");
-      assert.equal(sent.get("x-crabhelm-claw"), "claw-42");
+      assert.equal(sent.get("x-crabhelm-claw"), null);
       return result;
     },
   );
