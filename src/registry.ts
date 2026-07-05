@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import {
+  clawCredentialsGeneration,
   createClawRecord,
   fleetSummary,
   managedPolicyDiff,
   managedPolicyPatch,
   normalizeManagedPolicySpec,
+  rotateClawCredentials,
   setClawEnabled,
   updateClawRecord,
 } from "./domain.js";
@@ -348,6 +350,30 @@ export class CrabhelmRegistry {
         action: enabled ? "claw.enable" : "claw.disable",
         outcome: "requested",
         summary: `${enabled ? "Enabled" : "Disabled"} ${next.desired.name}`,
+        generation: next.desired.generation,
+      });
+      return next;
+    });
+  }
+
+  async rotateCredentials(id: string, actor: string): Promise<ClawRecord> {
+    return this.#serialize(async () => {
+      const current = await this.#require(id);
+      if (
+        current.observed.phase === "deleted" ||
+        current.observed.phase === "deleting" ||
+        current.observed.deletion
+      ) {
+        throw new Error("cannot rotate credentials for a deleting or deleted claw");
+      }
+      const next = rotateClawCredentials(current);
+      await this.#claws.register(id, next);
+      await this.#audit({
+        clawId: id,
+        actor,
+        action: "claw.rotate-credentials",
+        outcome: "requested",
+        summary: `Requested credential re-delivery for ${next.desired.name} (epoch ${clawCredentialsGeneration(next)})`,
         generation: next.desired.generation,
       });
       return next;

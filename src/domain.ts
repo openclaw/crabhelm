@@ -216,6 +216,7 @@ export function createClawRecord(input: CreateClawInput, now = new Date()): Claw
       access: normalizeAccess(input.access),
       observability: normalizeObservability(input.observability),
       enabled: true,
+      credentialsGeneration: 1,
     },
     observed: {
       generation: 0,
@@ -264,8 +265,12 @@ export function updateClawRecord(
     ...merged.desired,
     generation: record.desired.generation,
     enabled: record.desired.enabled,
+    credentialsGeneration: clawCredentialsGeneration(record),
   };
-  if (canonicalJson(desired) === canonicalJson(record.desired)) {
+  // Compare against a baseline that carries the same defaulted credential
+  // epoch, so records persisted before the field never diff on a no-op patch.
+  const baseline = { ...record.desired, credentialsGeneration: clawCredentialsGeneration(record) };
+  if (canonicalJson(desired) === canonicalJson(baseline)) {
     return record;
   }
   return {
@@ -295,6 +300,29 @@ export function setClawEnabled(record: ClawRecord, enabled: boolean, now = new D
   };
 }
 
+// Records persisted before the credential-epoch field exist without it.
+export function clawCredentialsGeneration(record: ClawRecord): number {
+  const value = record.desired.credentialsGeneration;
+  return Number.isSafeInteger(value) && value >= 1 ? value : 1;
+}
+
+export function rotateClawCredentials(record: ClawRecord, now = new Date()): ClawRecord {
+  const credentialsGeneration = clawCredentialsGeneration(record) + 1;
+  if (credentialsGeneration > 1_000_000) {
+    throw new Error("credential rotation limit reached");
+  }
+  return {
+    ...record,
+    revision: nextRecordRevision(record),
+    desired: {
+      ...record.desired,
+      credentialsGeneration,
+      generation: record.desired.generation + 1,
+    },
+    updatedAt: now.toISOString(),
+  };
+}
+
 function nextRecordRevision(record: ClawRecord): number {
   return Number.isSafeInteger(record.revision) && record.revision >= 0
     ? record.revision + 1
@@ -308,6 +336,7 @@ export function childPolicyHash(record: ClawRecord): string {
     slackEnabled: record.desired.channels.slack.enabled,
     access: record.desired.access,
     logLevel: record.desired.observability.logLevel,
+    credentialsGeneration: clawCredentialsGeneration(record),
   });
   return createHash("sha256").update(serialized).digest("hex");
 }
