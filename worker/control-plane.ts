@@ -422,6 +422,11 @@ export class CrabhelmControlPlane extends DurableObject<Env> {
       await this.#schedule();
       return json(result);
     }
+    if (request.method === "POST" && action === "rotate-credentials") {
+      const claw = await this.#registry.rotateCredentials(id, actor(request));
+      await this.#schedule();
+      return json(await this.#reconciler.reconcileOne(claw.id), 202);
+    }
     if (request.method === "POST" && (action === "disable" || action === "enable")) {
       const claw = await this.#registry.setEnabled(
         id,

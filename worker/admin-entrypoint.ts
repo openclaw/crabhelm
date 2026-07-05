@@ -29,7 +29,7 @@ export class CrabhelmAdmin extends WorkerEntrypoint<Env> {
     return this.#request("PATCH", `/api/personas/${encodeURIComponent(identifier(personaId))}`, input);
   }
 
-  async clawAction(clawId: string, action: "runtime-reconnect" | "runtime-reset" | "runtime-diagnostics" | "reconcile"): Promise<AdminResponse> {
+  async clawAction(clawId: string, action: "runtime-reconnect" | "runtime-reset" | "runtime-diagnostics" | "reconcile" | "rotate-credentials"): Promise<AdminResponse> {
     const method = action === "runtime-diagnostics" ? "GET" : "POST";
     return this.#request(method, `/api/claws/${encodeURIComponent(identifier(clawId))}/${action}`);
   }

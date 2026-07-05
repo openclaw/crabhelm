@@ -126,6 +126,10 @@ export type ClawDesired = {
   access: AccessPolicy;
   observability: ObservabilityPolicy;
   enabled: boolean;
+  // Credential epoch: bumping it forces the child to re-fetch its delivered
+  // credentials (release-keyed in-place reinstall) after a Worker secret
+  // rotation. Records persisted before this field exist read as epoch 1.
+  credentialsGeneration: number;
 };
 
 export type LifecycleIdentity = {

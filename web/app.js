@@ -435,7 +435,7 @@ function renderDrawer(claw) {
         <label><span>Child log level</span><select name="logLevel">${selectOptions(["error", "warn", "info", "debug"], claw.desired.observability.logLevel)}</select></label>
         <button class="button small" type="button" data-detail-action="save">Save desired state</button>
       </form></div></section>
-      <section class="detail-block"><h3>Controls</h3><div class="detail-actions"><button class="button small" data-detail-action="reconcile">↻ Reconcile</button><button class="button small" data-detail-action="${enabled ? "disable" : "enable"}">${enabled ? "Disable ingress" : "Enable claw"}</button></div></section>
+      <section class="detail-block"><h3>Controls</h3><div class="detail-actions"><button class="button small" data-detail-action="reconcile">↻ Reconcile</button><button class="button small" data-detail-action="rotate-credentials" title="Re-deliver rotated Worker secrets through a staged in-place reinstall">Rotate credentials</button><button class="button small" data-detail-action="${enabled ? "disable" : "enable"}">${enabled ? "Disable ingress" : "Enable claw"}</button></div></section>
       <section class="delete-zone"><h3>Remove child core</h3><p>Disables ingress, waits for active runs to drain, releases the exact provider workspace, confirms absence, then revokes its exact control link. Type <b>${escapeHtml(claw.desired.name)}</b> to continue.</p><div class="delete-confirm"><input id="delete-confirmation" placeholder="${escapeAttr(claw.desired.name)}"/><button class="button danger small" data-detail-action="remove">Remove</button></div></section>
     </div>`;
 }
