@@ -11,6 +11,7 @@ export { CrabhelmClawCoordinator } from "./claw-coordinator.js";
 export { CrabhelmAdmin } from "./admin-entrypoint.js";
 
 const childIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+const unsafeMutationMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -45,6 +46,13 @@ export default {
     if (url.pathname.startsWith("/api/")) {
       const stub = env.CONTROL_PLANE.getByName("openclaw-org");
       if (url.pathname === "/api/tools/github/execute" && isRuntimeHost(url, env)) return stub.fetch(request);
+      if (!isConsoleHost(url, env)) return new Response("not found", { status: 404 });
+      if (isCrossSiteMutation(request, env)) {
+        return Response.json(
+          { error: "cross-site mutation rejected" },
+          { status: 403, headers: { "cache-control": "no-store", "x-content-type-options": "nosniff" } },
+        );
+      }
       const auth = await authorize(request, env);
       if (!auth) {
         return Response.json(
@@ -59,7 +67,7 @@ export default {
       headers.set("x-crabhelm-roles", auth.roles.join(","));
       return stub.fetch(new Request(request, { headers, redirect: "manual" }));
     }
-    if (isRuntimeHost(url, env)) return new Response("not found", { status: 404 });
+    if (!isConsoleHost(url, env)) return new Response("not found", { status: 404 });
     const asset = await env.ASSETS.fetch(request);
     const headers = new Headers(asset.headers);
     headers.set("content-security-policy", "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
@@ -224,7 +232,21 @@ async function handleRuntimeTicket(request: Request, env: Env): Promise<Response
 }
 
 function isRuntimeHost(url: URL, env: Env): boolean {
-  try { return url.host === new URL(env.RUNTIME_URL).host; } catch { return false; }
+  try { return url.origin === new URL(env.RUNTIME_URL).origin; } catch { return false; }
+}
+
+function isConsoleHost(url: URL, env: Env): boolean {
+  try { return url.origin === new URL(env.PUBLIC_URL).origin; } catch { return false; }
+}
+
+function isCrossSiteMutation(request: Request, env: Env): boolean {
+  if (!unsafeMutationMethods.has(request.method.toUpperCase())) return false;
+  const fetchSite = request.headers.get("sec-fetch-site")?.toLowerCase();
+  if (fetchSite === "cross-site") return true;
+  const origin = request.headers.get("origin");
+  if (!origin) return false;
+  try { return new URL(origin).origin !== new URL(env.PUBLIC_URL).origin; }
+  catch { return true; }
 }
 
 function bearer(request: Request): string | undefined {

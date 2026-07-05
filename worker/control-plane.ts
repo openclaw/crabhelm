@@ -47,7 +47,7 @@ export class CrabhelmControlPlane extends DurableObject<Env> {
     const admissionOpen = Boolean(
       env.CRABBOX_URL?.trim() &&
       env.CRABBOX_TOKEN?.trim() &&
-      env.BOOTSTRAP_SIGNING_SECRET?.trim() &&
+      validSigningSecret(env.BOOTSTRAP_SIGNING_SECRET) &&
       validSigningSecret(env.SESSION_SIGNING_SECRET) &&
       validSigningSecret(env.INVOCATION_SIGNING_SECRET) &&
       validSigningSecret(env.RUNTIME_SIGNING_SECRET) &&

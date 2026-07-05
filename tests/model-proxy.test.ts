@@ -123,11 +123,11 @@ test("model proxy allowlists routes and methods", async () => {
   assert.equal((await handleModelProxy(query.req, baseEnv(), query.url)).status, 400);
 });
 
-test("deployment routes model requests through the Worker before assets", async () => {
+test("deployment routes every request through the Worker before assets", async () => {
   const config = JSON.parse(await readFile("wrangler.jsonc", "utf8")) as {
-    assets?: { run_worker_first?: string[] };
+    assets?: { run_worker_first?: boolean | string[] };
   };
-  assert.ok(config.assets?.run_worker_first?.includes("/model/*"));
+  assert.equal(config.assets?.run_worker_first, true);
 });
 
 test("model proxy injects the real key, forwards to the fixed upstream, and strips client auth", async () => {

@@ -25,6 +25,40 @@ describe("worker router in workerd", () => {
     expect(await response.json()).toEqual({ error: "authentication required" });
   });
 
+  it("keeps console APIs and assets on the exact HTTPS console origin", async () => {
+    for (const origin of [RUNTIME, "https://preview.example.test", "http://crabhelm.example.com"]) {
+      expect((await SELF.fetch(`${origin}/api/state`)).status).toBe(404);
+      expect((await SELF.fetch(`${origin}/`)).status).toBe(404);
+    }
+  });
+
+  it("rejects cross-site browser mutations before authentication", async () => {
+    const crossSite = await SELF.fetch(`${CONSOLE}/api/claws/${CHILD_ID}/reconcile`, {
+      method: "POST",
+      headers: { origin: "https://attacker.example", "sec-fetch-site": "cross-site" },
+    });
+    expect(crossSite.status).toBe(403);
+    expect(crossSite.headers.get("cache-control")).toBe("no-store");
+    expect(await crossSite.json()).toEqual({ error: "cross-site mutation rejected" });
+
+    const wrongSameSiteOrigin = await SELF.fetch(`${CONSOLE}/api/claws/${CHILD_ID}/reconcile`, {
+      method: "POST",
+      headers: { origin: "https://evil.openclaw.ai", "sec-fetch-site": "same-site" },
+    });
+    expect(wrongSameSiteOrigin.status).toBe(403);
+
+    const sameOrigin = await SELF.fetch(`${CONSOLE}/api/claws/${CHILD_ID}/reconcile`, {
+      method: "POST",
+      headers: { origin: CONSOLE, "sec-fetch-site": "same-origin" },
+    });
+    expect(sameOrigin.status).toBe(401);
+
+    const crossSiteRead = await SELF.fetch(`${CONSOLE}/api/state`, {
+      headers: { origin: "https://attacker.example", "sec-fetch-site": "cross-site" },
+    });
+    expect(crossSiteRead.status).toBe(401);
+  });
+
   it("strips caller-supplied identity headers before reaching the control plane", async () => {
     // A forged principal/role header must not authenticate; the gate still 401s.
     const response = await SELF.fetch(`${CONSOLE}/api/state`, {

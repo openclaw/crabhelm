@@ -65,7 +65,7 @@ export class GovernanceController {
       authorize.searchParams.set("redirect_uri", `${this.#env.PUBLIC_URL}/api/oauth/github/callback`);
       authorize.searchParams.set("scope", "repo read:org user:email");
       authorize.searchParams.set("state", state.id);
-      return Response.redirect(authorize, 302);
+      return oauthRedirect(authorize.toString());
     }
     if (request.method === "GET" && url.pathname === "/api/oauth/github/callback") {
       const code = text(url.searchParams.get("code"), "OAuth code", 500);
@@ -87,7 +87,7 @@ export class GovernanceController {
         await this.#vault.delete(vaultKey);
         throw error;
       }
-      return Response.redirect(`${this.#env.PUBLIC_URL}/#access`, 302);
+      return oauthRedirect(`${this.#env.PUBLIC_URL}/#access`);
     }
     const connectionRevoke = url.pathname.match(/^\/api\/connections\/([^/]+)\/revoke$/u);
     if (request.method === "POST" && connectionRevoke) {
@@ -310,6 +310,17 @@ function pick(value: Record<string, unknown>, keys: string[]): Record<string, un
 function publicPrincipal<T extends { id: string; label: string; kind: string; roles: unknown; departments: unknown }>(value: T) { return { id: value.id, label: value.label, kind: value.kind, roles: value.roles, departments: value.departments }; }
 function requireAdmin(value: boolean): void { if (!value) throw new Error("administrator role required"); }
 function bearer(request: Request): string | undefined { return request.headers.get("authorization")?.match(/^Bearer ([^\s]+)$/u)?.[1]; }
+function oauthRedirect(location: string): Response {
+  return new Response(null, {
+    status: 302,
+    headers: {
+      location,
+      "cache-control": "no-store, max-age=0",
+      "referrer-policy": "no-referrer",
+      "x-content-type-options": "nosniff",
+    },
+  });
+}
 function text(value: unknown, label: string, max: number): string { if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value.trim(), "utf8") > max) throw new Error(`${label} is invalid`); return value.trim(); }
 function record(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 async function readJson(request: Request): Promise<unknown> {

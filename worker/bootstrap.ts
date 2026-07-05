@@ -353,6 +353,7 @@ export async function bootstrapToken(
   nodeId: string,
   expiresAt: number,
 ): Promise<string> {
+  requireBootstrapSigningSecret(secret);
   const key = await crypto.subtle.importKey(
     "raw",
     encoder.encode(secret),
@@ -372,6 +373,7 @@ export async function bootstrapTokenClaims(
   candidate: string,
   now = Date.now(),
 ): Promise<{ releaseId: string; archiveId: string; nodeId: string; expiresAt: number } | undefined> {
+  if (!validBootstrapSigningSecret(secret)) return undefined;
   const match = candidate.match(/^([0-9a-f]{64})\.([0-9a-f]{64})\.([0-9a-f]{64})\.([0-9]{13})\.([A-Za-z0-9_-]{43})$/u);
   if (!match) return undefined;
   const releaseId = match[1]!;
@@ -399,6 +401,16 @@ export async function validBootstrapToken(
 ): Promise<boolean> {
   const claims = await bootstrapTokenClaims(secret, childId, candidate, now);
   return claims?.releaseId === releaseId && claims.archiveId === archiveId && claims.nodeId === nodeId;
+}
+
+function validBootstrapSigningSecret(secret: string): boolean {
+  return typeof secret === "string" && encoder.encode(secret).byteLength >= 32;
+}
+
+function requireBootstrapSigningSecret(secret: string): void {
+  if (!validBootstrapSigningSecret(secret)) {
+    throw new Error("bootstrap signing secret must contain at least 32 bytes");
+  }
 }
 
 async function inspectTerminal(
