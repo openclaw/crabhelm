@@ -131,6 +131,15 @@ test("child apply command performs managed-field compare-and-swap", async () => 
       traces: true,
       metrics: false,
       logs: false,
+      captureContent: {
+        enabled: false,
+        inputMessages: false,
+        outputMessages: false,
+        toolInputs: false,
+        toolOutputs: false,
+        systemPrompt: false,
+        toolDefinitions: false,
+      },
       sampleRate: 0.2,
       flushIntervalMs: 30_000,
     },
@@ -178,7 +187,7 @@ test("child apply command performs managed-field compare-and-swap", async () => 
     })) ?? "{}",
   );
   assert.equal(disabled.ok, true);
-  assert.equal((config.diagnostics as { enabled: boolean }).enabled, true);
+  assert.equal((config.diagnostics as { enabled: boolean }).enabled, false);
 });
 
 test("child ingress command disables and restores existing channel states", async () => {

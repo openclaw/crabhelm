@@ -13,7 +13,7 @@ deploy/crabbox-profile/build-bundle.sh \
   --output /absolute/empty/output
 ```
 
-The builder pins a Linux x64 Node.js `22.23.1` fallback plus OpenClaw, Slack, and `diagnostics-otel` `2026.6.11`, packs the current Crabhelm source, verifies all artifacts, and emits `manifest.json`. Plugin inputs must contain their production dependencies under `package/node_modules`; lifecycle scripts and dependency declarations are removed from the reviewed appliance copy. Archive the output under a top-level `bundle/` directory because the Cloudflare installer executes `bundle/guest-install.sh`:
+The builder pins the Linux x64 Node.js `22.23.1` runtime plus OpenClaw, Slack, and `diagnostics-otel` `2026.6.11`, packs the current Crabhelm source, verifies all artifacts, and emits `manifest.json`. The installer always runs the reviewed Node artifact from a digest-specific path. Plugin inputs must contain their production dependencies under `package/node_modules`; lifecycle scripts and dependency declarations are removed from the reviewed appliance copy. Archive the output under a top-level `bundle/` directory because the Cloudflare installer executes `bundle/guest-install.sh`:
 
 ```bash
 tar -C /path/to/parent -s '|^output|bundle|' -czf /tmp/crabhelm-bundle.tgz output

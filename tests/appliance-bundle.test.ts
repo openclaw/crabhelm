@@ -181,6 +181,7 @@ test("appliance builder pins artifacts and guest install verifies the bundle bef
     readOnly: true,
   })}\n`, { mode: 0o600 });
   await executable(path.join(bin, "sudo"), "#!/usr/bin/env bash\n[[ \"${1:-}\" = -n ]] && shift\nexec \"$@\"\n");
+  await executable(path.join(bin, "uname"), "#!/usr/bin/env bash\n[[ \"${1:-}\" = -s ]] && printf '%s\\n' Linux || printf '%s\\n' x86_64\n");
   await executable(path.join(bin, "npm"), `#!/usr/bin/env bash
 printf 'npm auth=%s/%s ' "\${OPENCLAW_GATEWAY_TOKEN+present}" "\${OPENCLAW_GATEWAY_PASSWORD+present}" >>"${log}"
 printf '%q ' "$@" >>"${log}"
@@ -205,6 +206,7 @@ printf '\n' >>"${log}"
       CRABHELM_TEST_LOG: log,
       CRABHELM_BUNDLE_MANIFEST_SHA256: digest(manifestBytes),
       CRABHELM_NODE_SHA256: manifest.node.sha256,
+      CRABHELM_RELEASE_ID: `${digest(manifestBytes)}.${"c".repeat(64)}.${manifest.node.sha256}`,
       CRABHELM_CREDENTIAL_FILE: credentialSource,
       CRABHELM_MANAGED_SPEC_FILE: managedSpecSource,
       CRABBOX_ADAPTER_ROOT_SESSION_ID: "22222222-2222-4222-8222-222222222222",
@@ -343,7 +345,11 @@ async function createNodeFixture(root: string): Promise<string> {
   const nodeRoot = path.join(root, "node-v22.23.1-linux-x64");
   const tarball = path.join(root, "node-v22.23.1-linux-x64.tar.xz");
   await mkdir(path.join(nodeRoot, "bin"), { recursive: true });
-  await writeFile(path.join(nodeRoot, "bin", "node"), "fixture\n", { mode: 0o755 });
+  await writeFile(
+    path.join(nodeRoot, "bin", "node"),
+    `#!/usr/bin/env bash\nif [[ "\${1:-}" = --version ]]; then printf '%s\\n' v22.23.1; exit 0; fi\nexec ${JSON.stringify(process.execPath)} "$@"\n`,
+    { mode: 0o755 },
+  );
   await run("tar", ["-cJf", tarball, "-C", root, path.basename(nodeRoot)]);
   return tarball;
 }

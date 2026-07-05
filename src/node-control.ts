@@ -841,6 +841,7 @@ function parseManagedOtel(value: unknown): ManagedDesired["otel"] {
   const enabled = input.enabled as boolean;
   const traces = input.traces as boolean;
   const metrics = input.metrics as boolean;
+  if (enabled && !traces && !metrics) throw new Error("desired.otel requires at least one signal");
   if (input.logs !== false) throw new Error("desired.otel.logs must be false");
   const endpoint = typeof input.endpoint === "string" ? input.endpoint.trim() : undefined;
   if (enabled && !endpoint) throw new Error("desired.otel.endpoint is required");
@@ -942,7 +943,7 @@ function applyManagedDesired(config: Record<string, unknown>, desired: ManagedDe
   const diagnosticsEntry = ensureRecord(ensureRecord(plugins, "entries"), "diagnostics-otel");
   diagnosticsEntry.enabled = desired.otel.enabled;
   const diagnostics = ensureRecord(config, "diagnostics");
-  if (desired.otel.enabled) diagnostics.enabled = true;
+  diagnostics.enabled = desired.otel.enabled;
   diagnostics.otel = {
     enabled: desired.otel.enabled,
     ...(desired.otel.endpoint ? { endpoint: desired.otel.endpoint } : {}),
@@ -955,6 +956,15 @@ function applyManagedDesired(config: Record<string, unknown>, desired: ManagedDe
     traces: desired.otel.traces,
     metrics: desired.otel.metrics,
     logs: false,
+    captureContent: {
+      enabled: false,
+      inputMessages: false,
+      outputMessages: false,
+      toolInputs: false,
+      toolOutputs: false,
+      systemPrompt: false,
+      toolDefinitions: false,
+    },
     sampleRate: desired.otel.sampleRate,
     flushIntervalMs: desired.otel.flushIntervalMs,
   };

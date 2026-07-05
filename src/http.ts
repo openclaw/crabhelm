@@ -361,6 +361,11 @@ export function createCrabhelmApiHandler(options: {
         sendJson(res, 200, await options.reconciler.reconcileOne(id));
         return true;
       }
+      if (req.method === "POST" && action === "rotate-credentials") {
+        const claw = await options.registry.rotateCredentials(id, "gateway-operator");
+        sendJson(res, 202, await options.reconciler.reconcileOne(claw.id));
+        return true;
+      }
       if (req.method === "POST" && (action === "disable" || action === "enable")) {
         const claw = await options.registry.setEnabled(
           id,

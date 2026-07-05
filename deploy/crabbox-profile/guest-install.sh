@@ -15,6 +15,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 manifest="$script_dir/manifest.json"
 expected_manifest_sha256="${CRABHELM_BUNDLE_MANIFEST_SHA256:-}"
 expected_node_sha256="${CRABHELM_NODE_SHA256:-}"
+expected_release_id="${CRABHELM_RELEASE_ID:-}"
 pinned_node_version=22.23.1
 node_artifact="$script_dir/artifacts/node-linux-x64.tar.xz"
 
@@ -24,6 +25,9 @@ unset OPENCLAW_GATEWAY_TOKEN OPENCLAW_GATEWAY_PASSWORD
 
 [[ "$expected_manifest_sha256" =~ ^[0-9a-f]{64}$ ]] || die "fixed controller must supply the reviewed manifest digest"
 [[ "$expected_node_sha256" =~ ^[0-9a-f]{64}$ ]] || die "fixed controller must supply the reviewed Node.js digest"
+[[ "$expected_release_id" =~ ^[0-9a-f]{64}\.[0-9a-f]{64}\.[0-9a-f]{64}$ ]] || die "fixed controller must supply the complete appliance release identity"
+[[ "${expected_release_id%%.*}" = "$expected_manifest_sha256" ]] || die "appliance release identity does not match the manifest digest"
+[[ "${expected_release_id##*.}" = "$expected_node_sha256" ]] || die "appliance release identity does not match the Node digest"
 [[ -f "$manifest" && ! -L "$manifest" ]] || die "bundle manifest is missing or unsafe"
 sha256sum_binary="$(command -v sha256sum || true)"
 [[ "$sha256sum_binary" = /* && -x "$sha256sum_binary" ]] || die "sha256sum is required"
@@ -39,25 +43,16 @@ actual_node_sha256="$(sha256sum "$node_artifact")"
 actual_node_sha256="${actual_node_sha256%% *}"
 [[ "$actual_node_sha256" = "$expected_node_sha256" ]] || die "pinned Node.js artifact digest mismatch"
 
-runtime_root="$HOME/.local/share/crabhelm/node-v$pinned_node_version-linux-x64"
+runtime_root="$HOME/.local/share/crabhelm/node-v$pinned_node_version-$expected_node_sha256-linux-x64"
 install_stage=node
-current_node="$(command -v node || true)"
-current_node_major=""
-if [[ "$current_node" = /* && -x "$current_node" ]]; then
-  current_node_major="$($current_node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || true)"
+[[ "$(uname -s)" = Linux && "$(uname -m)" = x86_64 ]] || die "pinned Node.js runtime requires Linux x64"
+node_binary="$runtime_root/bin/node"
+if [[ ! -x "$node_binary" ]]; then
+  install -d -m 0700 "$runtime_root"
+  tar -xJf "$node_artifact" -C "$runtime_root" --strip-components=1
 fi
-if [[ "$current_node_major" =~ ^[0-9]+$ ]] && (( current_node_major >= 22 )); then
-  node_binary="$current_node"
-else
-  [[ "$(uname -s)" = Linux && "$(uname -m)" = x86_64 ]] || die "pinned Node.js fallback requires Linux x64"
-  node_binary="$runtime_root/bin/node"
-  if [[ ! -x "$node_binary" ]]; then
-    install -d -m 0700 "$runtime_root"
-    tar -xJf "$node_artifact" -C "$runtime_root" --strip-components=1
-  fi
-  [[ -f "$node_binary" && ! -L "$node_binary" && -x "$node_binary" ]] || die "pinned Node.js runtime is unsafe"
-  [[ "$($node_binary --version)" = "v$pinned_node_version" ]] || die "pinned Node.js runtime version mismatch"
-fi
+[[ -f "$node_binary" && ! -L "$node_binary" && -x "$node_binary" ]] || die "pinned Node.js runtime is unsafe"
+[[ "$($node_binary --version)" = "v$pinned_node_version" ]] || die "pinned Node.js runtime version mismatch"
 runtime_bin="$(dirname -- "$node_binary")"
 npm_binary="$(command -v npm || true)"
 if [[ ! -x "$npm_binary" ]]; then
@@ -364,7 +359,7 @@ export CRABHELM_OPENCLAW_BINARY="$openclaw_binary"
 export CRABHELM_CURL_BINARY="$curl_binary"
 export CRABHELM_RUNTIME_BRIDGE="$script_dir/runtime-bridge.mjs"
 export CRABHELM_RUNTIME_BRIDGE_SHA256="$runtime_bridge_sha256"
-export CRABHELM_RELEASE_ID="$expected_manifest_sha256"
+export CRABHELM_RELEASE_ID="$expected_release_id"
 export PATH="$runtime_path"
 install_stage=bootstrap
 exec /bin/bash "$script_dir/bootstrap-child.sh"

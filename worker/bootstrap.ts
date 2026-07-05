@@ -4,7 +4,7 @@ import type {
   DrainResult,
   RevokeControlResult,
 } from "../src/types.js";
-import { standaloneBootstrapHash } from "../src/domain.js";
+import { clawCredentialsGeneration, standaloneBootstrapHash } from "../src/domain.js";
 import { timingSafeEqual } from "node:crypto";
 
 const encoder = new TextEncoder();
@@ -51,6 +51,7 @@ export class CrabboxWorkspaceBootstrap {
   readonly #publicUrl: string;
   readonly #releaseId: string;
   readonly #archiveId: string;
+  readonly #nodeId: string;
   readonly #signingSecret: string;
   readonly #coordinators?: { getByName(name: string): { runtimeStatus(): Promise<{ pending: number; running: number; awaitingDelivery: number }> } };
 
@@ -59,6 +60,7 @@ export class CrabboxWorkspaceBootstrap {
     publicUrl: string;
     releaseId: string;
     archiveId: string;
+    nodeId: string;
     signingSecret: string;
     coordinators?: { getByName(name: string): { runtimeStatus(): Promise<{ pending: number; running: number; awaitingDelivery: number }> } };
   }) {
@@ -68,10 +70,14 @@ export class CrabboxWorkspaceBootstrap {
     if (!/^[0-9a-f]{64}$/u.test(options.archiveId)) {
       throw new Error("Crabbox appliance archive id must be a SHA-256 digest");
     }
+    if (!/^[0-9a-f]{64}$/u.test(options.nodeId)) {
+      throw new Error("Crabbox appliance Node id must be a SHA-256 digest");
+    }
     this.#brokerToken = options.brokerToken;
     this.#publicUrl = new URL(options.publicUrl).origin;
     this.#releaseId = options.releaseId;
     this.#archiveId = options.archiveId;
+    this.#nodeId = options.nodeId;
     this.#signingSecret = options.signingSecret;
     this.#coordinators = options.coordinators;
   }
@@ -82,13 +88,16 @@ export class CrabboxWorkspaceBootstrap {
 
   async #launchCommand(claw: ClawRecord): Promise<string> {
     const policyHash = standaloneBootstrapHash(claw);
+    const release = this.#release(claw);
     const token = await bootstrapToken(
       this.#signingSecret,
       claw.id,
-      this.#releaseId,
-      this.#archiveId,
+      release.releaseId,
+      release.archiveId,
+      release.nodeId,
       Date.now() + BOOTSTRAP_TOKEN_TTL_MS,
     );
+    const credentialsGeneration = clawCredentialsGeneration(claw);
     const installUrl = new URL(
       `/bootstrap/${encodeURIComponent(claw.id)}/install.sh`,
       this.#publicUrl,
@@ -96,6 +105,9 @@ export class CrabboxWorkspaceBootstrap {
     installUrl.searchParams.set("model", claw.desired.inference.model);
     installUrl.searchParams.set("slack", "false");
     installUrl.searchParams.set("policyHash", policyHash);
+    if (credentialsGeneration > 1) {
+      installUrl.searchParams.set("credentials", String(credentialsGeneration));
+    }
     return [
       `CRABHELM_BOOTSTRAP_TOKEN=${shellQuote(token)}`,
       `CRABHELM_POLICY_HASH=${shellQuote(policyHash)}`,
@@ -110,34 +122,51 @@ export class CrabboxWorkspaceBootstrap {
   }
 
   #retryMarker(claw: ClawRecord): string {
-    return `/tmp/crabhelm-attempt-${this.#releaseId}-${standaloneBootstrapHash(claw)}`;
+    const release = this.#release(claw);
+    const credentialsGeneration = clawCredentialsGeneration(claw);
+    const base = `/tmp/crabhelm-attempt-${releaseMarker(release)}-${standaloneBootstrapHash(claw)}`;
+    return credentialsGeneration > 1 ? `${base}-c${credentialsGeneration}` : base;
   }
 
   #readyId(claw: ClawRecord): string {
-    return `${this.#releaseId}:${standaloneBootstrapHash(claw)}`;
+    return `${releaseMarker(this.#release(claw))}:${standaloneBootstrapHash(claw)}`;
+  }
+
+  #release(claw: ClawRecord): { releaseId: string; archiveId: string; nodeId: string } {
+    const override = claw.desired.deployment.appliance;
+    return override
+      ? { releaseId: override.manifestSha256, archiveId: override.archiveSha256, nodeId: override.nodeSha256 }
+      : { releaseId: this.#releaseId, archiveId: this.#archiveId, nodeId: this.#nodeId };
   }
 
   async inspect(
     claw: ClawRecord,
     workspace: { status: string; attachUrl?: string },
   ): Promise<{ ready: boolean; message: string; gatewayVersion?: string }> {
+    const release = this.#release(claw);
     if (!workspace.attachUrl) {
       return { ready: false, message: "Workspace ready; terminal bootstrap route pending" };
     }
     let result: WorkspaceTerminalState;
     try {
       const probeLabel = `CRABHELM_${crypto.randomUUID().replaceAll("-", "")}`;
+      const credentialsGeneration = clawCredentialsGeneration(claw);
       result = await inspectTerminal(
         workspace.attachUrl,
         this.#brokerToken,
         claw.desired.inference.model,
+        releaseMarker(release),
+        release.nodeId,
+        credentialsGeneration,
+        standaloneBootstrapHash(claw),
         bootstrapStatusCommand(
           await this.#launchCommand(claw),
           probeLabel,
           this.#retryMarker(claw),
           this.#readyId(claw),
-          legacyReadinessCompatible(claw) ? this.#releaseId : "",
-          legacyReadinessCompatible(claw) ? "" : this.#releaseId,
+          credentialsGeneration,
+          legacyReadinessCompatible(claw) ? releaseMarker(release) : "",
+          legacyReadinessCompatible(claw) ? "" : releaseMarker(release),
         ),
         probeLabel,
       );
@@ -307,11 +336,16 @@ export class CrabboxWorkspaceBootstrap {
   }
 }
 
+function releaseMarker(release: { releaseId: string; archiveId: string; nodeId: string }): string {
+  return `${release.releaseId}.${release.archiveId}.${release.nodeId}`;
+}
+
 export async function bootstrapToken(
   secret: string,
   childId: string,
   releaseId: string,
   archiveId: string,
+  nodeId: string,
   expiresAt: number,
 ): Promise<string> {
   const key = await crypto.subtle.importKey(
@@ -321,10 +355,10 @@ export async function bootstrapToken(
     false,
     ["sign"],
   );
-  if (!/^[0-9a-f]{64}$/u.test(releaseId) || !/^[0-9a-f]{64}$/u.test(archiveId)) throw new Error("bootstrap release identity is invalid");
-  const payload = `crabhelm:${childId}:${releaseId}:${archiveId}:${expiresAt}`;
+  if (![releaseId, archiveId, nodeId].every((value) => /^[0-9a-f]{64}$/u.test(value))) throw new Error("bootstrap release identity is invalid");
+  const payload = `crabhelm:${childId}:${releaseId}:${archiveId}:${nodeId}:${expiresAt}`;
   const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(payload));
-  return `${releaseId}.${archiveId}.${expiresAt}.${base64Url(new Uint8Array(signature))}`;
+  return `${releaseId}.${archiveId}.${nodeId}.${expiresAt}.${base64Url(new Uint8Array(signature))}`;
 }
 
 export async function bootstrapTokenClaims(
@@ -332,19 +366,20 @@ export async function bootstrapTokenClaims(
   childId: string,
   candidate: string,
   now = Date.now(),
-): Promise<{ releaseId: string; archiveId: string; expiresAt: number } | undefined> {
-  const match = candidate.match(/^([0-9a-f]{64})\.([0-9a-f]{64})\.([0-9]{13})\.([A-Za-z0-9_-]{43})$/u);
+): Promise<{ releaseId: string; archiveId: string; nodeId: string; expiresAt: number } | undefined> {
+  const match = candidate.match(/^([0-9a-f]{64})\.([0-9a-f]{64})\.([0-9a-f]{64})\.([0-9]{13})\.([A-Za-z0-9_-]{43})$/u);
   if (!match) return undefined;
   const releaseId = match[1]!;
   const archiveId = match[2]!;
-  const expiresAt = Number(match[3]);
+  const nodeId = match[3]!;
+  const expiresAt = Number(match[4]);
   if (!Number.isSafeInteger(expiresAt) || expiresAt <= now || expiresAt - now > BOOTSTRAP_TOKEN_TTL_MS) {
     return undefined;
   }
-  const expected = encoder.encode(await bootstrapToken(secret, childId, releaseId, archiveId, expiresAt));
+  const expected = encoder.encode(await bootstrapToken(secret, childId, releaseId, archiveId, nodeId, expiresAt));
   const actual = encoder.encode(candidate);
   return expected.byteLength === actual.byteLength && timingSafeEqual(expected, actual)
-    ? { releaseId, archiveId, expiresAt }
+    ? { releaseId, archiveId, nodeId, expiresAt }
     : undefined;
 }
 
@@ -353,17 +388,22 @@ export async function validBootstrapToken(
   childId: string,
   releaseId: string,
   archiveId: string,
+  nodeId: string,
   candidate: string,
   now = Date.now(),
 ): Promise<boolean> {
   const claims = await bootstrapTokenClaims(secret, childId, candidate, now);
-  return claims?.releaseId === releaseId && claims.archiveId === archiveId;
+  return claims?.releaseId === releaseId && claims.archiveId === archiveId && claims.nodeId === nodeId;
 }
 
 async function inspectTerminal(
   attachUrl: string,
   brokerToken: string,
   model: string,
+  releaseId: string,
+  nodeId: string,
+  credentialsGeneration: number,
+  policyHash: string,
   statusCommand: string,
   probeLabel: string,
 ): Promise<WorkspaceTerminalState> {
@@ -404,7 +444,7 @@ async function inspectTerminal(
         finish("ready");
       } else if (hasTerminalLine(output, `${probeLabel}_READY`) && !probeSent) {
         probeSent = true;
-        socket.send(`${inferenceProbeCommand(model, `${probeLabel}_INFERENCE`)}\n`);
+        socket.send(`${inferenceProbeCommand(model, releaseId, nodeId, `${probeLabel}_INFERENCE`, credentialsGeneration, policyHash)}\n`);
       } else if (
         hasTerminalLine(output, `${probeLabel}_STARTED`) ||
         hasTerminalLine(output, `${probeLabel}_INSTALLING`)
@@ -540,16 +580,24 @@ export function bootstrapStatusCommand(
   statusLabel = "CRABHELM",
   retryMarker = "",
   releaseId = "",
+  credentialsGeneration = 1,
   legacyReadyId = "",
   incompatibleLegacyId = "",
 ): string {
   const readyIds = [releaseId, legacyReadyId].filter(Boolean);
+  // Past epoch 1, readiness additionally requires the credential marker the
+  // installer writes after re-fetching credentials.env, so a rotation drives
+  // one release-keyed in-place reinstall before the claw reports ready again.
+  const credentialCheck = credentialsGeneration > 1
+    ? ` && grep -Fqx ${shellQuote(`c${credentialsGeneration}`)} "$HOME/.openclaw/crabhelm-credentials-generation" 2>/dev/null`
+    : "";
   const readyCheck = readyIds.length > 0
-    ? readyIds.map((id) => `grep -Fqx ${shellQuote(id)} "$HOME/.openclaw/crabhelm-ready" 2>/dev/null`).join(" || ")
-    : "test -f \"$HOME/.openclaw/crabhelm-ready\"";
+    ? `{ ${readyIds.map((id) => `grep -Fqx ${shellQuote(id)} "$HOME/.openclaw/crabhelm-ready" 2>/dev/null`).join(" || ")}; }${credentialCheck}`
+    : `test -f "$HOME/.openclaw/crabhelm-ready"${credentialCheck}`;
   const command = [
     `status_label=${shellQuote(statusLabel)}`,
     `if ${readyCheck}; then`,
+    ...(retryMarker ? [`  rm -f ${shellQuote(retryMarker)} ${shellQuote(`${retryMarker}.retry`)} ${shellQuote(`${retryMarker}.retry2`)}`] : []),
     "  printf '%s_READY\\n' \"$status_label\"",
   ];
   if (incompatibleLegacyId) {
@@ -668,10 +716,27 @@ function legacyReadinessCompatible(claw: ClawRecord): boolean {
 
 export function inferenceProbeCommand(
   model: string,
+  releaseId: string,
+  nodeId: string,
   probeLabel = "CRABHELM_INFERENCE",
+  credentialsGeneration = 1,
+  policyHash = "",
 ): string {
+  if (!/^[0-9a-f]{64}\.[0-9a-f]{64}\.[0-9a-f]{64}$/u.test(releaseId) || !/^[0-9a-f]{64}$/u.test(nodeId)) {
+    throw new Error("inference probe release identity is invalid");
+  }
+  if (policyHash && !/^[0-9a-f]{64}$/u.test(policyHash)) {
+    throw new Error("inference probe policy identity is invalid");
+  }
   const marker = "$HOME/.openclaw/crabhelm-inference-ready";
-  const markerValue = `v2:${model}`;
+  const identity = policyHash ? `${releaseId}:p${policyHash}` : releaseId;
+  const markerValue = policyHash
+    ? credentialsGeneration > 1
+      ? `v5:${identity}:c${credentialsGeneration}:${model}`
+      : `v5:${identity}:${model}`
+    : credentialsGeneration > 1
+      ? `v4:${releaseId}:c${credentialsGeneration}:${model}`
+      : `v3:${releaseId}:${model}`;
   const output = "/tmp/crabhelm-inference-probe.json";
   const error = "/tmp/crabhelm-inference-probe.err";
   const runtimeLauncher = "$HOME/.local/share/crabhelm/runtime/start-runtime-bridge.sh";
@@ -700,7 +765,7 @@ export function inferenceProbeCommand(
     `probe_label=${shellQuote(probeLabel)}`,
     "probe_session=\"crabhelm-healthcheck-$(date +%s)-$$\"",
     "openclaw_cli=\"$HOME/.local/share/crabhelm/openclaw-2026.6.11/bin/openclaw\"",
-    "export PATH=\"$HOME/.local/share/crabhelm/node-v22.23.1-linux-x64/bin:$HOME/.local/share/crabhelm/openclaw-2026.6.11/bin:$PATH\"",
+    `export PATH="$HOME/.local/share/crabhelm/node-v22.23.1-${nodeId}-linux-x64/bin:$HOME/.local/share/crabhelm/openclaw-2026.6.11/bin:$PATH"`,
     `if test -f ${marker} && grep -Fqx ${shellQuote(markerValue)} ${marker}; then`,
     `  if /bin/bash ${runtimeLauncher}; then probe_result=READY; else probe_result=RUNTIME_FAILED; fi`,
     "else",
@@ -738,6 +803,59 @@ export function inferenceProbeCommand(
     "fi",
     "printf '%s_%s\\n' \"$probe_label\" \"$probe_result\"",
   ].join("\n");
+}
+
+export function bootstrapInstallScript(options: {
+  base: string;
+  archiveId: string;
+  releaseId: string;
+  nodeSha256: string;
+  childId: string;
+  model: string;
+  slack: string;
+  credentialsGeneration: number;
+  policyHash: string;
+  modelBaseUrl?: string;
+}): string {
+  const managedSpecUrl = new URL(`${options.base}/managed-spec.json`);
+  managedSpecUrl.searchParams.set("model", options.model);
+  managedSpecUrl.searchParams.set("policyHash", options.policyHash);
+  return `#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+: "\${CRABHELM_BOOTSTRAP_TOKEN:?missing bootstrap token}"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+auth=(--header "Authorization: Bearer $CRABHELM_BOOTSTRAP_TOKEN")
+curl --fail --silent --show-error --location "\${auth[@]}" ${shellQuote(`${options.base}/bundle.tgz`)} -o "$work/bundle.tgz"
+actual_archive_sha256="$(sha256sum "$work/bundle.tgz")"
+actual_archive_sha256="\${actual_archive_sha256%% *}"
+[[ "$actual_archive_sha256" = ${shellQuote(options.archiveId)} ]] || { printf '%s\\n' 'crabhelm bootstrap: appliance archive digest mismatch' >&2; exit 1; }
+tar -xzf "$work/bundle.tgz" -C "$work"
+curl --fail --silent --show-error --location "\${auth[@]}" ${shellQuote(`${options.base}/credentials.env`)} -o "$work/credentials.env"
+chmod 0600 "$work/credentials.env"
+curl --fail --silent --show-error --location "\${auth[@]}" ${shellQuote(managedSpecUrl.toString())} -o "$work/managed-spec.json"
+chmod 0600 "$work/managed-spec.json"
+export CRABHELM_BUNDLE_MANIFEST_SHA256=${shellQuote(options.releaseId)}
+export CRABHELM_NODE_SHA256=${shellQuote(options.nodeSha256)}
+export CRABHELM_RELEASE_ID=${shellQuote(`${options.releaseId}.${options.archiveId}.${options.nodeSha256}`)}
+export CRABHELM_CREDENTIAL_FILE="$work/credentials.env"
+export CRABHELM_CREDENTIAL_REFRESH_URL=${shellQuote(`${options.base}/credentials.env`)}
+export CRABHELM_MANAGED_SPEC_FILE="$work/managed-spec.json"
+export CRABHELM_POLICY_HASH=${shellQuote(options.policyHash)}
+export CRABBOX_ADAPTER_ROOT_SESSION_ID=${shellQuote(options.childId)}
+export CRABHELM_STANDALONE=true
+export CRABHELM_MODEL=${shellQuote(options.model)}
+export CRABHELM_SLACK_ENABLED=${shellQuote(options.slack)}
+export CRABHELM_CREDENTIALS_GENERATION=${shellQuote(String(options.credentialsGeneration))}
+${options.modelBaseUrl ? `export CRABHELM_MODEL_BASE_URL=${shellQuote(options.modelBaseUrl)}\n` : ""}/bin/bash "$work/bundle/guest-install.sh"
+marker_dir="$HOME/.openclaw"
+install -d -m 0700 "$marker_dir"
+marker_temporary="$marker_dir/crabhelm-credentials-generation.new-$$"
+printf 'c%s\\n' ${shellQuote(String(options.credentialsGeneration))} >"$marker_temporary"
+chmod 0600 "$marker_temporary"
+mv -f "$marker_temporary" "$marker_dir/crabhelm-credentials-generation"
+`;
 }
 
 function base64Url(bytes: Uint8Array): string {

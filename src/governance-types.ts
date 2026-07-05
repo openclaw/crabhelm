@@ -342,3 +342,16 @@ export type TurnClaims = {
   channelId?: string;
   threadTs?: string;
 };
+
+// Bearer presented by a child Gateway to the edge model proxy. It stands in for
+// the raw provider key on the agent VM: per-claw, audience-bound, and only ever
+// exchanged for the real key inside the Worker.
+export type ModelClaims = {
+  typ: "model";
+  iss: "crabhelm";
+  aud: "crabhelm-model";
+  jti: string;
+  iat: number;
+  exp: number;
+  clawId: string;
+};

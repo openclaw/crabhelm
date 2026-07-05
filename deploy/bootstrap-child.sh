@@ -17,6 +17,7 @@ parent_tls="${CRABHELM_PARENT_TLS:-true}"
 parent_tls_fingerprint="${CRABHELM_PARENT_TLS_FINGERPRINT:-}"
 standalone="${CRABHELM_STANDALONE:-false}"
 model="${CRABHELM_MODEL:-openai/gpt-5.5}"
+model_base_url="${CRABHELM_MODEL_BASE_URL:-}"
 slack_enabled="${CRABHELM_SLACK_ENABLED:-false}"
 openclaw_binary="${CRABHELM_OPENCLAW_BINARY:-$(command -v openclaw || true)}"
 curl_binary="${CRABHELM_CURL_BINARY:-$(command -v curl || true)}"
@@ -38,6 +39,9 @@ fi
 [[ "$slack_plugin_tarball" = /* && -f "$slack_plugin_tarball" && ! -L "$slack_plugin_tarball" ]] || die "Slack plugin tarball must be a regular absolute path"
 [[ "$slack_plugin_sha256" =~ ^[0-9a-f]{64}$ ]] || die "invalid Slack plugin digest"
 [[ "$model" =~ ^[a-z0-9][a-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:-]*$ ]] || die "invalid inference model"
+if [[ -n "$model_base_url" ]]; then
+  [[ "$model_base_url" =~ ^https://[A-Za-z0-9._-]+(:[0-9]+)?/[A-Za-z0-9._/-]*$ ]] || die "invalid model base URL"
+fi
 [[ "$slack_enabled" = "true" || "$slack_enabled" = "false" ]] || die "invalid Slack desired state"
 if [[ "$standalone" = "true" ]]; then
   :
@@ -52,7 +56,7 @@ fi
 [[ "$curl_binary" = /* && -x "$curl_binary" ]] || die "curl is required"
 [[ "$runtime_bridge" = /* && -f "$runtime_bridge" && ! -L "$runtime_bridge" ]] || die "runtime bridge must be a regular absolute path"
 [[ "$runtime_bridge_sha256" =~ ^[0-9a-f]{64}$ ]] || die "invalid runtime bridge digest"
-[[ "$release_id" =~ ^[0-9a-f]{64}$ ]] || die "invalid appliance release id"
+[[ "$release_id" =~ ^[0-9a-f]{64}\.[0-9a-f]{64}\.[0-9a-f]{64}$ ]] || die "invalid appliance release identity"
 if [[ "$standalone" = "true" ]]; then
   [[ "$policy_hash" =~ ^[0-9a-f]{64}$ ]] || die "invalid managed policy hash"
 fi
@@ -90,6 +94,7 @@ if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password || 
 const endpointBase = endpoint.toString().replace(/\/+$/, "");
 if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/.test(otel.serviceName)) process.exit(2);
 if (![otel.traces, otel.metrics].every((value) => typeof value === "boolean") || otel.logs !== false) process.exit(2);
+if (!otel.traces && !otel.metrics) process.exit(2);
 if (typeof otel.sampleRate !== "number" || otel.sampleRate < 0 || otel.sampleRate > 1) process.exit(2);
 if (!Number.isInteger(otel.flushIntervalMs) || otel.flushIntervalMs < 1000 || otel.flushIntervalMs > 300000) process.exit(2);
 process.stdout.write(`${logLevel}\t${JSON.stringify({
@@ -102,6 +107,15 @@ process.stdout.write(`${logLevel}\t${JSON.stringify({
   traces: otel.traces,
   metrics: otel.metrics,
   logs: false,
+  captureContent: {
+    enabled: false,
+    inputMessages: false,
+    outputMessages: false,
+    toolInputs: false,
+    toolOutputs: false,
+    systemPrompt: false,
+    toolDefinitions: false,
+  },
   sampleRate: otel.sampleRate,
   flushIntervalMs: otel.flushIntervalMs,
 })}`);
@@ -122,6 +136,7 @@ fi
 "$openclaw_binary" config set logging.level "$log_level"
 if [[ "$otel_state" = disabled ]]; then
   "$openclaw_binary" config set plugins.entries.diagnostics-otel.enabled false --strict-json
+  "$openclaw_binary" config set diagnostics.enabled false --strict-json
   "$openclaw_binary" config set diagnostics.otel.enabled false --strict-json
 else
   "$openclaw_binary" config set plugins.entries.diagnostics-otel.enabled true --strict-json
@@ -129,6 +144,20 @@ else
   "$openclaw_binary" config set diagnostics.otel "$otel_state" --strict-json --replace
 fi
 "$openclaw_binary" config set agents.defaults.model.primary "$model"
+# Edge model proxy: reroute the built-in openai provider through Crabhelm so the
+# child uses its per-claw model token (delivered as OPENAI_API_KEY) against the
+# Worker instead of calling the provider directly with a raw key. Overriding
+# models.providers.openai.baseUrl is required for built-in openai/* models; the
+# OPENAI_BASE_URL env alone does not reroute them.
+if [[ -n "$model_base_url" ]]; then
+  "$openclaw_binary" config set models.providers.openai.baseUrl "$model_base_url"
+else
+  # A proxy rollback must remove the managed override before the raw provider
+  # key is restored, otherwise this claw remains pointed at the edge route.
+  if "$openclaw_binary" config get models.providers.openai.baseUrl >/dev/null 2>&1; then
+    "$openclaw_binary" config unset models.providers.openai.baseUrl
+  fi
+fi
 "$openclaw_binary" config set agents.defaults.workspace "${OPENCLAW_STATE_DIR:-${HOME:-/tmp}/.openclaw}/workspace"
 "$openclaw_binary" config set channels.slack.enabled "$slack_enabled" --strict-json
 "$openclaw_binary" config set channels.slack.mode socket
@@ -222,8 +251,6 @@ for _ in {1..60}; do
       prepare_runtime_bridge
       printf '%s:%s\n' "$release_id" "$policy_hash" >"$HOME/.openclaw/crabhelm-ready"
       chmod 0600 "$HOME/.openclaw/crabhelm-ready"
-      retry_marker="/tmp/crabhelm-attempt-${release_id}-${policy_hash}"
-      rm -f -- "$retry_marker" "$retry_marker.retry" "$retry_marker.retry2"
     fi
     exit 0
   fi

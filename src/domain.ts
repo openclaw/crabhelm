@@ -3,6 +3,7 @@ import type {
   AccessPolicy,
   ClawRecord,
   CreateClawInput,
+  DeploymentSpec,
   FleetSummary,
   InferencePolicy,
   ManagedPolicySpec,
@@ -16,6 +17,7 @@ import type {
 const subjectPattern = /^[a-zA-Z0-9][a-zA-Z0-9_.:@/+\-]{0,199}$/;
 const slugPattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const modelPattern = /^[a-z0-9][a-z0-9_.-]*\/[a-zA-Z0-9][a-zA-Z0-9_.:\-]{0,199}$/;
+const sha256Pattern = /^[0-9a-f]{64}$/;
 
 export function slugify(value: string): string {
   return value
@@ -139,7 +141,11 @@ function normalizeObservability(
       throw new Error(`OpenTelemetry ${field} must be a boolean`);
     }
   }
-  const endpoint = input?.otel?.endpoint?.trim();
+  const rawEndpoint = input?.otel?.endpoint;
+  if (rawEndpoint !== undefined && typeof rawEndpoint !== "string") {
+    throw new Error("OpenTelemetry endpoint must be a string");
+  }
+  const endpoint = rawEndpoint?.trim();
   if (endpoint) {
     const url = new URL(endpoint);
     if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
@@ -148,6 +154,11 @@ function normalizeObservability(
   }
   const enabled = input?.otel?.enabled ?? false;
   if (enabled && !endpoint) throw new Error("OpenTelemetry endpoint is required when export is enabled");
+  const traces = input?.otel?.traces ?? true;
+  const metrics = input?.otel?.metrics ?? true;
+  if (enabled && !traces && !metrics) {
+    throw new Error("OpenTelemetry export requires traces, metrics, or both");
+  }
   if (input?.otel?.logs !== undefined && input.otel.logs !== false) {
     throw new Error("OpenTelemetry log export is unavailable under metadata-only policy");
   }
@@ -171,13 +182,24 @@ function normalizeObservability(
       enabled,
       ...(endpoint ? { endpoint } : {}),
       serviceName,
-      traces: input?.otel?.traces ?? true,
-      metrics: input?.otel?.metrics ?? true,
+      traces,
+      metrics,
       logs: false,
       sampleRate,
       flushIntervalMs,
     },
   };
+}
+
+function normalizeAppliance(input: CreateClawInput["deployment"]): DeploymentSpec["appliance"] {
+  if (!input?.appliance) return undefined;
+  const manifestSha256 = requireText(input.appliance.manifestSha256, "appliance manifest SHA-256", 64);
+  const archiveSha256 = requireText(input.appliance.archiveSha256, "appliance archive SHA-256", 64);
+  const nodeSha256 = requireText(input.appliance.nodeSha256, "appliance Node SHA-256", 64);
+  if (!sha256Pattern.test(manifestSha256) || !sha256Pattern.test(archiveSha256) || !sha256Pattern.test(nodeSha256)) {
+    throw new Error("appliance release digests must be lowercase SHA-256 values");
+  }
+  return { manifestSha256, archiveSha256, nodeSha256 };
 }
 
 export function normalizeManagedPolicySpec(input: ManagedPolicySpec): ManagedPolicySpec {
@@ -241,6 +263,7 @@ export function createClawRecord(input: CreateClawInput, now = new Date()): Claw
   if (!slugPattern.test(profile)) {
     throw new Error("deployment profile must be a lowercase DNS label");
   }
+  const appliance = normalizeAppliance(input.deployment);
   const timestamp = now.toISOString();
   return {
     id: randomUUID(),
@@ -258,12 +281,14 @@ export function createClawRecord(input: CreateClawInput, now = new Date()): Claw
         ...(input.deployment?.region
           ? { region: requireText(input.deployment.region, "region", 80) }
           : {}),
+        ...(appliance ? { appliance } : {}),
       },
       inference: normalizeModels(input.inference),
       channels: { slack: normalizeSlack(input.slack, slug) },
       access: normalizeAccess(input.access),
       observability: normalizeObservability(input.observability, slug),
       enabled: true,
+      credentialsGeneration: 1,
     },
     observed: {
       generation: 0,
@@ -316,8 +341,12 @@ export function updateClawRecord(
     ...merged.desired,
     generation: record.desired.generation,
     enabled: record.desired.enabled,
+    credentialsGeneration: clawCredentialsGeneration(record),
   };
-  if (canonicalJson(desired) === canonicalJson(record.desired)) {
+  // Compare against a baseline that carries the same defaulted credential
+  // epoch, so records persisted before the field never diff on a no-op patch.
+  const baseline = { ...record.desired, credentialsGeneration: clawCredentialsGeneration(record) };
+  if (canonicalJson(desired) === canonicalJson(baseline)) {
     return record;
   }
   return {
@@ -347,6 +376,29 @@ export function setClawEnabled(record: ClawRecord, enabled: boolean, now = new D
   };
 }
 
+// Records persisted before the credential-epoch field exist without it.
+export function clawCredentialsGeneration(record: ClawRecord): number {
+  const value = record.desired.credentialsGeneration;
+  return Number.isSafeInteger(value) && value >= 1 ? value : 1;
+}
+
+export function rotateClawCredentials(record: ClawRecord, now = new Date()): ClawRecord {
+  const credentialsGeneration = clawCredentialsGeneration(record) + 1;
+  if (credentialsGeneration > 1_000_000) {
+    throw new Error("credential rotation limit reached");
+  }
+  return {
+    ...record,
+    revision: nextRecordRevision(record),
+    desired: {
+      ...record.desired,
+      credentialsGeneration,
+      generation: record.desired.generation + 1,
+    },
+    updatedAt: now.toISOString(),
+  };
+}
+
 function nextRecordRevision(record: ClawRecord): number {
   return Number.isSafeInteger(record.revision) && record.revision >= 0
     ? record.revision + 1
@@ -361,6 +413,8 @@ export function childPolicyHash(record: ClawRecord): string {
     access: record.desired.access,
     logLevel: record.desired.observability.logLevel,
     otel: record.desired.observability.otel,
+    appliance: record.desired.deployment.appliance,
+    credentialsGeneration: clawCredentialsGeneration(record),
   });
   return createHash("sha256").update(serialized).digest("hex");
 }
