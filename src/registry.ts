@@ -286,7 +286,7 @@ export class CrabhelmRegistry {
       if (next === current) return current;
       if (
         current.observed.lifecycle &&
-        JSON.stringify(next.desired.deployment) !== JSON.stringify(current.desired.deployment)
+        JSON.stringify(deploymentPlacement(next)) !== JSON.stringify(deploymentPlacement(current))
       ) {
         throw new Error("deployment placement is immutable after workspace allocation; replace the claw instead");
       }
@@ -315,6 +315,7 @@ export class CrabhelmRegistry {
         ...(input.deployment?.region ?? configured?.region ?? this.#defaultDeployment.region
           ? { region: input.deployment?.region ?? configured?.region ?? this.#defaultDeployment.region }
           : {}),
+        ...(input.deployment?.appliance ? { appliance: input.deployment.appliance } : {}),
       },
     };
   }
@@ -478,6 +479,11 @@ export class CrabhelmRegistry {
     this.#tail = next.catch(() => undefined);
     return next;
   }
+}
+
+function deploymentPlacement(record: ClawRecord): Pick<ClawRecord["desired"]["deployment"], "target" | "profile" | "region"> {
+  const { target, profile, region } = record.desired.deployment;
+  return { target, profile, ...(region ? { region } : {}) };
 }
 
 function normalizeRecordRevision(record: ClawRecord): ClawRecord {
