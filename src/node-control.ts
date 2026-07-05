@@ -938,11 +938,7 @@ function applyManagedDesired(config: Record<string, unknown>, desired: ManagedDe
   slack.groupPolicy = desired.groupPolicy;
   ensureRecord(config, "logging").level = desired.logLevel;
   const plugins = ensureRecord(config, "plugins");
-  if (Array.isArray(plugins.allow)) {
-    const allow = plugins.allow.filter((item): item is string => typeof item === "string" && item !== "diagnostics-otel");
-    if (desired.otel.enabled) allow.push("diagnostics-otel");
-    plugins.allow = allow;
-  }
+  plugins.allow = ["crabhelm", "slack", ...(desired.otel.enabled ? ["diagnostics-otel"] : [])];
   const diagnosticsEntry = ensureRecord(ensureRecord(plugins, "entries"), "diagnostics-otel");
   diagnosticsEntry.enabled = desired.otel.enabled;
   const diagnostics = ensureRecord(config, "diagnostics");

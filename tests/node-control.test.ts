@@ -62,7 +62,7 @@ test("child status command binds evidence to the configured child id", async () 
 test("child apply command performs managed-field compare-and-swap", async () => {
   const config: Record<string, unknown> = {
     agents: { defaults: { model: "openai/gpt-5.5" } },
-    plugins: { allow: ["crabhelm", "slack"] },
+    plugins: { allow: "invalid-existing-policy" },
   };
   const handlers = new Map<string, (params?: string | null) => Promise<string>>();
   registerChildCommands(
