@@ -121,12 +121,12 @@ test("credential rotation re-keys the install marker and bootstrap request", asy
   });
   const initial = await bootstrap.command(claw);
   assert.doesNotMatch(initial, /credentials=/u);
-  assert.ok(initial.includes(`/tmp/crabhelm-attempt-${"a".repeat(64)}`));
-  assert.ok(!initial.includes(`/tmp/crabhelm-attempt-${"a".repeat(64)}-c`));
+  assert.ok(initial.includes(`/tmp/crabhelm-attempt-${"a".repeat(64)}-e1-attempt`));
+  assert.ok(!initial.includes(`/tmp/crabhelm-attempt-${"a".repeat(64)}-e1-attempt-c`));
 
   const rotated = await bootstrap.command(rotateClawCredentials(claw));
   assert.match(rotated, /install\.sh\?model=[^']+&slack=false&credentials=2/u);
-  assert.ok(rotated.includes(`/tmp/crabhelm-attempt-${"a".repeat(64)}-c2`));
+  assert.ok(rotated.includes(`/tmp/crabhelm-attempt-${"a".repeat(64)}-e1-attempt-c2`));
 });
 
 test("readiness past epoch one requires the credential re-delivery marker", async () => {
@@ -156,6 +156,32 @@ test("readiness past epoch one requires the credential re-delivery marker", asyn
   );
   assert.match(await observe(2), /^CRABHELM_epoch_READY$/mu);
   assert.doesNotMatch(await observe(3), /_READY$/mu);
+});
+
+test("readiness requires the versioned desired egress policy marker", async () => {
+  const releaseId = "d".repeat(64);
+  const home = await mkdtemp(path.join(tmpdir(), "crabhelm-egress-ready-"));
+  const trustedMarker = path.join(home, "trusted-egress-policy");
+  const trustedOwner = process.getuid?.() ?? 0;
+  await mkdir(path.join(home, ".openclaw"), { recursive: true });
+  await writeFile(path.join(home, ".openclaw", "crabhelm-ready"), `${releaseId}\n`, { mode: 0o600 });
+  const observe = async (mode: "attempt" | "required" | "off") => {
+    const command = bootstrapStatusCommand("", "CRABHELM_egress", "", releaseId, 1, mode, trustedMarker, trustedOwner);
+    const { stdout } = await run("/bin/bash", ["-c", command], { env: { ...process.env, HOME: home } });
+    return stdout;
+  };
+
+  assert.doesNotMatch(await observe("attempt"), /_READY$/mu);
+  await writeFile(trustedMarker, "v1:attempt\n", { mode: 0o644 });
+  assert.match(await observe("attempt"), /^CRABHELM_egress_READY$/mu);
+  assert.doesNotMatch(await observe("off"), /_READY$/mu);
+  await writeFile(trustedMarker, "v1:off\n", { mode: 0o644 });
+  assert.match(await observe("off"), /^CRABHELM_egress_READY$/mu);
+  const production = bootstrapStatusCommand("", "CRABHELM_egress", "", releaseId, 1, "attempt");
+  assert.match(production, /\/var\/lib\/crabhelm\/egress-policy/u);
+  assert.match(production, /0:644/u);
+  const required = bootstrapStatusCommand("", "CRABHELM_egress", "", releaseId, 1, "required");
+  assert.doesNotMatch(required, /HOME.*crabhelm-egress-policy/u);
 });
 
 test("generated installer re-fetches credentials and records the epoch marker", async () => {
@@ -228,6 +254,10 @@ esac
   assert.ok(
     script.indexOf("guest-install.sh") < script.indexOf("crabhelm-credentials-generation"),
     "epoch marker must only be written after a successful install",
+  );
+  assert.ok(
+    script.indexOf('/bin/bash "$work/bundle/guest-install.sh"') < script.lastIndexOf("write_egress_policy_marker"),
+    "trusted egress marker must only be written after a successful install",
   );
 
   await run("/bin/bash", ["-c", script], {

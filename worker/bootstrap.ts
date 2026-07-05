@@ -10,6 +10,7 @@ import { timingSafeEqual } from "node:crypto";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const BOOTSTRAP_TOKEN_TTL_MS = 20 * 60 * 1000;
+const EGRESS_POLICY_VERSION = 1;
 type WorkerWebSocket = WebSocket & { accept(): void };
 type WorkspaceTerminalState =
   | "ready"
@@ -51,6 +52,7 @@ export class CrabboxWorkspaceBootstrap {
   readonly #releaseId: string;
   readonly #archiveId: string;
   readonly #signingSecret: string;
+  readonly #egressLockdown: EgressLockdownMode;
   readonly #coordinators?: { getByName(name: string): { runtimeStatus(): Promise<{ pending: number; running: number; awaitingDelivery: number }> } };
 
   constructor(options: {
@@ -59,6 +61,7 @@ export class CrabboxWorkspaceBootstrap {
     releaseId: string;
     archiveId: string;
     signingSecret: string;
+    egressLockdown?: EgressLockdownMode;
     coordinators?: { getByName(name: string): { runtimeStatus(): Promise<{ pending: number; running: number; awaitingDelivery: number }> } };
   }) {
     if (!/^[0-9a-f]{64}$/u.test(options.releaseId)) {
@@ -72,6 +75,7 @@ export class CrabboxWorkspaceBootstrap {
     this.#releaseId = options.releaseId;
     this.#archiveId = options.archiveId;
     this.#signingSecret = options.signingSecret;
+    this.#egressLockdown = options.egressLockdown ?? "attempt";
     this.#coordinators = options.coordinators;
   }
 
@@ -109,12 +113,9 @@ export class CrabboxWorkspaceBootstrap {
     ].join(" ");
   }
 
-  // Epoch 1 keeps the historical marker path so claws installed before
-  // credential rotation existed never relaunch on a Worker deploy.
   #retryMarker(credentialsGeneration: number): string {
-    return credentialsGeneration > 1
-      ? `/tmp/crabhelm-attempt-${this.#releaseId}-c${credentialsGeneration}`
-      : `/tmp/crabhelm-attempt-${this.#releaseId}`;
+    const credentials = credentialsGeneration > 1 ? `-c${credentialsGeneration}` : "";
+    return `/tmp/crabhelm-attempt-${this.#releaseId}-e${EGRESS_POLICY_VERSION}-${this.#egressLockdown}${credentials}`;
   }
 
   async inspect(
@@ -138,6 +139,7 @@ export class CrabboxWorkspaceBootstrap {
           this.#retryMarker(credentialsGeneration),
           this.#releaseId,
           credentialsGeneration,
+          this.#egressLockdown,
         ),
         probeLabel,
       );
@@ -537,15 +539,28 @@ export function bootstrapStatusCommand(
   retryMarker = "",
   releaseId = "",
   credentialsGeneration = 1,
+  egressLockdown?: EgressLockdownMode,
+  trustedEgressMarkerPath = "/var/lib/crabhelm/egress-policy",
+  trustedEgressMarkerOwner = 0,
 ): string {
+  if (!trustedEgressMarkerPath.startsWith("/") || !Number.isSafeInteger(trustedEgressMarkerOwner) || trustedEgressMarkerOwner < 0) {
+    throw new Error("trusted egress marker identity is invalid");
+  }
   // Past epoch 1, readiness additionally requires the credential marker the
   // installer writes after re-fetching credentials.env, so a rotation drives
   // one release-keyed in-place reinstall before the claw reports ready again.
   const credentialCheck = credentialsGeneration > 1
     ? ` && grep -Fqx ${shellQuote(`c${credentialsGeneration}`)} "$HOME/.openclaw/crabhelm-credentials-generation" 2>/dev/null`
     : "";
+  const egressValue = egressLockdown ? `v${EGRESS_POLICY_VERSION}:${egressLockdown}` : "";
+  const unprivilegedEgressFallback = egressLockdown && egressLockdown !== "required"
+    ? ` || { test "$(/usr/bin/id -u)" != 0 && { test ! -x /usr/bin/sudo || ! /usr/bin/sudo -n /usr/bin/true >/dev/null 2>&1; } && grep -Fqx ${shellQuote(egressValue)} "$HOME/.openclaw/crabhelm-egress-policy" 2>/dev/null; }`
+    : "";
+  const egressCheck = egressLockdown
+    ? ` && { { test "$(/usr/bin/stat -c '%u:%a' ${shellQuote(trustedEgressMarkerPath)} 2>/dev/null || /usr/bin/stat -f '%u:%Lp' ${shellQuote(trustedEgressMarkerPath)} 2>/dev/null)" = ${shellQuote(`${trustedEgressMarkerOwner}:644`)} && grep -Fqx ${shellQuote(egressValue)} ${shellQuote(trustedEgressMarkerPath)} 2>/dev/null; }${unprivilegedEgressFallback}; }`
+    : "";
   const readyCheck = releaseId
-    ? `grep -Fqx ${shellQuote(releaseId)} "$HOME/.openclaw/crabhelm-ready" 2>/dev/null${credentialCheck}`
+    ? `grep -Fqx ${shellQuote(releaseId)} "$HOME/.openclaw/crabhelm-ready" 2>/dev/null${credentialCheck}${egressCheck}`
     : "test -f \"$HOME/.openclaw/crabhelm-ready\"";
   const command = [
     `status_label=${shellQuote(statusLabel)}`,
@@ -754,6 +769,9 @@ function egressLockdownBlock(mode: EgressLockdownMode, persistenceRoot?: string)
   const unitPath = `${root}/etc/systemd/system/crabhelm-egress.service`;
   const linkPath = `${root}/etc/systemd/system/multi-user.target.wants/crabhelm-egress.service`;
   const systemdRuntimeDirectory = `${root}/run/systemd/system`;
+  const policyMarkerDirectory = `${root}/var/lib/crabhelm`;
+  const policyMarkerPath = `${root}/var/lib/crabhelm/egress-policy`;
+  const policyMarkerValue = `v${EGRESS_POLICY_VERSION}:${mode}`;
   const binaryResolver = persistenceRoot
     ? `find_egress_binary() { command -v "$1" || true; }`
     : `find_egress_binary() {
@@ -788,6 +806,9 @@ egress_apply_path=${shellQuote(applyPath)}
 egress_unit_path=${shellQuote(unitPath)}
 egress_link_path=${shellQuote(linkPath)}
 egress_systemd_runtime_dir=${shellQuote(systemdRuntimeDirectory)}
+egress_policy_marker_dir=${shellQuote(policyMarkerDirectory)}
+egress_policy_marker_path=${shellQuote(policyMarkerPath)}
+egress_policy_marker_value=${shellQuote(policyMarkerValue)}
 egress_privileged=()
 set_egress_privileged() {
   local id_binary env_binary sudo_binary true_binary
@@ -806,6 +827,37 @@ set_egress_privileged() {
     return 0
   fi
   return 1
+}
+write_egress_policy_marker() {
+  local install_binary mv_binary rm_binary marker_temporary marker_staged marker_status=0
+  install_binary="$(find_egress_binary install || true)"
+  mv_binary="$(find_egress_binary mv || true)"
+  rm_binary="$(find_egress_binary rm || true)"
+  [[ -n "$install_binary" && -n "$mv_binary" && -n "$rm_binary" ]] || return 1
+  set_egress_privileged || return 1
+  marker_temporary="$(mktemp)"
+  marker_staged="$egress_policy_marker_path.new-$$"
+  printf '%s\\n' "$egress_policy_marker_value" >"$marker_temporary"
+  chmod 0644 "$marker_temporary"
+  "\${egress_privileged[@]}" "$install_binary" -d -m 0755 "$egress_policy_marker_dir" || marker_status=1
+  if [[ "$marker_status" = 0 ]]; then
+    "\${egress_privileged[@]}" "$install_binary" -m 0644 "$marker_temporary" "$marker_staged" || marker_status=1
+  fi
+  if [[ "$marker_status" = 0 ]]; then
+    "\${egress_privileged[@]}" "$mv_binary" -f "$marker_staged" "$egress_policy_marker_path" || marker_status=1
+  fi
+  "$rm_binary" -f "$marker_temporary"
+  "\${egress_privileged[@]}" "$rm_binary" -f "$marker_staged" >/dev/null 2>&1 || true
+  [[ "$marker_status" = 0 ]]
+}
+invalidate_egress_policy_marker() {
+  local rm_binary
+  [[ -e "$egress_policy_marker_path" ]] || return 0
+  rm_binary="$(find_egress_binary rm || true)"
+  [[ -n "$rm_binary" ]] || return 1
+  set_egress_privileged || return 1
+  "\${egress_privileged[@]}" "$rm_binary" -f "$egress_policy_marker_path" || return 1
+  [[ ! -e "$egress_policy_marker_path" ]]
 }
 disable_egress_lockdown() {
   local nft_binary systemctl_binary rm_binary cleanup_failed=0
@@ -834,7 +886,7 @@ disable_egress_lockdown() {
 }
 `;
   if (mode === "off") {
-    return `${disable}if disable_egress_lockdown; then
+    return `${disable}if invalidate_egress_policy_marker && disable_egress_lockdown; then
   printf '%s\\n' 'crabhelm guest egress: managed lockdown disabled'
 else
   printf '%s\\n' 'crabhelm bootstrap: could not disable the managed egress lockdown' >&2
@@ -992,10 +1044,14 @@ CRABHELM_EGRESS_UNIT
   "$rm_binary" -f "$apply_temporary" "$unit_temporary"
   "\${egress_privileged[@]}" "$rm_binary" -f "$apply_backup" "$unit_backup" >/dev/null 2>&1 || true
 }
-if install_egress_lockdown; then
+install_status=0
+invalidate_egress_policy_marker || install_status=1
+if [[ "$install_status" = 0 ]]; then
+  install_egress_lockdown || install_status=$?
+fi
+if [[ "$install_status" = 0 ]]; then
   printf '%s\\n' 'crabhelm guest egress: outbound restricted to loopback, DNS, NTP, DHCP, and TCP 443; instance metadata blocked'
 else
-  install_status=$?
   if [[ "$install_status" = 2 ]]; then
     printf '%s\\n' 'crabhelm bootstrap: egress lockdown setup failed and prior state could not be restored' >&2
     exit 1
@@ -1018,13 +1074,14 @@ export function bootstrapInstallScript(options: {
   // Tests redirect system paths into a temporary root; production omits this.
   egressPersistenceRoot?: string;
 }): string {
+  const egressLockdown = options.egressLockdown ?? "attempt";
   return `#!/usr/bin/env bash
 set -euo pipefail
 umask 077
 : "\${CRABHELM_BOOTSTRAP_TOKEN:?missing bootstrap token}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-${egressLockdownBlock(options.egressLockdown ?? "attempt", options.egressPersistenceRoot)}auth=(--header "Authorization: Bearer $CRABHELM_BOOTSTRAP_TOKEN")
+${egressLockdownBlock(egressLockdown, options.egressPersistenceRoot)}auth=(--header "Authorization: Bearer $CRABHELM_BOOTSTRAP_TOKEN")
 curl --fail --silent --show-error --location "\${auth[@]}" ${shellQuote(`${options.base}/bundle.tgz`)} -o "$work/bundle.tgz"
 actual_archive_sha256="$(sha256sum "$work/bundle.tgz")"
 actual_archive_sha256="\${actual_archive_sha256%% *}"
@@ -1045,12 +1102,20 @@ export CRABHELM_MODEL=${shellQuote(options.model)}
 export CRABHELM_SLACK_ENABLED=${shellQuote(options.slack)}
 export CRABHELM_CREDENTIALS_GENERATION=${shellQuote(String(options.credentialsGeneration))}
 /bin/bash "$work/bundle/guest-install.sh"
+if ! write_egress_policy_marker && set_egress_privileged; then
+  printf '%s\\n' 'crabhelm bootstrap: could not record the privileged egress policy state' >&2
+  exit 1
+fi
 marker_dir="$HOME/.openclaw"
 install -d -m 0700 "$marker_dir"
 marker_temporary="$marker_dir/crabhelm-credentials-generation.new-$$"
 printf 'c%s\\n' ${shellQuote(String(options.credentialsGeneration))} >"$marker_temporary"
 chmod 0600 "$marker_temporary"
 mv -f "$marker_temporary" "$marker_dir/crabhelm-credentials-generation"
+marker_temporary="$marker_dir/crabhelm-egress-policy.new-$$"
+printf '%s\\n' ${shellQuote(`v${EGRESS_POLICY_VERSION}:${egressLockdown}`)} >"$marker_temporary"
+chmod 0600 "$marker_temporary"
+mv -f "$marker_temporary" "$marker_dir/crabhelm-egress-policy"
 `;
 }
 

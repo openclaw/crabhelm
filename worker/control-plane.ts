@@ -23,7 +23,7 @@ import type {
   PolicyTemplate,
   UpdateClawInput,
 } from "../src/types.js";
-import { CrabboxWorkspaceBootstrap } from "./bootstrap.js";
+import { CrabboxWorkspaceBootstrap, normalizeEgressLockdownMode } from "./bootstrap.js";
 import { DurableObjectStateDatabase } from "./state.js";
 import { GovernanceController } from "./governance-controller.js";
 import { signClaims } from "./security.js";
@@ -69,6 +69,7 @@ export class CrabhelmControlPlane extends DurableObject<Env> {
         releaseId: env.APPLIANCE_MANIFEST_SHA256,
         archiveId: env.APPLIANCE_ARCHIVE_SHA256,
         signingSecret: env.BOOTSTRAP_SIGNING_SECRET,
+        egressLockdown: normalizeEgressLockdownMode(env.CRABHELM_EGRESS_LOCKDOWN),
         coordinators: env.CLAW_COORDINATOR,
       }),
     });
