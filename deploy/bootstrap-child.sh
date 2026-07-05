@@ -17,6 +17,7 @@ parent_tls="${CRABHELM_PARENT_TLS:-true}"
 parent_tls_fingerprint="${CRABHELM_PARENT_TLS_FINGERPRINT:-}"
 standalone="${CRABHELM_STANDALONE:-false}"
 model="${CRABHELM_MODEL:-openai/gpt-5.5}"
+model_base_url="${CRABHELM_MODEL_BASE_URL:-}"
 slack_enabled="${CRABHELM_SLACK_ENABLED:-false}"
 openclaw_binary="${CRABHELM_OPENCLAW_BINARY:-$(command -v openclaw || true)}"
 curl_binary="${CRABHELM_CURL_BINARY:-$(command -v curl || true)}"
@@ -36,6 +37,9 @@ fi
 [[ "$slack_plugin_tarball" = /* && -f "$slack_plugin_tarball" && ! -L "$slack_plugin_tarball" ]] || die "Slack plugin tarball must be a regular absolute path"
 [[ "$slack_plugin_sha256" =~ ^[0-9a-f]{64}$ ]] || die "invalid Slack plugin digest"
 [[ "$model" =~ ^[a-z0-9][a-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:-]*$ ]] || die "invalid inference model"
+if [[ -n "$model_base_url" ]]; then
+  [[ "$model_base_url" =~ ^https://[A-Za-z0-9._-]+(:[0-9]+)?/[A-Za-z0-9._/-]*$ ]] || die "invalid model base URL"
+fi
 [[ "$slack_enabled" = "true" || "$slack_enabled" = "false" ]] || die "invalid Slack desired state"
 if [[ "$standalone" = "true" ]]; then
   :
@@ -71,6 +75,20 @@ actual_runtime_bridge_sha256="$(sha256sum "$runtime_bridge" | awk '{print $1}')"
 "$openclaw_binary" config set plugins.entries.crabhelm.config.childId "$child_id"
 "$openclaw_binary" config set plugins.entries.crabhelm.hooks.allowPromptInjection true --strict-json
 "$openclaw_binary" config set agents.defaults.model.primary "$model"
+# Edge model proxy: reroute the built-in openai provider through Crabhelm so the
+# child uses its per-claw model token (delivered as OPENAI_API_KEY) against the
+# Worker instead of calling the provider directly with a raw key. Overriding
+# models.providers.openai.baseUrl is required for built-in openai/* models; the
+# OPENAI_BASE_URL env alone does not reroute them.
+if [[ -n "$model_base_url" ]]; then
+  "$openclaw_binary" config set models.providers.openai.baseUrl "$model_base_url"
+else
+  # A proxy rollback must remove the managed override before the raw provider
+  # key is restored, otherwise this claw remains pointed at the edge route.
+  if "$openclaw_binary" config get models.providers.openai.baseUrl >/dev/null 2>&1; then
+    "$openclaw_binary" config unset models.providers.openai.baseUrl
+  fi
+fi
 "$openclaw_binary" config set agents.defaults.workspace "${OPENCLAW_STATE_DIR:-${HOME:-/tmp}/.openclaw}/workspace"
 "$openclaw_binary" config set channels.slack.enabled "$slack_enabled" --strict-json
 "$openclaw_binary" config set channels.slack.mode socket

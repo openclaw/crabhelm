@@ -778,6 +778,7 @@ export function bootstrapInstallScript(options: {
   model: string;
   slack: string;
   credentialsGeneration: number;
+  modelBaseUrl?: string;
 }): string {
   return `#!/usr/bin/env bash
 set -euo pipefail
@@ -806,7 +807,7 @@ export CRABHELM_STANDALONE=true
 export CRABHELM_MODEL=${shellQuote(options.model)}
 export CRABHELM_SLACK_ENABLED=${shellQuote(options.slack)}
 export CRABHELM_CREDENTIALS_GENERATION=${shellQuote(String(options.credentialsGeneration))}
-/bin/bash "$work/bundle/guest-install.sh"
+${options.modelBaseUrl ? `export CRABHELM_MODEL_BASE_URL=${shellQuote(options.modelBaseUrl)}\n` : ""}/bin/bash "$work/bundle/guest-install.sh"
 marker_dir="$HOME/.openclaw"
 install -d -m 0700 "$marker_dir"
 marker_temporary="$marker_dir/crabhelm-credentials-generation.new-$$"

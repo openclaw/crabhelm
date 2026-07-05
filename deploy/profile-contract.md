@@ -33,5 +33,6 @@ Provider allocation, echoed shell source, or a process existing is insufficient.
 - Child Gateway binds loopback only.
 - Raw probe output stays in the workspace and is never projected into Crabhelm state.
 - The owner-only runtime workload credential enters the bridge through an inherited file descriptor, expires after ten minutes, and rotates through a one-use refresh fence. Owner-only persistence permits restart recovery; turn processes use the loopback Gateway and receive neither workload nor model-provider credentials.
+- Model access: by default the child receives the raw `OPENAI_API_KEY`. With the edge model proxy enabled (`CRABHELM_MODEL_PROXY=on`), the child instead receives a per-claw model token as `OPENAI_API_KEY` plus `CRABHELM_MODEL_BASE_URL`, and `bootstrap-child.sh` sets `models.providers.openai.baseUrl` so the built-in `openai/*` provider is rerouted through the Worker; the raw provider key never enters the child.
 - Slack and provider OAuth credentials never enter the child.
 - Changed desired model invalidates the inference marker and forces another live probe.

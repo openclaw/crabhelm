@@ -237,7 +237,7 @@ test("generated installer re-fetches credentials and records the epoch marker", 
     path.join(fixtures, "bundle", "guest-install.sh"),
     `#!/usr/bin/env bash
 set -euo pipefail
-printf 'gen=%s release=%s model=%s credentials=%s\\n' "$CRABHELM_CREDENTIALS_GENERATION" "$CRABHELM_RELEASE_ID" "$CRABHELM_MODEL" "$(head -n 1 "$CRABHELM_CREDENTIAL_FILE")" >>"$CRABHELM_TEST_LOG"
+printf 'gen=%s release=%s base=%s model=%s credentials=%s\\n' "$CRABHELM_CREDENTIALS_GENERATION" "$CRABHELM_RELEASE_ID" "$CRABHELM_MODEL_BASE_URL" "$CRABHELM_MODEL" "$(head -n 1 "$CRABHELM_CREDENTIAL_FILE")" >>"$CRABHELM_TEST_LOG"
 `,
     { mode: 0o755 },
   );
@@ -279,6 +279,7 @@ esac
     model: "openai/gpt-5.5",
     slack: "false",
     credentialsGeneration: 4,
+    modelBaseUrl: "https://crabhelm-runtime.example.test/model/v1",
   });
   await run("/bin/bash", ["-n", "-c", script]);
   assert.ok(
@@ -297,7 +298,7 @@ esac
   });
   assert.equal(
     await readFile(guestLog, "utf8"),
-    `gen=4 release=${"e".repeat(64)}.${archiveId}.${"f".repeat(64)} model=openai/gpt-5.5 credentials=OPENAI_API_KEY=rotated-epoch-secret\n`,
+    `gen=4 release=${"e".repeat(64)}.${archiveId}.${"f".repeat(64)} base=https://crabhelm-runtime.example.test/model/v1 model=openai/gpt-5.5 credentials=OPENAI_API_KEY=rotated-epoch-secret\n`,
   );
   const marker = path.join(home, ".openclaw", "crabhelm-credentials-generation");
   assert.equal(await readFile(marker, "utf8"), "c4\n");

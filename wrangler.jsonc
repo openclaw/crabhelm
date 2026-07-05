@@ -14,7 +14,7 @@
     "directory": "./web",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/bootstrap/*", "/slack/*", "/healthz"]
+    "run_worker_first": ["/api/*", "/bootstrap/*", "/model/*", "/slack/*", "/healthz"]
   },
   "durable_objects": {
     "bindings": [
@@ -50,6 +50,7 @@
     "CRABBOX_PROFILE": "openclaw-core",
     "CRABBOX_TTL_SECONDS": "14400",
     "CRABBOX_IDLE_TIMEOUT_SECONDS": "14400",
+    "CRABHELM_MODEL_PROXY": "off",
     "NODE_RUNTIME_SHA256": "9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578",
     "APPLIANCE_ARCHIVE_SHA256": "543da38f97d6847a092da8ca20dc5b24986952ec0595d661174da2a3d05e4d2c",
     "APPLIANCE_MANIFEST_SHA256": "886e1d118dbfef7474ad7462f0a31cc88237ec7a16d3ad996a4fb0fa0362069e"

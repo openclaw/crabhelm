@@ -34,10 +34,19 @@ describe("worker router in workerd", () => {
   });
 
   it("keeps runtime-plane routes off the console host", async () => {
-    for (const path of ["/slack/events", "/api/runtime/ticket", `/bootstrap/${CHILD_ID}/install.sh`]) {
+    for (const path of ["/slack/events", "/api/runtime/ticket", `/bootstrap/${CHILD_ID}/install.sh`, "/model/v1/models"]) {
       const response = await SELF.fetch(`${CONSOLE}${path}`, { method: "POST" });
       expect(response.status).toBe(404);
     }
+  });
+
+  it("routes model traffic through the Worker only on the runtime host", async () => {
+    const response = await SELF.fetch(`${RUNTIME}/model/v1/models`);
+    expect(response.status).toBe(503);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect(await response.json()).toMatchObject({
+      error: { type: "crabhelm_model_proxy" },
+    });
   });
 
   it("requires a bootstrap bearer for appliance delivery on the runtime host", async () => {
