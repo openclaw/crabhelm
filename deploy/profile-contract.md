@@ -12,13 +12,13 @@ The installer receives:
 - child UUID;
 - exact desired inference model;
 - an owner-only credential file with `OPENAI_API_KEY`, child id, control URL, and audience-bound runtime token;
-- verified OpenClaw, Crabhelm, Slack, bootstrap, and installer artifacts.
+- verified OpenClaw, Crabhelm, Slack, `diagnostics-otel`, bootstrap, and installer artifacts.
 
 ## Installation
 
 `guest-install.sh` verifies the manifest contract and every artifact digest before installing anything. Privileged npm runs through an empty environment. The installer activates credentials only after packages and plugins are installed, then delegates to `bootstrap-child.sh`.
 
-`bootstrap-child.sh` writes the exact model, plugin allowlist, child UUID, loopback Gateway mode, and auth mode. In Cloudflare standalone mode it starts the local Gateway and installs a private idempotent runtime-bridge launcher, then writes the complete manifest/archive/Node release identity to `~/.openclaw/crabhelm-ready` after `/readyz` succeeds. Legacy outbound node enrollment remains available only when standalone mode is off.
+`bootstrap-child.sh` writes the exact model, plugin allowlist, child UUID, loopback Gateway mode, auth mode, and optional metadata-only OTLP policy. In Cloudflare standalone mode it starts the local Gateway and installs a private idempotent runtime-bridge launcher, then writes the complete manifest/archive/Node release identity plus managed bootstrap-policy hash to `~/.openclaw/crabhelm-ready` after `/readyz` succeeds. Legacy outbound node enrollment remains available only when standalone mode is off.
 
 ## Live proof
 

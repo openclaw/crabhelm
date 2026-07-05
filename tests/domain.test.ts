@@ -21,6 +21,8 @@ test("creates an independent child-core desired state with safe defaults", () =>
   assert.equal(claw.desired.channels.slack.mode, "socket");
   assert.equal(claw.desired.observability.metadataOnly, true);
   assert.equal(claw.desired.observability.logLevel, "info");
+  assert.equal(claw.desired.observability.otel.enabled, false);
+  assert.equal(claw.desired.observability.otel.serviceName, "crabhelm-ada-s-maintainer-claw");
   assert.equal(claw.observed.controlLink.status, "pending");
   assert.equal(claw.observed.controlLink.transport, "openclaw-node");
   assert.equal(claw.observed.controlLink.command, "crabhelm.child.status");
@@ -36,6 +38,43 @@ test("child policy hash covers managed access and logging policy", () => {
     observability: { logLevel: "debug" },
   });
   assert.notEqual(childPolicyHash(updated), childPolicyHash(claw));
+});
+
+test("validates and hashes managed OpenTelemetry policy", () => {
+  const claw = createClawRecord({
+    name: "Observed",
+    owner: { subject: "github:observed", label: "@observed", source: "github" },
+  });
+  const enabled = updateClawRecord(claw, {
+    observability: {
+      otel: {
+        enabled: true,
+        endpoint: "https://otel.example.test/v1",
+        traces: true,
+        metrics: true,
+        logs: false,
+        sampleRate: 0.2,
+      },
+    },
+  });
+  assert.equal(enabled.desired.observability.otel.endpoint, "https://otel.example.test/v1");
+  assert.notEqual(childPolicyHash(enabled), childPolicyHash(claw));
+  assert.throws(
+    () => updateClawRecord(claw, { observability: { otel: { enabled: true, endpoint: "http://collector.test:4318" } } }),
+    /HTTPS URL/,
+  );
+  assert.throws(
+    () => updateClawRecord(claw, { observability: { otel: { enabled: true, endpoint: "https://collector.test", traces: false, metrics: false } } }),
+    /requires traces, metrics, or both/,
+  );
+  for (const field of ["enabled", "traces", "metrics"] as const) {
+    assert.throws(
+      () => updateClawRecord(claw, {
+        observability: { otel: { [field]: "false" as unknown as boolean } },
+      }),
+      new RegExp(`${field} must be a boolean`),
+    );
+  }
 });
 
 test("desired updates advance generation and preserve identity", () => {

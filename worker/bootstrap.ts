@@ -4,7 +4,7 @@ import type {
   DrainResult,
   RevokeControlResult,
 } from "../src/types.js";
-import { clawCredentialsGeneration } from "../src/domain.js";
+import { clawCredentialsGeneration, standaloneBootstrapHash } from "../src/domain.js";
 import { timingSafeEqual } from "node:crypto";
 
 const encoder = new TextEncoder();
@@ -33,6 +33,7 @@ type WorkspaceTerminalState =
   | "install-failed-npm-tool"
   | "install-failed-sha256"
   | "install-failed-unknown"
+  | "policy-upgrade-required"
   | "pending"
   | "binary-failed"
   | "runtime-failed"
@@ -86,6 +87,7 @@ export class CrabboxWorkspaceBootstrap {
   }
 
   async #launchCommand(claw: ClawRecord): Promise<string> {
+    const policyHash = standaloneBootstrapHash(claw);
     const release = this.#release(claw);
     const token = await bootstrapToken(
       this.#signingSecret,
@@ -102,11 +104,13 @@ export class CrabboxWorkspaceBootstrap {
     );
     installUrl.searchParams.set("model", claw.desired.inference.model);
     installUrl.searchParams.set("slack", "false");
+    installUrl.searchParams.set("policyHash", policyHash);
     if (credentialsGeneration > 1) {
       installUrl.searchParams.set("credentials", String(credentialsGeneration));
     }
     return [
       `CRABHELM_BOOTSTRAP_TOKEN=${shellQuote(token)}`,
+      `CRABHELM_POLICY_HASH=${shellQuote(policyHash)}`,
       "nohup",
       "bash",
       "-c",
@@ -120,10 +124,12 @@ export class CrabboxWorkspaceBootstrap {
   #retryMarker(claw: ClawRecord): string {
     const release = this.#release(claw);
     const credentialsGeneration = clawCredentialsGeneration(claw);
-    const releaseId = releaseMarker(release);
-    return credentialsGeneration > 1
-      ? `/tmp/crabhelm-attempt-${releaseId}-c${credentialsGeneration}`
-      : `/tmp/crabhelm-attempt-${releaseId}`;
+    const base = `/tmp/crabhelm-attempt-${releaseMarker(release)}-${standaloneBootstrapHash(claw)}`;
+    return credentialsGeneration > 1 ? `${base}-c${credentialsGeneration}` : base;
+  }
+
+  #readyId(claw: ClawRecord): string {
+    return `${releaseMarker(this.#release(claw))}:${standaloneBootstrapHash(claw)}`;
   }
 
   #release(claw: ClawRecord): { releaseId: string; archiveId: string; nodeId: string } {
@@ -152,12 +158,15 @@ export class CrabboxWorkspaceBootstrap {
         releaseMarker(release),
         release.nodeId,
         credentialsGeneration,
+        standaloneBootstrapHash(claw),
         bootstrapStatusCommand(
           await this.#launchCommand(claw),
           probeLabel,
           this.#retryMarker(claw),
-          releaseMarker(release),
+          this.#readyId(claw),
           credentialsGeneration,
+          legacyReadinessCompatible(claw) ? releaseMarker(release) : "",
+          legacyReadinessCompatible(claw) ? "" : releaseMarker(release),
         ),
         probeLabel,
       );
@@ -217,6 +226,8 @@ export class CrabboxWorkspaceBootstrap {
         ? "Workspace ready; appliance host lacks sha256sum"
         : result === "install-failed-unknown"
         ? "Workspace ready; appliance installation failed"
+        : result === "policy-upgrade-required"
+        ? "Workspace ready; managed observability requires the policy-aware appliance release"
         : result === "config-failed"
         ? "Workspace ready; exact model configuration failed"
         : result === "binary-failed"
@@ -392,6 +403,7 @@ async function inspectTerminal(
   releaseId: string,
   nodeId: string,
   credentialsGeneration: number,
+  policyHash: string,
   statusCommand: string,
   probeLabel: string,
 ): Promise<WorkspaceTerminalState> {
@@ -432,7 +444,7 @@ async function inspectTerminal(
         finish("ready");
       } else if (hasTerminalLine(output, `${probeLabel}_READY`) && !probeSent) {
         probeSent = true;
-        socket.send(`${inferenceProbeCommand(model, releaseId, nodeId, `${probeLabel}_INFERENCE`, credentialsGeneration)}\n`);
+        socket.send(`${inferenceProbeCommand(model, releaseId, nodeId, `${probeLabel}_INFERENCE`, credentialsGeneration, policyHash)}\n`);
       } else if (
         hasTerminalLine(output, `${probeLabel}_STARTED`) ||
         hasTerminalLine(output, `${probeLabel}_INSTALLING`)
@@ -476,6 +488,8 @@ async function inspectTerminal(
         finish("install-failed-sha256");
       } else if (hasTerminalLine(output, `${probeLabel}_INSTALL_FAILED_UNKNOWN`)) {
         finish("install-failed-unknown");
+      } else if (hasTerminalLine(output, `${probeLabel}_POLICY_UPGRADE_REQUIRED`)) {
+        finish("policy-upgrade-required");
       } else {
         const failure = terminalInferenceFailure(output, `${probeLabel}_INFERENCE`);
         if (failure) finish(failure);
@@ -567,22 +581,31 @@ export function bootstrapStatusCommand(
   retryMarker = "",
   releaseId = "",
   credentialsGeneration = 1,
+  legacyReadyId = "",
+  incompatibleLegacyId = "",
 ): string {
+  const readyIds = [releaseId, legacyReadyId].filter(Boolean);
   // Past epoch 1, readiness additionally requires the credential marker the
   // installer writes after re-fetching credentials.env, so a rotation drives
   // one release-keyed in-place reinstall before the claw reports ready again.
   const credentialCheck = credentialsGeneration > 1
     ? ` && grep -Fqx ${shellQuote(`c${credentialsGeneration}`)} "$HOME/.openclaw/crabhelm-credentials-generation" 2>/dev/null`
     : "";
-  const readyCheck = releaseId
-    ? `grep -Fqx ${shellQuote(releaseId)} "$HOME/.openclaw/crabhelm-ready" 2>/dev/null${credentialCheck}`
-    : "test -f \"$HOME/.openclaw/crabhelm-ready\"";
+  const readyCheck = readyIds.length > 0
+    ? `{ ${readyIds.map((id) => `grep -Fqx ${shellQuote(id)} "$HOME/.openclaw/crabhelm-ready" 2>/dev/null`).join(" || ")}; }${credentialCheck}`
+    : `test -f "$HOME/.openclaw/crabhelm-ready"${credentialCheck}`;
   const command = [
     `status_label=${shellQuote(statusLabel)}`,
     `if ${readyCheck}; then`,
     ...(retryMarker ? [`  rm -f ${shellQuote(retryMarker)} ${shellQuote(`${retryMarker}.retry`)} ${shellQuote(`${retryMarker}.retry2`)}`] : []),
     "  printf '%s_READY\\n' \"$status_label\"",
   ];
+  if (incompatibleLegacyId) {
+    command.push(
+      `elif grep -Fqx ${shellQuote(incompatibleLegacyId)} "$HOME/.openclaw/crabhelm-ready" 2>/dev/null; then`,
+      "  printf '%s_POLICY_UPGRADE_REQUIRED\\n' \"$status_label\"",
+    );
+  }
   if (launchCommand && retryMarker) {
     command.push(
       `elif test ! -e ${shellQuote(retryMarker)} && { pgrep -f '[g]uest-install.sh' >/dev/null || pgrep -f '[b]ootstrap-child.sh' >/dev/null; }; then`,
@@ -687,20 +710,33 @@ export function bootstrapStatusCommand(
   return command.join("\n");
 }
 
+function legacyReadinessCompatible(claw: ClawRecord): boolean {
+  return claw.desired.observability.logLevel === "info" && !claw.desired.observability.otel.enabled;
+}
+
 export function inferenceProbeCommand(
   model: string,
   releaseId: string,
   nodeId: string,
   probeLabel = "CRABHELM_INFERENCE",
   credentialsGeneration = 1,
+  policyHash = "",
 ): string {
   if (!/^[0-9a-f]{64}\.[0-9a-f]{64}\.[0-9a-f]{64}$/u.test(releaseId) || !/^[0-9a-f]{64}$/u.test(nodeId)) {
     throw new Error("inference probe release identity is invalid");
   }
+  if (policyHash && !/^[0-9a-f]{64}$/u.test(policyHash)) {
+    throw new Error("inference probe policy identity is invalid");
+  }
   const marker = "$HOME/.openclaw/crabhelm-inference-ready";
-  const markerValue = credentialsGeneration > 1
-    ? `v4:${releaseId}:c${credentialsGeneration}:${model}`
-    : `v3:${releaseId}:${model}`;
+  const identity = policyHash ? `${releaseId}:p${policyHash}` : releaseId;
+  const markerValue = policyHash
+    ? credentialsGeneration > 1
+      ? `v5:${identity}:c${credentialsGeneration}:${model}`
+      : `v5:${identity}:${model}`
+    : credentialsGeneration > 1
+      ? `v4:${releaseId}:c${credentialsGeneration}:${model}`
+      : `v3:${releaseId}:${model}`;
   const output = "/tmp/crabhelm-inference-probe.json";
   const error = "/tmp/crabhelm-inference-probe.err";
   const runtimeLauncher = "$HOME/.local/share/crabhelm/runtime/start-runtime-bridge.sh";
@@ -778,8 +814,12 @@ export function bootstrapInstallScript(options: {
   model: string;
   slack: string;
   credentialsGeneration: number;
+  policyHash: string;
   modelBaseUrl?: string;
 }): string {
+  const managedSpecUrl = new URL(`${options.base}/managed-spec.json`);
+  managedSpecUrl.searchParams.set("model", options.model);
+  managedSpecUrl.searchParams.set("policyHash", options.policyHash);
   return `#!/usr/bin/env bash
 set -euo pipefail
 umask 077
@@ -794,7 +834,7 @@ actual_archive_sha256="\${actual_archive_sha256%% *}"
 tar -xzf "$work/bundle.tgz" -C "$work"
 curl --fail --silent --show-error --location "\${auth[@]}" ${shellQuote(`${options.base}/credentials.env`)} -o "$work/credentials.env"
 chmod 0600 "$work/credentials.env"
-curl --fail --silent --show-error --location "\${auth[@]}" ${shellQuote(`${options.base}/managed-spec.json`)} -o "$work/managed-spec.json"
+curl --fail --silent --show-error --location "\${auth[@]}" ${shellQuote(managedSpecUrl.toString())} -o "$work/managed-spec.json"
 chmod 0600 "$work/managed-spec.json"
 export CRABHELM_BUNDLE_MANIFEST_SHA256=${shellQuote(options.releaseId)}
 export CRABHELM_NODE_SHA256=${shellQuote(options.nodeSha256)}
@@ -802,6 +842,7 @@ export CRABHELM_RELEASE_ID=${shellQuote(`${options.releaseId}.${options.archiveI
 export CRABHELM_CREDENTIAL_FILE="$work/credentials.env"
 export CRABHELM_CREDENTIAL_REFRESH_URL=${shellQuote(`${options.base}/credentials.env`)}
 export CRABHELM_MANAGED_SPEC_FILE="$work/managed-spec.json"
+export CRABHELM_POLICY_HASH=${shellQuote(options.policyHash)}
 export CRABBOX_ADAPTER_ROOT_SESSION_ID=${shellQuote(options.childId)}
 export CRABHELM_STANDALONE=true
 export CRABHELM_MODEL=${shellQuote(options.model)}

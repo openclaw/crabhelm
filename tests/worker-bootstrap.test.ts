@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { createClawRecord, rotateClawCredentials } from "../src/domain.js";
+import { createClawRecord, rotateClawCredentials, standaloneBootstrapHash } from "../src/domain.js";
 import {
   bootstrapInstallScript,
   bootstrapStatusCommand,
@@ -37,7 +37,9 @@ test("Cloudflare workspace bootstrap binds child identity, model, and channel st
   });
 
   const command = await bootstrap.command(claw);
-  assert.match(command, new RegExp(`/bootstrap/${claw.id}/install\\.sh\\?model=openai%2Fgpt-5\\.5-mini&slack=false`));
+  assert.match(command, new RegExp(`/bootstrap/${claw.id}/install\\.sh\\?model=openai%2Fgpt-5\\.5-mini&slack=false&policyHash=${standaloneBootstrapHash(claw)}`));
+  assert.match(command, new RegExp(`CRABHELM_POLICY_HASH='${standaloneBootstrapHash(claw)}'`));
+  assert.match(command, new RegExp(`/tmp/crabhelm-attempt-${testReleaseMarker}-${standaloneBootstrapHash(claw)}`));
   assert.doesNotMatch(command, /signing-test-secret|broker-test-token/);
   assert.match(command, /curl .* -o .* && touch/u);
   assert.match(command, /timeout --signal=TERM --kill-after=10s 10m bash/u);
@@ -171,6 +173,43 @@ test("workspace readiness is pinned to the reviewed appliance release", async ()
   assert.ok(status.indexOf("test ! -e '/tmp/retry'") < status.indexOf("elif pgrep -f '[g]uest-install.sh'"));
   await run("/bin/bash", ["-n", "-c", status]);
 });
+test("workspace readiness changes with managed child policy", async () => {
+  const releaseId = "a".repeat(64);
+  const claw = createClawRecord({
+    name: "Observed child",
+    owner: { subject: "github:observed", label: "@observed", source: "github" },
+  });
+  const updated = createClawRecord({
+    name: "Observed child",
+    owner: { subject: "github:observed", label: "@observed", source: "github" },
+    observability: {
+      otel: {
+        enabled: true,
+        endpoint: "https://otel.example.test/v1",
+        traces: true,
+        metrics: true,
+        logs: false,
+      },
+    },
+  });
+  const original = bootstrapStatusCommand("echo launch", "CRABHELM_policy", "/tmp/retry", `${releaseId}:${standaloneBootstrapHash(claw)}`);
+  const changed = bootstrapStatusCommand("echo launch", "CRABHELM_policy", "/tmp/retry", `${releaseId}:${standaloneBootstrapHash(updated)}`);
+  assert.notEqual(original, changed);
+  assert.match(changed, new RegExp(`${releaseId}:${standaloneBootstrapHash(updated)}`));
+  await run("/bin/bash", ["-n", "-c", changed]);
+});
+
+test("legacy appliance readiness is safe during the policy-aware rollout", async () => {
+  const releaseId = "a".repeat(64);
+  const policyReadyId = `${releaseId}:${"b".repeat(64)}`;
+  const compatible = bootstrapStatusCommand("echo launch", "CRABHELM_legacy", "/tmp/retry", policyReadyId, 1, releaseId);
+  assert.match(compatible, new RegExp(`grep -Fqx '${policyReadyId}'.*\\|\\| grep -Fqx '${releaseId}'`));
+  const blocked = bootstrapStatusCommand("echo launch", "CRABHELM_legacy", "/tmp/retry", policyReadyId, 1, "", releaseId);
+  assert.match(blocked, /POLICY_UPGRADE_REQUIRED/u);
+  assert.ok(blocked.indexOf("POLICY_UPGRADE_REQUIRED") < blocked.indexOf("echo launch"));
+  await run("/bin/bash", ["-n", "-c", compatible]);
+  await run("/bin/bash", ["-n", "-c", blocked]);
+});
 
 test("credential rotation re-keys the install marker and bootstrap request", async () => {
   const claw = createClawRecord({
@@ -187,12 +226,13 @@ test("credential rotation re-keys the install marker and bootstrap request", asy
   });
   const initial = await bootstrap.command(claw);
   assert.doesNotMatch(initial, /credentials=/u);
-  assert.ok(initial.includes(`/tmp/crabhelm-attempt-${testReleaseMarker}`));
-  assert.ok(!initial.includes(`/tmp/crabhelm-attempt-${testReleaseMarker}-c`));
+  assert.ok(initial.includes(`/tmp/crabhelm-attempt-${testReleaseMarker}-${standaloneBootstrapHash(claw)}`));
+  assert.ok(!initial.includes(`/tmp/crabhelm-attempt-${testReleaseMarker}-${standaloneBootstrapHash(claw)}-c`));
 
-  const rotated = await bootstrap.command(rotateClawCredentials(claw));
-  assert.match(rotated, /install\.sh\?model=[^']+&slack=false&credentials=2/u);
-  assert.ok(rotated.includes(`/tmp/crabhelm-attempt-${testReleaseMarker}-c2`));
+  const rotatedClaw = rotateClawCredentials(claw);
+  const rotated = await bootstrap.command(rotatedClaw);
+  assert.match(rotated, /install\.sh\?model=[^']+&slack=false&policyHash=[0-9a-f]{64}&credentials=2/u);
+  assert.ok(rotated.includes(`/tmp/crabhelm-attempt-${testReleaseMarker}-${standaloneBootstrapHash(rotatedClaw)}-c2`));
 });
 
 test("readiness past epoch one requires the credential re-delivery marker", async () => {
@@ -262,7 +302,7 @@ done
 case "$url" in
   */bundle.tgz) cp ${JSON.stringify(path.join(fixtures, "bundle.tgz"))} "$dest" ;;
   */credentials.env) printf 'OPENAI_API_KEY=rotated-epoch-secret\\n' >"$dest" ;;
-  */managed-spec.json) printf '{}\\n' >"$dest" ;;
+  */managed-spec.json*) printf '{}\\n' >"$dest" ;;
   *) exit 22 ;;
 esac
 `,
@@ -279,6 +319,7 @@ esac
     model: "openai/gpt-5.5",
     slack: "false",
     credentialsGeneration: 4,
+    policyHash: "a".repeat(64),
     modelBaseUrl: "https://crabhelm-runtime.example.test/model/v1",
   });
   await run("/bin/bash", ["-n", "-c", script]);
@@ -303,4 +344,15 @@ esac
   const marker = path.join(home, ".openclaw", "crabhelm-credentials-generation");
   assert.equal(await readFile(marker, "utf8"), "c4\n");
   assert.equal(((await stat(marker)).mode & 0o777), 0o600);
+});
+
+test("live inference proof is re-keyed by managed policy", async () => {
+  const first = "a".repeat(64);
+  const second = "b".repeat(64);
+  const original = inferenceProbeCommand("openai/gpt-5.5", testReleaseMarker, testNodeId, "CRABHELM_INFERENCE", 1, first);
+  const changed = inferenceProbeCommand("openai/gpt-5.5", testReleaseMarker, testNodeId, "CRABHELM_INFERENCE", 1, second);
+  assert.notEqual(original, changed);
+  assert.ok(original.includes(`'v5:${testReleaseMarker}:p${first}:openai/gpt-5.5'`));
+  assert.ok(changed.includes(`'v5:${testReleaseMarker}:p${second}:openai/gpt-5.5'`));
+  await run("/bin/bash", ["-n", "-c", changed]);
 });

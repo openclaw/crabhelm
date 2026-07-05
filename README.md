@@ -60,6 +60,7 @@ deploy/crabbox-profile/build-bundle.sh \
   --node-tarball /absolute/node-v22.23.1-linux-x64.tar.xz \
   --openclaw-tarball /absolute/openclaw.tgz \
   --slack-tarball /absolute/slack.tgz \
+  --otel-tarball /absolute/diagnostics-otel.tgz \
   --output /tmp/crabhelm-bundle
 tar -C /tmp -s '|^crabhelm-bundle|bundle|' \
   -czf /tmp/crabhelm-bundle.tgz crabhelm-bundle
@@ -83,6 +84,28 @@ Open <http://127.0.0.1:4177>. Local development uses an explicitly labeled simul
 By default a claw is delivered the raw `OPENAI_API_KEY`. Setting the `CRABHELM_MODEL_PROXY` Worker var to `on` (and putting the `MODEL_SIGNING_SECRET` secret) instead delivers a per-claw, audience-bound model token plus an edge base URL, and reroutes the child's OpenClaw OpenAI provider through `https://crabhelm-runtime.openclaw.ai/model/v1`. The Worker verifies the token, strips the caller's authorization, injects the real provider key, and forwards to a single fixed upstream over an allowlisted set of endpoints. The raw provider key never reaches the agent VM, and each claw's access is independently scoped and bounded to its substrate lifetime rather than sharing one fleet-wide credential.
 
 This is experimental and default-off. First enablement requires an appliance built from this version; after that appliance is pinned, change modes by rotating each claw's credential epoch so the managed provider base URL and credential are reinstalled together. The proxy continues accepting previously issued model tokens while new issuance is off, allowing a rolling rollback; keep `MODEL_SIGNING_SECRET` configured through the longest previously issued token lifetime (four hours by default, at most 24 hours). Confirm the existing live inference probe on staging before enabling in production.
+
+## Managed OpenTelemetry
+
+Administrators can set per-claw trace and metric export through `PATCH /api/claws/<id>` or the service-bound admin RPC. Supply an HTTPS OTLP base endpoint; Crabhelm appends `/v1/traces` and `/v1/metrics`, keeps OTLP logs and all prompt/response/tool/system-prompt capture disabled, and requires at least one of traces or metrics when export is enabled.
+
+```json
+{
+  "observability": {
+    "otel": {
+      "enabled": true,
+      "endpoint": "https://collector.example.com/otlp",
+      "serviceName": "crabhelm-research",
+      "traces": true,
+      "metrics": true,
+      "sampleRate": 0.1,
+      "flushIntervalMs": 60000
+    }
+  }
+}
+```
+
+The current contract intentionally has no collector-auth header field; use an approved authenticated network endpoint or gateway rather than putting credentials in the URL. Enabling this for the first time requires an appliance containing the pinned offline `diagnostics-otel` plugin.
 
 ## Testing
 

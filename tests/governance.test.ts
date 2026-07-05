@@ -57,12 +57,14 @@ test("actor resolution uses requester first and explicit service fallback", () =
 
 test("managed specs contain only approved, eligible skill artifacts", () => {
   const owner = createPrincipalRecord({ subject: "github:alice", label: "Alice", departments: ["engineering"] });
+  const claw = createClawRecord({ name: "Alice agent", owner: { subject: "github:alice", label: "Alice", source: "github" } });
   const skill = { ...createSkillRecord({ name: "Deploy read", departments: ["engineering"], files: [{ path: "SKILL.md", content: "# Deploy read" }] }, owner.id), status: "approved" as const };
   const persona = createPersonaRecord({ name: "Alice agent", kind: "personal", ownerPrincipalId: owner.id, clawId: "claw", skillIds: [skill.id] });
-  const spec = buildManagedAgentSpec({ persona, owner, skills: [skill] });
+  const spec = buildManagedAgentSpec({ persona, owner, skills: [skill], observability: claw.desired.observability });
   assert.equal(spec.readOnly, true);
   assert.equal(spec.skills[0]?.digest, skill.digest);
   assert.equal(spec.skills[0]?.files[0]?.path, "SKILL.md");
+  assert.equal(spec.observability.otel.enabled, false);
 });
 
 test("confirmation decisions are requester-bound and one-use", async () => {

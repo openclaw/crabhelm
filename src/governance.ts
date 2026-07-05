@@ -18,6 +18,7 @@ import type {
   SkillRecord,
   UpdatePersonaInput,
 } from "./governance-types.js";
+import type { ObservabilityPolicy } from "./types.js";
 
 const subjectPattern = /^[a-zA-Z0-9][a-zA-Z0-9_.:@/+\-]{0,199}$/u;
 const slugPattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
@@ -297,6 +298,7 @@ export function buildManagedAgentSpec(input: {
   persona: PersonaRecord;
   owner: PrincipalRecord;
   skills: SkillRecord[];
+  observability: ObservabilityPolicy;
   now?: Date;
 }): ManagedAgentSpec {
   const selected = input.persona.skillIds.map((id) => {
@@ -333,6 +335,11 @@ export function buildManagedAgentSpec(input: {
     capabilityIds: input.persona.capabilityIds,
     instructions: input.persona.instructions,
     publishedContext: input.persona.publishedContext,
+    observability: {
+      logLevel: input.observability.logLevel,
+      metadataOnly: true,
+      otel: input.observability.otel,
+    },
     skills: selected,
     readOnly: true,
   };
