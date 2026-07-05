@@ -132,6 +132,7 @@ export class CrabboxWorkspaceBootstrap {
         workspace.attachUrl,
         this.#brokerToken,
         claw.desired.inference.model,
+        credentialsGeneration,
         bootstrapStatusCommand(
           await this.#launchCommand(claw),
           probeLabel,
@@ -362,6 +363,7 @@ async function inspectTerminal(
   attachUrl: string,
   brokerToken: string,
   model: string,
+  credentialsGeneration: number,
   statusCommand: string,
   probeLabel: string,
 ): Promise<WorkspaceTerminalState> {
@@ -402,7 +404,7 @@ async function inspectTerminal(
         finish("ready");
       } else if (hasTerminalLine(output, `${probeLabel}_READY`) && !probeSent) {
         probeSent = true;
-        socket.send(`${inferenceProbeCommand(model, `${probeLabel}_INFERENCE`)}\n`);
+        socket.send(`${inferenceProbeCommand(model, `${probeLabel}_INFERENCE`, credentialsGeneration)}\n`);
       } else if (
         hasTerminalLine(output, `${probeLabel}_STARTED`) ||
         hasTerminalLine(output, `${probeLabel}_INSTALLING`)
@@ -659,9 +661,15 @@ export function bootstrapStatusCommand(
 export function inferenceProbeCommand(
   model: string,
   probeLabel = "CRABHELM_INFERENCE",
+  credentialsGeneration = 1,
 ): string {
   const marker = "$HOME/.openclaw/crabhelm-inference-ready";
-  const markerValue = `v2:${model}`;
+  // Preserve the epoch-one marker for the existing fleet. Rotated credentials
+  // use a new version with the epoch before the model, avoiding collisions with
+  // legacy model identifiers that contain colons.
+  const markerValue = credentialsGeneration > 1
+    ? `v3:c${credentialsGeneration}:${model}`
+    : `v2:${model}`;
   const output = "/tmp/crabhelm-inference-probe.json";
   const error = "/tmp/crabhelm-inference-probe.err";
   const runtimeLauncher = "$HOME/.local/share/crabhelm/runtime/start-runtime-bridge.sh";

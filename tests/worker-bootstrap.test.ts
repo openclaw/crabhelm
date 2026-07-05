@@ -95,6 +95,20 @@ test("terminal evidence is bound to a fresh inspection label", async () => {
   await run("/bin/bash", ["-n", "-c", `${status}\n${inference}`]);
 });
 
+test("live inference proof is re-keyed by the credential epoch", async () => {
+  const model = "openai/gpt-5.5";
+  const legacy = inferenceProbeCommand(model);
+  const rotated = inferenceProbeCommand(model, "CRABHELM_INFERENCE", 2);
+  assert.match(legacy, /'v2:openai\/gpt-5\.5'/u);
+  assert.doesNotMatch(legacy, /v3:c/u);
+  assert.match(rotated, /'v3:c2:openai\/gpt-5\.5'/u);
+  assert.doesNotMatch(
+    inferenceProbeCommand("openai/gpt-5.5:c2"),
+    /'v3:c2:openai\/gpt-5\.5'/u,
+  );
+  await run("/bin/bash", ["-n", "-c", rotated]);
+});
+
 test("workspace readiness is pinned to the reviewed appliance release", async () => {
   const releaseId = "a".repeat(64);
   const status = bootstrapStatusCommand("echo launch", "CRABHELM_release", "/tmp/retry", releaseId);
