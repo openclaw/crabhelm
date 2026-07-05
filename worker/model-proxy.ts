@@ -62,10 +62,37 @@ export async function modelCredentialEntries(env: ModelProxyEnv, clawId: string)
 }
 
 export function modelProxyReady(env: ModelProxyEnv): boolean {
-  return modelProxyEnabled(env) &&
-    typeof env.MODEL_SIGNING_SECRET === "string" &&
+  return modelProxyEnabled(env) && modelProxyConfigured(env);
+}
+
+function modelProxyConfigured(env: ModelProxyEnv): boolean {
+  return typeof env.MODEL_SIGNING_SECRET === "string" &&
     new TextEncoder().encode(env.MODEL_SIGNING_SECRET).byteLength >= 32 &&
     Boolean(env.OPENAI_API_KEY?.trim());
+}
+
+async function limitedRequestBody(request: Request): Promise<Uint8Array | undefined> {
+  if (!request.body) return new Uint8Array();
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_REQUEST_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      return undefined;
+    }
+    chunks.push(value);
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
 }
 
 function unauthorized(message: string): Response {
@@ -76,7 +103,9 @@ function unauthorized(message: string): Response {
 }
 
 export async function handleModelProxy(request: Request, env: ModelProxyEnv, url: URL): Promise<Response> {
-  if (!modelProxyReady(env)) {
+  // Keep verifying already-issued tokens while issuance is disabled so an
+  // operator can roll claws back to direct provider access without an outage.
+  if (!modelProxyConfigured(env)) {
     return new Response(JSON.stringify({ error: { message: "model proxy is not configured", type: "crabhelm_model_proxy" } }), {
       status: 503,
       headers: { "content-type": "application/json", "cache-control": "no-store" },
@@ -112,6 +141,13 @@ export async function handleModelProxy(request: Request, env: ModelProxyEnv, url
       headers: { "content-type": "application/json", "cache-control": "no-store" },
     });
   }
+  const body = route.method === "GET" ? undefined : await limitedRequestBody(request);
+  if (route.method !== "GET" && body === undefined) {
+    return new Response(JSON.stringify({ error: { message: "request body too large", type: "crabhelm_model_proxy" } }), {
+      status: 413,
+      headers: { "content-type": "application/json", "cache-control": "no-store" },
+    });
+  }
 
   // Build the upstream request against a fixed origin/path — never a
   // caller-influenced host — with a freshly minted Authorization header.
@@ -129,7 +165,7 @@ export async function handleModelProxy(request: Request, env: ModelProxyEnv, url
     upstreamResponse = await fetch(upstream, {
       method: route.method,
       headers,
-      body: route.method === "GET" ? undefined : request.body,
+      body: body as BodyInit | undefined,
       redirect: "manual",
       // Streaming request body pass-through requires half-duplex.
       ...(route.method === "GET" ? {} : { duplex: "half" } as { duplex: "half" }),

@@ -78,9 +78,9 @@ Open <http://127.0.0.1:4177>. Local development uses an explicitly labeled simul
 
 ## Edge model proxy (experimental)
 
-By default a claw is delivered the raw `OPENAI_API_KEY`. Setting the `CRABHELM_MODEL_PROXY` Worker var to `on` (and putting the `MODEL_SIGNING_SECRET` secret) instead delivers a per-claw, audience-bound model token plus an edge base URL, and reroutes the child's OpenClaw OpenAI provider through `https://crabhelm-runtime.openclaw.ai/model/v1`. The Worker verifies the token, strips the caller's authorization, injects the real provider key, and forwards to a single fixed upstream over an allowlisted set of endpoints. The raw provider key never reaches the agent VM, and access is revocable per claw rather than org-wide.
+By default a claw is delivered the raw `OPENAI_API_KEY`. Setting the `CRABHELM_MODEL_PROXY` Worker var to `on` (and putting the `MODEL_SIGNING_SECRET` secret) instead delivers a per-claw, audience-bound model token plus an edge base URL, and reroutes the child's OpenClaw OpenAI provider through `https://crabhelm-runtime.openclaw.ai/model/v1`. The Worker verifies the token, strips the caller's authorization, injects the real provider key, and forwards to a single fixed upstream over an allowlisted set of endpoints. The raw provider key never reaches the agent VM, and each claw's access is independently scoped and bounded to its substrate lifetime rather than sharing one fleet-wide credential.
 
-This is experimental and default-off: enabling it changes the guest profile (rebuild the appliance) and requires a live inference probe on staging to confirm the rerouted provider works end to end before enabling in production.
+This is experimental and default-off: changing modes requires an appliance rebuild and re-pin so existing claws reinstall the managed provider base URL. The proxy continues accepting previously issued model tokens while new issuance is off, allowing a rolling rollback; keep `MODEL_SIGNING_SECRET` configured through the longest previously issued token lifetime (four hours by default, at most 24 hours). Confirm the existing live inference probe on staging before enabling in production.
 
 ## Safety boundaries
 

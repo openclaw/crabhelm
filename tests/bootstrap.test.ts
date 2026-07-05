@@ -150,6 +150,7 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
   const calls = await readFile(log, "utf8");
   assert.match(calls, /node install .*--tls/);
   assert.doesNotMatch(calls, /--tls-fingerprint/);
+  assert.match(calls, /config unset models\.providers\.openai\.baseUrl/);
 });
 
 test("standalone bootstrap defers the runtime bridge until inference readiness", async () => {

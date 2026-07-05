@@ -82,6 +82,10 @@ actual_runtime_bridge_sha256="$(sha256sum "$runtime_bridge" | awk '{print $1}')"
 # OPENAI_BASE_URL env alone does not reroute them.
 if [[ -n "$model_base_url" ]]; then
   "$openclaw_binary" config set models.providers.openai.baseUrl "$model_base_url"
+else
+  # A proxy rollback must remove the managed override before the raw provider
+  # key is restored, otherwise this claw remains pointed at the edge route.
+  "$openclaw_binary" config unset models.providers.openai.baseUrl
 fi
 "$openclaw_binary" config set agents.defaults.workspace "${OPENCLAW_STATE_DIR:-${HOME:-/tmp}/.openclaw}/workspace"
 "$openclaw_binary" config set channels.slack.enabled "$slack_enabled" --strict-json

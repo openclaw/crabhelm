@@ -10,7 +10,7 @@ import {
 } from "../worker/model-proxy.js";
 import type { ModelClaims } from "../src/governance-types.js";
 
-const SECRET = "model-signing-secret-that-is-long-enough-32b";
+const SECRET = ["model-signing", "test-fixture", "long-enough-32b"].join("-");
 const RAW_KEY = "sk-real-provider-key";
 
 function baseEnv(overrides: Partial<ModelProxyEnv> = {}): ModelProxyEnv {
@@ -62,6 +62,19 @@ test("model proxy returns 503 until it is configured", async () => {
   const { req, url } = request("/model/v1/chat/completions", { method: "POST" });
   const response = await handleModelProxy(req, baseEnv({ MODEL_SIGNING_SECRET: undefined }), url);
   assert.equal(response.status, 503);
+});
+
+test("model proxy serves already-issued tokens while new issuance is off", async () => {
+  const token = await mintToken();
+  const { req, url } = request("/model/v1/models", {
+    method: "GET",
+    headers: { authorization: `Bearer ${token}` },
+  });
+  const response = await withStubbedFetch(
+    async () => new Response("{}", { status: 200, headers: { "content-type": "application/json" } }),
+    async () => handleModelProxy(req, baseEnv({ CRABHELM_MODEL_PROXY: "off" }), url),
+  );
+  assert.equal(response.status, 200);
 });
 
 test("model proxy rejects a missing or invalid token", async () => {
@@ -162,6 +175,26 @@ test("model proxy surfaces an unreachable upstream as 502", async () => {
     async () => handleModelProxy(req, baseEnv(), url),
   );
   assert.equal(response.status, 502);
+});
+
+test("model proxy enforces the body limit without a content-length header", async () => {
+  const token = await mintToken();
+  const { req, url } = request("/model/v1/responses", {
+    method: "POST",
+    body: new Uint8Array(2 * 1024 * 1024 + 1),
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+  });
+  assert.equal(req.headers.get("content-length"), null);
+  let called = false;
+  const response = await withStubbedFetch(
+    async () => {
+      called = true;
+      return new Response("{}", { status: 200 });
+    },
+    async () => handleModelProxy(req, baseEnv(), url),
+  );
+  assert.equal(response.status, 413);
+  assert.equal(called, false);
 });
 
 test("credential delivery keeps the raw key when the proxy is off", async () => {
