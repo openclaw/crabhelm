@@ -94,6 +94,12 @@ test("generated installer embeds a metadata-blocking allowlist except when disab
     assert.match(script, /ip6 daddr fd00:ec2::254 counter drop/u);
     assert.match(script, /policy drop/u);
     assert.match(script, /tcp dport \{ 53, 443 \} accept/u);
+    assert.match(script, /list table inet crabhelm_egress/u);
+    assert.match(script, /flush table inet crabhelm_egress/u);
+    assert.ok(
+      script.indexOf("ip daddr 169.254.169.254") < script.indexOf("ct state established,related accept"),
+      "metadata drops must precede established-flow acceptance",
+    );
     // The allowlist must be applied before the bundle download begins.
     assert.ok(script.indexOf("crabhelm_egress") < script.indexOf("bundle.tgz"));
     await run("/bin/bash", ["-n", "-c", script]);
@@ -147,6 +153,7 @@ test("attempt mode installs the ruleset when nftables is reachable via sudo", as
   await writeStub(
     path.join(bin, "nft"),
     `#!/usr/bin/env bash
+if [[ "\${1:-}" == "list" ]]; then exit 1; fi
 while (($#)); do case "$1" in -f) cp "$2" ${JSON.stringify(nftLog)} ;; esac; shift; done
 exit 0
 `,
@@ -167,6 +174,34 @@ exit 0
   const ruleset = await readFile(nftLog, "utf8");
   assert.match(ruleset, /ip daddr 169\.254\.169\.254 counter drop/u);
   assert.match(ruleset, /policy drop/u);
+});
+
+test("lockdown retries atomically replace the existing table rules", async () => {
+  const { home, bin, guestLog, archiveId } = await stageInstall();
+  const nftLog = path.join(path.dirname(bin), "nft-ruleset.txt");
+  await writeStub(
+    path.join(bin, "nft"),
+    `#!/usr/bin/env bash
+if [[ "\${1:-}" == "list" ]]; then exit 0; fi
+while (($#)); do case "$1" in -f) cp "$2" ${JSON.stringify(nftLog)} ;; esac; shift; done
+exit 0
+`,
+  );
+  await writeSudoStub(bin);
+
+  await run("/bin/bash", ["-c", installScript("attempt", archiveId)], {
+    env: {
+      PATH: stubPath(bin),
+      HOME: home,
+      CRABHELM_BOOTSTRAP_TOKEN: "test-token",
+      CRABHELM_TEST_LOG: guestLog,
+    },
+  });
+  const ruleset = await readFile(nftLog, "utf8");
+  assert.match(ruleset, /^flush table inet crabhelm_egress$/mu);
+  assert.doesNotMatch(ruleset, /^add table /mu);
+  assert.match(ruleset, /ip daddr 169\.254\.169\.254 counter drop/u);
+  assert.equal(await readFile(guestLog, "utf8"), "guest-install ran\n");
 });
 
 test("attempt mode continues when nftables cannot be applied", async () => {

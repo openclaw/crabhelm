@@ -763,19 +763,26 @@ function egressLockdownBlock(mode: EgressLockdownMode): string {
     return 1
   fi
   ruleset="$(mktemp)"
-  cat >"$ruleset" <<'CRABHELM_EGRESS'
-add table inet crabhelm_egress
+  if "\${runner[@]}" list table inet crabhelm_egress >/dev/null 2>&1; then
+    cat >"$ruleset" <<'CRABHELM_EGRESS_EXISTING'
 flush table inet crabhelm_egress
+CRABHELM_EGRESS_EXISTING
+  else
+    cat >"$ruleset" <<'CRABHELM_EGRESS_NEW'
+add table inet crabhelm_egress
 add chain inet crabhelm_egress output { type filter hook output priority 0 ; policy drop ; }
+CRABHELM_EGRESS_NEW
+  fi
+  cat >>"$ruleset" <<'CRABHELM_EGRESS_RULES'
 add rule inet crabhelm_egress output oifname "lo" accept
-add rule inet crabhelm_egress output ct state established,related accept
 add rule inet crabhelm_egress output ip daddr 169.254.169.254 counter drop comment "instance metadata credentials"
 add rule inet crabhelm_egress output ip6 daddr fd00:ec2::254 counter drop comment "instance metadata credentials"
+add rule inet crabhelm_egress output ct state established,related accept
 add rule inet crabhelm_egress output meta l4proto ipv6-icmp icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept
 add rule inet crabhelm_egress output udp dport { 53, 67, 68, 123, 546, 547 } accept
 add rule inet crabhelm_egress output tcp dport { 53, 443 } accept
 add rule inet crabhelm_egress output counter drop comment "default egress deny"
-CRABHELM_EGRESS
+CRABHELM_EGRESS_RULES
   if ! "\${runner[@]}" -f "$ruleset"; then
     rm -f "$ruleset"
     return 1
