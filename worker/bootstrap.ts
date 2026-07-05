@@ -738,7 +738,7 @@ export function normalizeEgressLockdownMode(value: string | undefined): EgressLo
   return value === "required" || value === "off" ? value : "attempt";
 }
 
-// Outbound-only nftables allowlist for the agent VM: loopback, replies, DNS,
+// Outbound-only nftables allowlist for the agent VM: loopback, DNS,
 // NTP, DHCP, and TCP 443. Everything else — including the AWS instance
 // metadata endpoints that vend substrate credentials — is dropped. The guest
 // keeps no inbound listener, and install/model/control traffic is all 443.
@@ -887,7 +887,6 @@ cat >>"$ruleset" <<'CRABHELM_EGRESS_RULES'
 add rule inet crabhelm_egress output oifname "lo" accept
 add rule inet crabhelm_egress output ip daddr 169.254.169.254 counter drop comment "instance metadata credentials"
 add rule inet crabhelm_egress output ip6 daddr fd00:ec2::254 counter drop comment "instance metadata credentials"
-add rule inet crabhelm_egress output ct state established,related accept
 add rule inet crabhelm_egress output meta l4proto ipv6-icmp icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept
 add rule inet crabhelm_egress output udp dport { 53, 67, 68, 123, 546, 547 } accept
 add rule inet crabhelm_egress output tcp dport { 53, 443 } accept
@@ -923,6 +922,8 @@ CRABHELM_EGRESS_UNIT
   if [[ -e "$egress_apply_path" ]]; then
     had_apply=1
     if ! "\${egress_privileged[@]}" "$cp_binary" -p "$egress_apply_path" "$apply_backup"; then
+      "$rm_binary" -f "$apply_temporary" "$unit_temporary"
+      "\${egress_privileged[@]}" "$rm_binary" -f "$apply_staged" "$unit_staged" "$apply_backup" "$unit_backup" >/dev/null 2>&1 || true
       "\${egress_privileged[@]}" "$egress_apply_path" >/dev/null 2>&1 || return 2
       return 1
     fi
@@ -930,11 +931,14 @@ CRABHELM_EGRESS_UNIT
   if [[ -e "$egress_unit_path" ]]; then
     had_unit=1
     if ! "\${egress_privileged[@]}" "$cp_binary" -p "$egress_unit_path" "$unit_backup"; then
-      "\${egress_privileged[@]}" "$rm_binary" -f "$apply_backup" >/dev/null 2>&1 || true
+      "$rm_binary" -f "$apply_temporary" "$unit_temporary"
+      "\${egress_privileged[@]}" "$rm_binary" -f "$apply_staged" "$unit_staged" "$apply_backup" "$unit_backup" >/dev/null 2>&1 || true
       if [[ "$had_apply" = 1 ]]; then
         "\${egress_privileged[@]}" "$egress_apply_path" >/dev/null 2>&1 || return 2
       elif [[ "$had_live_table" = 0 ]] && "\${egress_privileged[@]}" "$nft_binary" list table inet crabhelm_egress >/dev/null 2>&1; then
         "\${egress_privileged[@]}" "$nft_binary" delete table inet crabhelm_egress || return 2
+      elif [[ "$had_live_table" = 1 ]]; then
+        return 2
       fi
       return 1
     fi
@@ -968,6 +972,10 @@ CRABHELM_EGRESS_UNIT
       "\${egress_privileged[@]}" "$egress_apply_path" >/dev/null 2>&1 || rollback_failed=1
     elif [[ "$had_live_table" = 0 ]] && "\${egress_privileged[@]}" "$nft_binary" list table inet crabhelm_egress >/dev/null 2>&1; then
       "\${egress_privileged[@]}" "$nft_binary" delete table inet crabhelm_egress || rollback_failed=1
+    elif [[ "$had_live_table" = 1 ]]; then
+      # The staged apply replaced unknown live-only rules; without a prior
+      # apply script they cannot be restored, so provisioning must stop.
+      rollback_failed=1
     fi
     [[ "$rollback_failed" = 0 ]]
   }
@@ -985,7 +993,7 @@ CRABHELM_EGRESS_UNIT
   "\${egress_privileged[@]}" "$rm_binary" -f "$apply_backup" "$unit_backup" >/dev/null 2>&1 || true
 }
 if install_egress_lockdown; then
-  printf '%s\\n' 'crabhelm guest egress: outbound restricted to loopback, replies, DNS, NTP, DHCP, and TCP 443; instance metadata blocked'
+  printf '%s\\n' 'crabhelm guest egress: outbound restricted to loopback, DNS, NTP, DHCP, and TCP 443; instance metadata blocked'
 else
   install_status=$?
   if [[ "$install_status" = 2 ]]; then
