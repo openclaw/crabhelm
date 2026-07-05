@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -105,10 +105,7 @@ test("generated installer embeds a metadata-blocking allowlist except when disab
     assert.match(script, /Before=network-pre\.target/u);
     assert.match(script, /After=local-fs\.target nftables\.service/u);
     assert.match(script, /WantedBy=multi-user\.target/u);
-    assert.ok(
-      script.indexOf("ip daddr 169.254.169.254") < script.indexOf("ct state established,related accept"),
-      "metadata drops must precede established-flow acceptance",
-    );
+    assert.doesNotMatch(script, /ct state established,related accept/u);
     // The allowlist must be applied before the bundle download begins.
     assert.ok(script.indexOf("crabhelm_egress") < script.indexOf("bundle.tgz"));
     await run("/bin/bash", ["-n", "-c", script]);
@@ -320,7 +317,7 @@ exit 0
   assert.equal(await readFile(guestLog, "utf8"), "guest-install ran\n");
 });
 
-test("failed persistence upgrade preserves a legacy live-only table", async () => {
+test("failed persistence upgrade stops when a legacy live-only table cannot be restored", async () => {
   const { root, home, bin, guestLog, archiveId } = await stageInstall();
   const nftState = path.join(root, "nft-active");
   await writeFile(nftState, "active\n");
@@ -341,23 +338,21 @@ esac
     "#!/usr/bin/env bash\ncase \"${1:-}\" in enable) exit 1 ;; is-enabled) exit 1 ;; *) exit 0 ;; esac\n",
   );
 
-  const { stdout } = await run(
-    "/bin/bash",
-    ["-c", installScript("attempt", archiveId, root)],
-    {
+  await assert.rejects(
+    run("/bin/bash", ["-c", installScript("attempt", archiveId, root)], {
       env: {
         PATH: stubPath(bin),
         HOME: home,
         CRABHELM_BOOTSTRAP_TOKEN: "test-token",
         CRABHELM_TEST_LOG: guestLog,
       },
-    },
+    }),
+    /prior state could not be restored/u,
   );
-  assert.match(stdout, /skipped \(nftables unavailable or not permitted\)/u);
   assert.equal(await readFile(nftState, "utf8"), "active\n");
   await assert.rejects(readFile(path.join(root, "usr/local/sbin/crabhelm-egress-apply"), "utf8"), /ENOENT/u);
   await assert.rejects(readFile(path.join(root, "etc/systemd/system/crabhelm-egress.service"), "utf8"), /ENOENT/u);
-  assert.equal(await readFile(guestLog, "utf8"), "guest-install ran\n");
+  await assert.rejects(readFile(guestLog, "utf8"), /ENOENT/u);
 });
 
 test("failed persistence update restores the prior boot configuration", async () => {
@@ -410,6 +405,44 @@ esac
   assert.equal(await readFile(unitPath, "utf8"), oldUnit);
   assert.equal(await readFile(restoredMarker, "utf8"), "");
   assert.equal(await readFile(guestLog, "utf8"), "guest-install ran\n");
+});
+
+test("failed legacy unit backup stops and removes staged persistence files", async () => {
+  const { root, home, bin, guestLog, archiveId } = await stageInstall();
+  const unitDirectory = path.join(root, "etc/systemd/system");
+  const unitPath = path.join(unitDirectory, "crabhelm-egress.service");
+  const nftState = path.join(root, "nft-active");
+  await mkdir(unitDirectory, { recursive: true });
+  await writeFile(unitPath, "[Unit]\nDescription=legacy live-only policy\n");
+  await writeFile(nftState, "active\n");
+  await writeStub(
+    path.join(bin, "nft"),
+    `#!/usr/bin/env bash
+case "\${1:-}" in
+  list) [[ -f ${JSON.stringify(nftState)} ]] ;;
+  -f) touch ${JSON.stringify(nftState)} ;;
+  *) exit 0 ;;
+esac
+`,
+  );
+  await writeSudoStub(bin);
+  await writeSystemctlStub(bin);
+  await writeStub(path.join(bin, "cp"), "#!/usr/bin/env bash\nexit 1\n");
+
+  await assert.rejects(
+    run("/bin/bash", ["-c", installScript("attempt", archiveId, root)], {
+      env: {
+        PATH: stubPath(bin),
+        HOME: home,
+        CRABHELM_BOOTSTRAP_TOKEN: "test-token",
+        CRABHELM_TEST_LOG: guestLog,
+      },
+    }),
+    /prior state could not be restored/u,
+  );
+  assert.deepEqual(await readdir(path.join(root, "usr/local/sbin")), []);
+  assert.deepEqual((await readdir(unitDirectory)).sort(), ["crabhelm-egress.service", "multi-user.target.wants"]);
+  await assert.rejects(readFile(guestLog, "utf8"), /ENOENT/u);
 });
 
 test("attempt mode continues when nftables cannot be applied", async () => {
