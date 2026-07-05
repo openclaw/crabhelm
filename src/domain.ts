@@ -3,6 +3,7 @@ import type {
   AccessPolicy,
   ClawRecord,
   CreateClawInput,
+  DeploymentSpec,
   FleetSummary,
   InferencePolicy,
   ManagedPolicySpec,
@@ -16,6 +17,7 @@ import type {
 const subjectPattern = /^[a-zA-Z0-9][a-zA-Z0-9_.:@/+\-]{0,199}$/;
 const slugPattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const modelPattern = /^[a-z0-9][a-z0-9_.-]*\/[a-zA-Z0-9][a-zA-Z0-9_.:\-]{0,199}$/;
+const sha256Pattern = /^[0-9a-f]{64}$/;
 
 export function slugify(value: string): string {
   return value
@@ -132,6 +134,17 @@ function normalizeObservability(
   return { logLevel, retentionDays, metadataOnly: true };
 }
 
+function normalizeAppliance(input: CreateClawInput["deployment"]): DeploymentSpec["appliance"] {
+  if (!input?.appliance) return undefined;
+  const manifestSha256 = requireText(input.appliance.manifestSha256, "appliance manifest SHA-256", 64);
+  const archiveSha256 = requireText(input.appliance.archiveSha256, "appliance archive SHA-256", 64);
+  const nodeSha256 = requireText(input.appliance.nodeSha256, "appliance Node SHA-256", 64);
+  if (!sha256Pattern.test(manifestSha256) || !sha256Pattern.test(archiveSha256) || !sha256Pattern.test(nodeSha256)) {
+    throw new Error("appliance release digests must be lowercase SHA-256 values");
+  }
+  return { manifestSha256, archiveSha256, nodeSha256 };
+}
+
 export function normalizeManagedPolicySpec(input: ManagedPolicySpec): ManagedPolicySpec {
   const inference = normalizeModels(input?.inference);
   return {
@@ -210,6 +223,7 @@ export function createClawRecord(input: CreateClawInput, now = new Date()): Claw
         ...(input.deployment?.region
           ? { region: requireText(input.deployment.region, "region", 80) }
           : {}),
+        ...(normalizeAppliance(input.deployment) ? { appliance: normalizeAppliance(input.deployment) } : {}),
       },
       inference: normalizeModels(input.inference),
       channels: { slack: normalizeSlack(input.slack, slug) },
@@ -308,6 +322,7 @@ export function childPolicyHash(record: ClawRecord): string {
     slackEnabled: record.desired.channels.slack.enabled,
     access: record.desired.access,
     logLevel: record.desired.observability.logLevel,
+    appliance: record.desired.deployment.appliance,
   });
   return createHash("sha256").update(serialized).digest("hex");
 }

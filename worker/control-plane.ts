@@ -68,6 +68,7 @@ export class CrabhelmControlPlane extends DurableObject<Env> {
         publicUrl: env.RUNTIME_URL,
         releaseId: env.APPLIANCE_MANIFEST_SHA256,
         archiveId: env.APPLIANCE_ARCHIVE_SHA256,
+        nodeId: env.NODE_RUNTIME_SHA256,
         signingSecret: env.BOOTSTRAP_SIGNING_SECRET,
         coordinators: env.CLAW_COORDINATOR,
       }),

@@ -18,6 +18,13 @@ export type DeploymentSpec = {
   target: string;
   profile: string;
   region?: string;
+  appliance?: ApplianceRelease;
+};
+
+export type ApplianceRelease = {
+  manifestSha256: string;
+  archiveSha256: string;
+  nodeSha256: string;
 };
 
 export type InferencePolicy = {

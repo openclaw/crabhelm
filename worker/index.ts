@@ -138,7 +138,8 @@ chmod 0600 "$work/credentials.env"
 curl --fail --silent --show-error --location "\${auth[@]}" ${shellValue(`${base}/managed-spec.json`)} -o "$work/managed-spec.json"
 chmod 0600 "$work/managed-spec.json"
 export CRABHELM_BUNDLE_MANIFEST_SHA256=${shellValue(release.releaseId)}
-export CRABHELM_NODE_SHA256=${shellValue(env.NODE_RUNTIME_SHA256)}
+export CRABHELM_NODE_SHA256=${shellValue(release.nodeId)}
+export CRABHELM_RELEASE_ID=${shellValue(`${release.releaseId}.${release.archiveId}.${release.nodeId}`)}
 export CRABHELM_CREDENTIAL_FILE="$work/credentials.env"
 export CRABHELM_CREDENTIAL_REFRESH_URL=${shellValue(`${base}/credentials.env`)}
 export CRABHELM_MANAGED_SPEC_FILE="$work/managed-spec.json"

@@ -59,6 +59,26 @@ test("semantic no-op updates do not advance generation", () => {
   assert.equal(updated.revision, claw.revision);
 });
 
+test("validates and hashes per-claw appliance release overrides", () => {
+  const claw = createClawRecord({
+    name: "Canary",
+    owner: { subject: "github:canary", label: "@canary", source: "github" },
+  });
+  const canary = updateClawRecord(claw, {
+    deployment: {
+      appliance: { manifestSha256: "a".repeat(64), archiveSha256: "b".repeat(64), nodeSha256: "c".repeat(64) },
+    },
+  });
+  assert.equal(canary.desired.deployment.appliance?.manifestSha256, "a".repeat(64));
+  assert.notEqual(childPolicyHash(canary), childPolicyHash(claw));
+  assert.throws(
+    () => updateClawRecord(claw, {
+      deployment: { appliance: { manifestSha256: "not-a-digest", archiveSha256: "b".repeat(64), nodeSha256: "c".repeat(64) } },
+    }),
+    /lowercase SHA-256/,
+  );
+});
+
 test("rejects an inference provider that disagrees with the model", () => {
   assert.throws(
     () =>

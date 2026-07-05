@@ -65,6 +65,8 @@ Targets are administrator policy. Each pins adapter, region, appliance profile, 
 
 Current production target: AWS US East through Crabbox. The data model and provider router are not Crabbox-specific.
 
+Each claw may override the fleet appliance with explicit manifest, archive, and bootstrap-Node SHA-256 values. Changing them keeps the allocated workspace, advances desired generation, and reinstalls until the complete release identity plus live inference converge. Canary one claw and verify readiness before changing the fleet default or applying the release elsewhere.
+
 ## Policies
 
 Policies are immutable versions of managed fields: primary/fallback inference models, Slack enabled state, native DM/group policy, and child log level. Preview is generation-fenced. Multi-claw rollout requires an explicit canary; an unconverged canary stops the remainder. Applying an older version is rollback.
