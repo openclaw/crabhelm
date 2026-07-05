@@ -16,6 +16,8 @@ The installer receives:
 
 ## Installation
 
+Before any credential is fetched, the control-plane installer applies an outbound nftables allowlist to the workspace: loopback, DNS, NTP, DHCP, and TCP 443, with the cloud instance-metadata endpoints (`169.254.169.254`, `fd00:ec2::254`) explicitly dropped and a default-deny policy. A root-owned systemd unit reapplies and live-verifies the managed table before `network-pre.target`. OpenClaw runs separately as `crabhelm-agent`, an unprivileged system account without sudo; its hardened system service requires the egress unit when enforcement is enabled. Root-owned release, credential-epoch, and policy markers plus the live verifier gate readiness. Policy revision or mode changes drive an in-place reinstall. Unknown configuration values fail closed to `required`; `CRABHELM_EGRESS_LOCKDOWN=off` explicitly removes the managed table and boot unit while retaining runtime-account isolation.
+
 `guest-install.sh` verifies the manifest contract and every artifact digest before installing anything. Privileged npm runs through an empty environment. The installer activates credentials only after packages and plugins are installed, then delegates to `bootstrap-child.sh`.
 
 `bootstrap-child.sh` writes the exact model, plugin allowlist, child UUID, loopback Gateway mode, auth mode, and optional metadata-only OTLP policy. In Cloudflare standalone mode it starts the local Gateway and installs a private idempotent runtime-bridge launcher, then writes the complete manifest/archive/Node release identity plus managed bootstrap-policy hash to `~/.openclaw/crabhelm-ready` after `/readyz` succeeds. Legacy outbound node enrollment remains available only when standalone mode is off.
@@ -30,6 +32,7 @@ Provider allocation, echoed shell source, or a process existing is insufficient.
 
 - No operator or Crabbox token enters the child credential file.
 - Bootstrap endpoints require a deterministic child HMAC bearer and return `no-store`.
+- Outbound egress is allowlisted before credentials are written; the instance-metadata service is unreachable from the agent.
 - Child Gateway binds loopback only.
 - Raw probe output stays in the workspace and is never projected into Crabhelm state.
 - The owner-only runtime workload credential enters the bridge through an inherited file descriptor, expires after ten minutes, and rotates through a one-use refresh fence. Owner-only persistence permits restart recovery; turn processes use the loopback Gateway and receive neither workload nor model-provider credentials.

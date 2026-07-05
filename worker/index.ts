@@ -1,4 +1,4 @@
-import { bootstrapInstallScript, bootstrapTokenClaims } from "./bootstrap.js";
+import { bootstrapInstallScript, bootstrapTokenClaims, normalizeEgressLockdownMode } from "./bootstrap.js";
 import { signClaims, verifyClaims } from "./security.js";
 import type { GovernanceAuditEvent, RuntimeClaims, RuntimeTicketClaims, SessionClaims } from "../src/governance-types.js";
 import { verifyAccessIdentity } from "./access.js";
@@ -158,6 +158,7 @@ async function handleBootstrap(request: Request, env: Env, url: URL): Promise<Re
     slack,
     credentialsGeneration: Number(credentials),
     policyHash,
+    egressLockdown: normalizeEgressLockdownMode(env.CRABHELM_EGRESS_LOCKDOWN),
     ...(modelProxyEnabled(env)
       ? { modelBaseUrl: `${new URL(env.RUNTIME_URL).origin}/model/v1` }
       : {}),

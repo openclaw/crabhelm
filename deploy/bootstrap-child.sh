@@ -16,6 +16,7 @@ slack_plugin_sha256="${CRABHELM_SLACK_PLUGIN_SHA256:-}"
 parent_tls="${CRABHELM_PARENT_TLS:-true}"
 parent_tls_fingerprint="${CRABHELM_PARENT_TLS_FINGERPRINT:-}"
 standalone="${CRABHELM_STANDALONE:-false}"
+system_gateway="${CRABHELM_SYSTEM_GATEWAY:-false}"
 model="${CRABHELM_MODEL:-openai/gpt-5.5}"
 model_base_url="${CRABHELM_MODEL_BASE_URL:-}"
 slack_enabled="${CRABHELM_SLACK_ENABLED:-false}"
@@ -43,6 +44,7 @@ if [[ -n "$model_base_url" ]]; then
   [[ "$model_base_url" =~ ^https://[A-Za-z0-9._-]+(:[0-9]+)?/[A-Za-z0-9._/-]*$ ]] || die "invalid model base URL"
 fi
 [[ "$slack_enabled" = "true" || "$slack_enabled" = "false" ]] || die "invalid Slack desired state"
+[[ "$system_gateway" = "true" || "$system_gateway" = "false" ]] || die "invalid system Gateway mode"
 if [[ "$standalone" = "true" ]]; then
   :
 elif [[ "$parent_tls" = "true" ]]; then
@@ -168,8 +170,10 @@ fi
 "$openclaw_binary" config set gateway.mode local
 "$openclaw_binary" config set gateway.bind loopback
 "$openclaw_binary" config set gateway.auth.mode none
-"$openclaw_binary" gateway install --force
-"$openclaw_binary" gateway start
+if [[ "$system_gateway" != "true" ]]; then
+  "$openclaw_binary" gateway install --force
+  "$openclaw_binary" gateway start
+fi
 
 node_args=(
   --host "$parent_host"
@@ -243,6 +247,12 @@ prepare_runtime_bridge() {
   chmod 0500 "$launcher_temporary"
   mv -f "$launcher_temporary" "$launcher_file"
 }
+
+if [[ "$system_gateway" = "true" ]]; then
+  [[ "$standalone" = "true" ]] || die "system Gateway mode requires standalone operation"
+  prepare_runtime_bridge
+  exit 0
+fi
 
 for _ in {1..60}; do
   if "$curl_binary" --fail --silent --show-error --max-time 2 http://127.0.0.1:18789/readyz >/dev/null; then

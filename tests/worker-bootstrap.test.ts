@@ -173,6 +173,113 @@ test("workspace readiness is pinned to the reviewed appliance release", async ()
   assert.ok(status.indexOf("test ! -e '/tmp/retry'") < status.indexOf("elif pgrep -f '[g]uest-install.sh'"));
   await run("/bin/bash", ["-n", "-c", status]);
 });
+
+test("managed readiness uses root-owned markers and live egress verification", async () => {
+  const releaseId = "d".repeat(64);
+  const required = bootstrapStatusCommand("", "CRABHELM_egress", "", releaseId, 1, "", "", "required");
+  const off = bootstrapStatusCommand("", "CRABHELM_egress", "", releaseId, 1, "", "", "off");
+  assert.match(required, /\/var\/lib\/crabhelm\/ready/u);
+  assert.match(required, /\/usr\/local\/sbin\/crabhelm-egress-verify/u);
+  assert.doesNotMatch(required, /HOME.*crabhelm-ready/u);
+  assert.doesNotMatch(off, /crabhelm-egress-verify/u);
+  await run("/bin/bash", ["-n", "-c", required]);
+  await run("/bin/bash", ["-n", "-c", off]);
+});
+
+test("generated installer re-fetches credentials and records the epoch marker", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "crabhelm-install-"));
+  const home = path.join(root, "home");
+  const bin = path.join(root, "bin");
+  const fixtures = path.join(root, "fixtures");
+  const guestLog = path.join(root, "guest.log");
+  await mkdir(path.join(fixtures, "bundle"), { recursive: true });
+  await mkdir(home, { recursive: true });
+  await mkdir(bin, { recursive: true });
+  await writeFile(
+    path.join(fixtures, "bundle", "guest-install.sh"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf 'gen=%s model=%s credentials=%s\\n' "$CRABHELM_CREDENTIALS_GENERATION" "$CRABHELM_MODEL" "$(head -n 1 "$CRABHELM_CREDENTIAL_FILE")" >>"$CRABHELM_TEST_LOG"
+`,
+    { mode: 0o755 },
+  );
+  await chmod(path.join(fixtures, "bundle", "guest-install.sh"), 0o755);
+  await run("tar", ["-czf", path.join(fixtures, "bundle.tgz"), "-C", fixtures, "bundle"]);
+  const archiveId = createHash("sha256")
+    .update(await readFile(path.join(fixtures, "bundle.tgz")))
+    .digest("hex");
+  await writeFile(
+    path.join(bin, "curl"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+url=""
+dest=""
+while (($#)); do
+  case "$1" in
+    -o) dest="$2"; shift 2 ;;
+    http*) url="$1"; shift ;;
+    *) shift ;;
+  esac
+done
+case "$url" in
+  */bundle.tgz) cp ${JSON.stringify(path.join(fixtures, "bundle.tgz"))} "$dest" ;;
+  */credentials.env) printf 'OPENAI_API_KEY=rotated-epoch-secret\\n' >"$dest" ;;
+  */managed-spec.json*) printf '{}\\n' >"$dest" ;;
+  *) exit 22 ;;
+esac
+`,
+    { mode: 0o755 },
+  );
+  await chmod(path.join(bin, "curl"), 0o755);
+  for (const [name, body] of [
+    ["nft", "#!/bin/sh\nexit 1\n"],
+    ["systemctl", "#!/bin/sh\nexit 1\n"],
+    ["id", "#!/bin/sh\nprintf '0\\n'\n"],
+  ] as const) {
+    await writeFile(path.join(bin, name), body, { mode: 0o755 });
+    await chmod(path.join(bin, name), 0o755);
+  }
+
+  const script = bootstrapInstallScript({
+    base: "https://crabhelm-runtime.example.test/bootstrap/child-id",
+    archiveId,
+    releaseId: "e".repeat(64),
+    nodeSha256: "f".repeat(64),
+    childId: "child-id",
+    model: "openai/gpt-5.5",
+    slack: "false",
+    credentialsGeneration: 4,
+    policyHash: "a".repeat(64),
+    egressLockdown: "off",
+    egressPersistenceRoot: root,
+  });
+  await run("/bin/bash", ["-n", "-c", script]);
+  assert.ok(
+    script.indexOf("guest-install.sh") < script.indexOf("crabhelm-credentials-generation"),
+    "epoch marker must only be written after a successful install",
+  );
+  assert.ok(
+    script.indexOf('/bin/bash "$work/bundle/guest-install.sh"') < script.lastIndexOf("write_egress_policy_marker"),
+    "trusted egress marker must only be written after a successful install",
+  );
+
+  await run("/bin/bash", ["-c", script], {
+    env: {
+      ...process.env,
+      HOME: home,
+      PATH: `${bin}:${process.env.PATH ?? ""}`,
+      CRABHELM_BOOTSTRAP_TOKEN: "test-token",
+      CRABHELM_TEST_LOG: guestLog,
+    },
+  });
+  assert.equal(
+    await readFile(guestLog, "utf8"),
+    "gen=4 model=openai/gpt-5.5 credentials=OPENAI_API_KEY=rotated-epoch-secret\n",
+  );
+  const marker = path.join(home, ".openclaw", "crabhelm-credentials-generation");
+  assert.equal(await readFile(marker, "utf8"), "c4\n");
+  assert.equal(((await stat(marker)).mode & 0o777), 0o600);
+});
 test("workspace readiness changes with managed child policy", async () => {
   const releaseId = "a".repeat(64);
   const claw = createClawRecord({
@@ -232,7 +339,7 @@ test("credential rotation re-keys the install marker and bootstrap request", asy
   const rotatedClaw = rotateClawCredentials(claw);
   const rotated = await bootstrap.command(rotatedClaw);
   assert.match(rotated, /install\.sh\?model=[^']+&slack=false&policyHash=[0-9a-f]{64}&credentials=2/u);
-  assert.ok(rotated.includes(`/tmp/crabhelm-attempt-${testReleaseMarker}-${standaloneBootstrapHash(rotatedClaw)}-c2`));
+  assert.ok(rotated.includes(`/tmp/crabhelm-attempt-${testReleaseMarker}-${standaloneBootstrapHash(rotatedClaw)}-e2-required-c2`));
 });
 
 test("readiness past epoch one requires the credential re-delivery marker", async () => {
@@ -321,6 +428,8 @@ esac
     credentialsGeneration: 4,
     policyHash: "a".repeat(64),
     modelBaseUrl: "https://crabhelm-runtime.example.test/model/v1",
+    egressLockdown: "off",
+    egressPersistenceRoot: root,
   });
   await run("/bin/bash", ["-n", "-c", script]);
   assert.ok(

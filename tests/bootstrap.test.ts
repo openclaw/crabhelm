@@ -251,7 +251,7 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
   assert.match(probe, /start-runtime-bridge\.sh/u);
   assert.match(probe, new RegExp(`node-v22\\.23\\.1-${nodeId}-linux-x64`));
   assert.match(probe, new RegExp(`v5:${releaseId}:p${policyHash}:openai/gpt-5\\.5`));
-  assert.match(probe, /if \/bin\/bash \$HOME\/\.local\/share\/crabhelm\/runtime\/start-runtime-bridge\.sh; then[\s\S]*crabhelm-inference-ready/u);
+  assert.match(probe, /if "\$\{agent_command\[@\]\}" \/bin\/bash "\$HOME\/\.local\/share\/crabhelm\/runtime\/start-runtime-bridge\.sh"; then[\s\S]*crabhelm-inference-ready/u);
 });
 
 async function executable(file: string, contents: string): Promise<void> {
