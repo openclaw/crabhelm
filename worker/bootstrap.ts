@@ -4,13 +4,13 @@ import type {
   DrainResult,
   RevokeControlResult,
 } from "../src/types.js";
-import { clawCredentialsGeneration } from "../src/domain.js";
+import { clawCredentialsGeneration, standaloneBootstrapHash } from "../src/domain.js";
 import { timingSafeEqual } from "node:crypto";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const BOOTSTRAP_TOKEN_TTL_MS = 20 * 60 * 1000;
-const EGRESS_POLICY_VERSION = 1;
+const EGRESS_POLICY_VERSION = 2;
 type WorkerWebSocket = WebSocket & { accept(): void };
 type WorkspaceTerminalState =
   | "ready"
@@ -34,6 +34,7 @@ type WorkspaceTerminalState =
   | "install-failed-npm-tool"
   | "install-failed-sha256"
   | "install-failed-unknown"
+  | "policy-upgrade-required"
   | "pending"
   | "binary-failed"
   | "runtime-failed"
@@ -51,6 +52,7 @@ export class CrabboxWorkspaceBootstrap {
   readonly #publicUrl: string;
   readonly #releaseId: string;
   readonly #archiveId: string;
+  readonly #nodeId: string;
   readonly #signingSecret: string;
   readonly #egressLockdown: EgressLockdownMode;
   readonly #coordinators?: { getByName(name: string): { runtimeStatus(): Promise<{ pending: number; running: number; awaitingDelivery: number }> } };
@@ -60,6 +62,7 @@ export class CrabboxWorkspaceBootstrap {
     publicUrl: string;
     releaseId: string;
     archiveId: string;
+    nodeId: string;
     signingSecret: string;
     egressLockdown?: EgressLockdownMode;
     coordinators?: { getByName(name: string): { runtimeStatus(): Promise<{ pending: number; running: number; awaitingDelivery: number }> } };
@@ -70,12 +73,16 @@ export class CrabboxWorkspaceBootstrap {
     if (!/^[0-9a-f]{64}$/u.test(options.archiveId)) {
       throw new Error("Crabbox appliance archive id must be a SHA-256 digest");
     }
+    if (!/^[0-9a-f]{64}$/u.test(options.nodeId)) {
+      throw new Error("Crabbox appliance Node id must be a SHA-256 digest");
+    }
     this.#brokerToken = options.brokerToken;
     this.#publicUrl = new URL(options.publicUrl).origin;
     this.#releaseId = options.releaseId;
     this.#archiveId = options.archiveId;
+    this.#nodeId = options.nodeId;
     this.#signingSecret = options.signingSecret;
-    this.#egressLockdown = options.egressLockdown ?? "attempt";
+    this.#egressLockdown = options.egressLockdown ?? "required";
     this.#coordinators = options.coordinators;
   }
 
@@ -84,11 +91,14 @@ export class CrabboxWorkspaceBootstrap {
   }
 
   async #launchCommand(claw: ClawRecord): Promise<string> {
+    const policyHash = standaloneBootstrapHash(claw);
+    const release = this.#release(claw);
     const token = await bootstrapToken(
       this.#signingSecret,
       claw.id,
-      this.#releaseId,
-      this.#archiveId,
+      release.releaseId,
+      release.archiveId,
+      release.nodeId,
       Date.now() + BOOTSTRAP_TOKEN_TTL_MS,
     );
     const credentialsGeneration = clawCredentialsGeneration(claw);
@@ -98,30 +108,46 @@ export class CrabboxWorkspaceBootstrap {
     );
     installUrl.searchParams.set("model", claw.desired.inference.model);
     installUrl.searchParams.set("slack", "false");
+    installUrl.searchParams.set("policyHash", policyHash);
     if (credentialsGeneration > 1) {
       installUrl.searchParams.set("credentials", String(credentialsGeneration));
     }
     return [
       `CRABHELM_BOOTSTRAP_TOKEN=${shellQuote(token)}`,
+      `CRABHELM_POLICY_HASH=${shellQuote(policyHash)}`,
       "nohup",
       "bash",
       "-c",
       shellQuote(
-        `installer=$(mktemp) && trap 'rm -f "$installer"' EXIT && curl --fail --silent --show-error --location --header "Authorization: Bearer $CRABHELM_BOOTSTRAP_TOKEN" ${shellQuote(installUrl.toString())} -o "$installer" && touch ${shellQuote(this.#retryMarker(credentialsGeneration))} && exec timeout --signal=TERM --kill-after=10s 10m bash "$installer"`,
+        `installer=$(mktemp) && trap 'rm -f "$installer"' EXIT && curl --fail --silent --show-error --location --header "Authorization: Bearer $CRABHELM_BOOTSTRAP_TOKEN" ${shellQuote(installUrl.toString())} -o "$installer" && touch ${shellQuote(this.#retryMarker(claw))} && exec timeout --signal=TERM --kill-after=10s 10m bash "$installer"`,
       ),
       ">/tmp/crabhelm-install.log 2>&1 </dev/null &",
     ].join(" ");
   }
 
-  #retryMarker(credentialsGeneration: number): string {
-    const credentials = credentialsGeneration > 1 ? `-c${credentialsGeneration}` : "";
-    return `/tmp/crabhelm-attempt-${this.#releaseId}-e${EGRESS_POLICY_VERSION}-${this.#egressLockdown}${credentials}`;
+  #retryMarker(claw: ClawRecord): string {
+    const release = this.#release(claw);
+    const credentialsGeneration = clawCredentialsGeneration(claw);
+    const base = `/tmp/crabhelm-attempt-${releaseMarker(release)}-${standaloneBootstrapHash(claw)}-e${EGRESS_POLICY_VERSION}-${this.#egressLockdown}`;
+    return credentialsGeneration > 1 ? `${base}-c${credentialsGeneration}` : base;
+  }
+
+  #readyId(claw: ClawRecord): string {
+    return `${releaseMarker(this.#release(claw))}:${standaloneBootstrapHash(claw)}`;
+  }
+
+  #release(claw: ClawRecord): { releaseId: string; archiveId: string; nodeId: string } {
+    const override = claw.desired.deployment.appliance;
+    return override
+      ? { releaseId: override.manifestSha256, archiveId: override.archiveSha256, nodeId: override.nodeSha256 }
+      : { releaseId: this.#releaseId, archiveId: this.#archiveId, nodeId: this.#nodeId };
   }
 
   async inspect(
     claw: ClawRecord,
     workspace: { status: string; attachUrl?: string },
   ): Promise<{ ready: boolean; message: string; gatewayVersion?: string }> {
+    const release = this.#release(claw);
     if (!workspace.attachUrl) {
       return { ready: false, message: "Workspace ready; terminal bootstrap route pending" };
     }
@@ -133,12 +159,18 @@ export class CrabboxWorkspaceBootstrap {
         workspace.attachUrl,
         this.#brokerToken,
         claw.desired.inference.model,
+        releaseMarker(release),
+        release.nodeId,
+        credentialsGeneration,
+        standaloneBootstrapHash(claw),
         bootstrapStatusCommand(
           await this.#launchCommand(claw),
           probeLabel,
-          this.#retryMarker(credentialsGeneration),
-          this.#releaseId,
+          this.#retryMarker(claw),
+          this.#readyId(claw),
           credentialsGeneration,
+          legacyReadinessCompatible(claw) ? releaseMarker(release) : "",
+          legacyReadinessCompatible(claw) ? "" : releaseMarker(release),
           this.#egressLockdown,
         ),
         probeLabel,
@@ -199,6 +231,8 @@ export class CrabboxWorkspaceBootstrap {
         ? "Workspace ready; appliance host lacks sha256sum"
         : result === "install-failed-unknown"
         ? "Workspace ready; appliance installation failed"
+        : result === "policy-upgrade-required"
+        ? "Workspace ready; managed observability requires the policy-aware appliance release"
         : result === "config-failed"
         ? "Workspace ready; exact model configuration failed"
         : result === "binary-failed"
@@ -307,11 +341,16 @@ export class CrabboxWorkspaceBootstrap {
   }
 }
 
+function releaseMarker(release: { releaseId: string; archiveId: string; nodeId: string }): string {
+  return `${release.releaseId}.${release.archiveId}.${release.nodeId}`;
+}
+
 export async function bootstrapToken(
   secret: string,
   childId: string,
   releaseId: string,
   archiveId: string,
+  nodeId: string,
   expiresAt: number,
 ): Promise<string> {
   const key = await crypto.subtle.importKey(
@@ -321,10 +360,10 @@ export async function bootstrapToken(
     false,
     ["sign"],
   );
-  if (!/^[0-9a-f]{64}$/u.test(releaseId) || !/^[0-9a-f]{64}$/u.test(archiveId)) throw new Error("bootstrap release identity is invalid");
-  const payload = `crabhelm:${childId}:${releaseId}:${archiveId}:${expiresAt}`;
+  if (![releaseId, archiveId, nodeId].every((value) => /^[0-9a-f]{64}$/u.test(value))) throw new Error("bootstrap release identity is invalid");
+  const payload = `crabhelm:${childId}:${releaseId}:${archiveId}:${nodeId}:${expiresAt}`;
   const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(payload));
-  return `${releaseId}.${archiveId}.${expiresAt}.${base64Url(new Uint8Array(signature))}`;
+  return `${releaseId}.${archiveId}.${nodeId}.${expiresAt}.${base64Url(new Uint8Array(signature))}`;
 }
 
 export async function bootstrapTokenClaims(
@@ -332,19 +371,20 @@ export async function bootstrapTokenClaims(
   childId: string,
   candidate: string,
   now = Date.now(),
-): Promise<{ releaseId: string; archiveId: string; expiresAt: number } | undefined> {
-  const match = candidate.match(/^([0-9a-f]{64})\.([0-9a-f]{64})\.([0-9]{13})\.([A-Za-z0-9_-]{43})$/u);
+): Promise<{ releaseId: string; archiveId: string; nodeId: string; expiresAt: number } | undefined> {
+  const match = candidate.match(/^([0-9a-f]{64})\.([0-9a-f]{64})\.([0-9a-f]{64})\.([0-9]{13})\.([A-Za-z0-9_-]{43})$/u);
   if (!match) return undefined;
   const releaseId = match[1]!;
   const archiveId = match[2]!;
-  const expiresAt = Number(match[3]);
+  const nodeId = match[3]!;
+  const expiresAt = Number(match[4]);
   if (!Number.isSafeInteger(expiresAt) || expiresAt <= now || expiresAt - now > BOOTSTRAP_TOKEN_TTL_MS) {
     return undefined;
   }
-  const expected = encoder.encode(await bootstrapToken(secret, childId, releaseId, archiveId, expiresAt));
+  const expected = encoder.encode(await bootstrapToken(secret, childId, releaseId, archiveId, nodeId, expiresAt));
   const actual = encoder.encode(candidate);
   return expected.byteLength === actual.byteLength && timingSafeEqual(expected, actual)
-    ? { releaseId, archiveId, expiresAt }
+    ? { releaseId, archiveId, nodeId, expiresAt }
     : undefined;
 }
 
@@ -353,17 +393,22 @@ export async function validBootstrapToken(
   childId: string,
   releaseId: string,
   archiveId: string,
+  nodeId: string,
   candidate: string,
   now = Date.now(),
 ): Promise<boolean> {
   const claims = await bootstrapTokenClaims(secret, childId, candidate, now);
-  return claims?.releaseId === releaseId && claims.archiveId === archiveId;
+  return claims?.releaseId === releaseId && claims.archiveId === archiveId && claims.nodeId === nodeId;
 }
 
 async function inspectTerminal(
   attachUrl: string,
   brokerToken: string,
   model: string,
+  releaseId: string,
+  nodeId: string,
+  credentialsGeneration: number,
+  policyHash: string,
   statusCommand: string,
   probeLabel: string,
 ): Promise<WorkspaceTerminalState> {
@@ -404,7 +449,7 @@ async function inspectTerminal(
         finish("ready");
       } else if (hasTerminalLine(output, `${probeLabel}_READY`) && !probeSent) {
         probeSent = true;
-        socket.send(`${inferenceProbeCommand(model, `${probeLabel}_INFERENCE`)}\n`);
+        socket.send(`${inferenceProbeCommand(model, releaseId, nodeId, `${probeLabel}_INFERENCE`, credentialsGeneration, policyHash, true)}\n`);
       } else if (
         hasTerminalLine(output, `${probeLabel}_STARTED`) ||
         hasTerminalLine(output, `${probeLabel}_INSTALLING`)
@@ -448,6 +493,8 @@ async function inspectTerminal(
         finish("install-failed-sha256");
       } else if (hasTerminalLine(output, `${probeLabel}_INSTALL_FAILED_UNKNOWN`)) {
         finish("install-failed-unknown");
+      } else if (hasTerminalLine(output, `${probeLabel}_POLICY_UPGRADE_REQUIRED`)) {
+        finish("policy-upgrade-required");
       } else {
         const failure = terminalInferenceFailure(output, `${probeLabel}_INFERENCE`);
         if (failure) finish(failure);
@@ -539,34 +586,37 @@ export function bootstrapStatusCommand(
   retryMarker = "",
   releaseId = "",
   credentialsGeneration = 1,
+  legacyReadyId = "",
+  incompatibleLegacyId = "",
   egressLockdown?: EgressLockdownMode,
-  trustedEgressMarkerPath = "/var/lib/crabhelm/egress-policy",
-  trustedEgressMarkerOwner = 0,
 ): string {
-  if (!trustedEgressMarkerPath.startsWith("/") || !Number.isSafeInteger(trustedEgressMarkerOwner) || trustedEgressMarkerOwner < 0) {
-    throw new Error("trusted egress marker identity is invalid");
-  }
+  const readyIds = [releaseId, legacyReadyId].filter(Boolean);
   // Past epoch 1, readiness additionally requires the credential marker the
   // installer writes after re-fetching credentials.env, so a rotation drives
   // one release-keyed in-place reinstall before the claw reports ready again.
+  const readyMarker = egressLockdown ? shellQuote("/var/lib/crabhelm/ready") : '"$HOME/.openclaw/crabhelm-ready"';
+  const credentialMarker = egressLockdown ? shellQuote("/var/lib/crabhelm/credentials-generation") : '"$HOME/.openclaw/crabhelm-credentials-generation"';
   const credentialCheck = credentialsGeneration > 1
-    ? ` && grep -Fqx ${shellQuote(`c${credentialsGeneration}`)} "$HOME/.openclaw/crabhelm-credentials-generation" 2>/dev/null`
+    ? ` && grep -Fqx ${shellQuote(`c${credentialsGeneration}`)} ${credentialMarker} 2>/dev/null`
     : "";
-  const egressValue = egressLockdown ? `v${EGRESS_POLICY_VERSION}:${egressLockdown}` : "";
-  const unprivilegedEgressFallback = egressLockdown && egressLockdown !== "required"
-    ? ` || { test "$(/usr/bin/id -u)" != 0 && { test ! -x /usr/bin/sudo || ! /usr/bin/sudo -n /usr/bin/true >/dev/null 2>&1; } && grep -Fqx ${shellQuote(egressValue)} "$HOME/.openclaw/crabhelm-egress-policy" 2>/dev/null; }`
+  const egressCheck = egressLockdown === "required"
+    ? " && { if test \"$(id -u)\" = 0; then /usr/local/sbin/crabhelm-egress-verify; else sudo -n /usr/local/sbin/crabhelm-egress-verify; fi; }"
     : "";
-  const egressCheck = egressLockdown
-    ? ` && { { test "$(/usr/bin/stat -c '%u:%a' ${shellQuote(trustedEgressMarkerPath)} 2>/dev/null || /usr/bin/stat -f '%u:%Lp' ${shellQuote(trustedEgressMarkerPath)} 2>/dev/null)" = ${shellQuote(`${trustedEgressMarkerOwner}:644`)} && grep -Fqx ${shellQuote(egressValue)} ${shellQuote(trustedEgressMarkerPath)} 2>/dev/null; }${unprivilegedEgressFallback}; }`
-    : "";
-  const readyCheck = releaseId
-    ? `grep -Fqx ${shellQuote(releaseId)} "$HOME/.openclaw/crabhelm-ready" 2>/dev/null${credentialCheck}${egressCheck}`
-    : "test -f \"$HOME/.openclaw/crabhelm-ready\"";
+  const readyCheck = readyIds.length > 0
+    ? `{ ${readyIds.map((id) => `grep -Fqx ${shellQuote(id)} ${readyMarker} 2>/dev/null`).join(" || ")}; }${credentialCheck}${egressCheck}`
+    : `test -f ${readyMarker}${credentialCheck}${egressCheck}`;
   const command = [
     `status_label=${shellQuote(statusLabel)}`,
     `if ${readyCheck}; then`,
+    ...(retryMarker ? [`  rm -f ${shellQuote(retryMarker)} ${shellQuote(`${retryMarker}.retry`)} ${shellQuote(`${retryMarker}.retry2`)}`] : []),
     "  printf '%s_READY\\n' \"$status_label\"",
   ];
+  if (incompatibleLegacyId) {
+    command.push(
+      `elif grep -Fqx ${shellQuote(incompatibleLegacyId)} ${readyMarker} 2>/dev/null; then`,
+      "  printf '%s_POLICY_UPGRADE_REQUIRED\\n' \"$status_label\"",
+    );
+  }
   if (launchCommand && retryMarker) {
     command.push(
       `elif test ! -e ${shellQuote(retryMarker)} && { pgrep -f '[g]uest-install.sh' >/dev/null || pgrep -f '[b]ootstrap-child.sh' >/dev/null; }; then`,
@@ -671,15 +721,47 @@ export function bootstrapStatusCommand(
   return command.join("\n");
 }
 
+function legacyReadinessCompatible(claw: ClawRecord): boolean {
+  return claw.desired.observability.logLevel === "info" && !claw.desired.observability.otel.enabled;
+}
+
 export function inferenceProbeCommand(
   model: string,
+  releaseId: string,
+  nodeId: string,
   probeLabel = "CRABHELM_INFERENCE",
+  credentialsGeneration = 1,
+  policyHash = "",
+  systemManaged = false,
 ): string {
-  const marker = "$HOME/.openclaw/crabhelm-inference-ready";
-  const markerValue = `v2:${model}`;
+  if (!/^[0-9a-f]{64}\.[0-9a-f]{64}\.[0-9a-f]{64}$/u.test(releaseId) || !/^[0-9a-f]{64}$/u.test(nodeId)) {
+    throw new Error("inference probe release identity is invalid");
+  }
+  if (policyHash && !/^[0-9a-f]{64}$/u.test(policyHash)) {
+    throw new Error("inference probe policy identity is invalid");
+  }
+  const home = systemManaged ? "/var/lib/crabhelm-agent" : "$HOME";
+  const marker = `${home}/.openclaw/crabhelm-inference-ready`;
+  const identity = policyHash ? `${releaseId}:p${policyHash}` : releaseId;
+  const markerValue = policyHash
+    ? credentialsGeneration > 1
+      ? `v5:${identity}:c${credentialsGeneration}:${model}`
+      : `v5:${identity}:${model}`
+    : credentialsGeneration > 1
+      ? `v4:${releaseId}:c${credentialsGeneration}:${model}`
+      : `v3:${releaseId}:${model}`;
   const output = "/tmp/crabhelm-inference-probe.json";
   const error = "/tmp/crabhelm-inference-probe.err";
-  const runtimeLauncher = "$HOME/.local/share/crabhelm/runtime/start-runtime-bridge.sh";
+  const runtimeLauncher = `${home}/.local/share/crabhelm/runtime/start-runtime-bridge.sh`;
+  const openclawCli = `${home}/.local/share/crabhelm/openclaw-2026.6.11/bin/openclaw`;
+  const nodeBinary = `${home}/.local/share/crabhelm/node-v22.23.1-${nodeId}-linux-x64/bin/node`;
+  const quotePath = (value: string) => systemManaged ? shellQuote(value) : `"${value}"`;
+  const agentCommand = systemManaged
+    ? `sudo -n -u crabhelm-agent /usr/bin/env HOME=${home} OPENCLAW_STATE_DIR=${home}/.openclaw PATH=${home}/.local/share/crabhelm/node-v22.23.1-${nodeId}-linux-x64/bin:${home}/.local/share/crabhelm/openclaw-2026.6.11/bin:/usr/local/bin:/usr/bin:/bin`
+    : "/usr/bin/env";
+  const restartCommand = systemManaged
+    ? "sudo -n /usr/bin/systemctl restart crabhelm-agent.service"
+    : '"$openclaw_cli" gateway restart';
   const validateResponse = [
     "const fs = require('node:fs');",
     "const raw = fs.readFileSync(process.argv[1], 'utf8').trim();",
@@ -704,31 +786,32 @@ export function inferenceProbeCommand(
   return [
     `probe_label=${shellQuote(probeLabel)}`,
     "probe_session=\"crabhelm-healthcheck-$(date +%s)-$$\"",
-    "openclaw_cli=\"$HOME/.local/share/crabhelm/openclaw-2026.6.11/bin/openclaw\"",
-    "export PATH=\"$HOME/.local/share/crabhelm/node-v22.23.1-linux-x64/bin:$HOME/.local/share/crabhelm/openclaw-2026.6.11/bin:$PATH\"",
-    `if test -f ${marker} && grep -Fqx ${shellQuote(markerValue)} ${marker}; then`,
-    `  if /bin/bash ${runtimeLauncher}; then probe_result=READY; else probe_result=RUNTIME_FAILED; fi`,
+    `openclaw_cli=${quotePath(openclawCli)}`,
+    `node_binary=${quotePath(nodeBinary)}`,
+    `agent_command=(${agentCommand})`,
+    `if "\${agent_command[@]}" test -f ${quotePath(marker)} && "\${agent_command[@]}" grep -Fqx ${shellQuote(markerValue)} ${quotePath(marker)}; then`,
+    `  if "\${agent_command[@]}" /bin/bash ${quotePath(runtimeLauncher)}; then probe_result=READY; else probe_result=RUNTIME_FAILED; fi`,
     "else",
-    "  if test ! -x \"$openclaw_cli\"; then",
+    "  if ! \"${agent_command[@]}\" test -x \"$openclaw_cli\"; then",
     "    probe_result=BINARY_FAILED",
-    "  elif ! command -v node >/dev/null 2>&1; then",
+    "  elif ! \"${agent_command[@]}\" test -x \"$node_binary\"; then",
     "    probe_result=RUNTIME_FAILED",
-    `  elif ! "$openclaw_cli" config set agents.defaults.model.primary ${shellQuote(model)} >/dev/null; then`,
+    `  elif ! "\${agent_command[@]}" "$openclaw_cli" config set agents.defaults.model.primary ${shellQuote(model)} >/dev/null; then`,
     "    probe_result=CONFIG_FAILED",
-    "  elif ! \"$openclaw_cli\" gateway restart >/dev/null; then",
+    `  elif ! ${restartCommand} >/dev/null; then`,
     "    probe_result=RESTART_FAILED",
     "  elif ! timeout 90 bash -c 'until curl --fail --silent --max-time 2 http://127.0.0.1:18789/readyz >/dev/null; do sleep 2; done'; then",
     "    probe_result=GATEWAY_FAILED",
-    `  elif ! timeout -k 10 180 "$openclaw_cli" agent --agent main --session-id "$probe_session" --message ${shellQuote("Calculate 731 multiplied by 919. Reply with only the decimal integer, without formatting or punctuation.")} --thinking off --json >${output} 2>${error}; then`,
+    `  elif ! timeout -k 10 180 "\${agent_command[@]}" "$openclaw_cli" agent --agent main --session-id "$probe_session" --message ${shellQuote("Calculate 731 multiplied by 919. Reply with only the decimal integer, without formatting or punctuation.")} --thinking off --json >${output} 2>${error}; then`,
     "    probe_result=TURN_FAILED",
     "  else",
+    `    chmod 0644 ${output}`,
     "    response_status=0",
-    `    node --input-type=commonjs -e ${shellQuote(validateResponse)} ${output} || response_status=$?`,
+    `    "\${agent_command[@]}" "$node_binary" --input-type=commonjs -e ${shellQuote(validateResponse)} ${output} || response_status=$?`,
     "    case \"$response_status\" in",
     "      0)",
-    `        if /bin/bash ${runtimeLauncher}; then`,
-    `          printf '%s\\n' ${shellQuote(markerValue)} >${marker}`,
-    `          chmod 0600 ${marker}`,
+    `        if "\${agent_command[@]}" /bin/bash ${quotePath(runtimeLauncher)}; then`,
+    `          printf '%s\\n' ${shellQuote(markerValue)} | "\${agent_command[@]}" /bin/bash -c ${shellQuote(`umask 077; cat >${marker}`)}`,
     "          probe_result=READY",
     "        else",
     "          probe_result=RUNTIME_FAILED",
@@ -745,12 +828,30 @@ export function inferenceProbeCommand(
   ].join("\n");
 }
 
-export type EgressLockdownMode = "attempt" | "required" | "off";
+export type EgressLockdownMode = "required" | "off";
 
 export function normalizeEgressLockdownMode(value: string | undefined): EgressLockdownMode {
-  // Fail open to "attempt": a configuration typo must not brick provisioning,
-  // and "attempt" still enforces whenever the guest can.
-  return value === "required" || value === "off" ? value : "attempt";
+  return value === "off" ? "off" : "required";
+}
+
+function runtimeAccountPrelude(persistenceRoot?: string): string {
+  if (persistenceRoot) return "";
+  return `agent_user=crabhelm-agent
+if ! /usr/bin/id "$agent_user" >/dev/null 2>&1; then
+  if [[ "$(/usr/bin/id -u)" = 0 ]]; then
+    /usr/sbin/useradd --system --user-group --create-home --home-dir /var/lib/crabhelm-agent --shell /usr/sbin/nologin "$agent_user"
+  elif [[ -x /usr/bin/sudo ]] && /usr/bin/sudo -n /usr/bin/true 2>/dev/null; then
+    /usr/bin/sudo -n /usr/sbin/useradd --system --user-group --create-home --home-dir /var/lib/crabhelm-agent --shell /usr/sbin/nologin "$agent_user"
+  else
+    printf '%s\\n' 'crabhelm bootstrap: runtime isolation requires root or passwordless sudo' >&2
+    exit 1
+  fi
+fi
+[[ "$(/usr/bin/id -u "$agent_user")" != 0 ]] || {
+  printf '%s\\n' 'crabhelm bootstrap: isolated runtime account must not be root' >&2
+  exit 1
+}
+`;
 }
 
 // Outbound-only nftables allowlist for the agent VM: loopback, DNS,
@@ -766,6 +867,7 @@ function egressLockdownBlock(mode: EgressLockdownMode, persistenceRoot?: string)
   const unitDirectory = `${root}/etc/systemd/system`;
   const linkDirectory = `${root}/etc/systemd/system/multi-user.target.wants`;
   const applyPath = `${root}/usr/local/sbin/crabhelm-egress-apply`;
+  const verifyPath = `${root}/usr/local/sbin/crabhelm-egress-verify`;
   const unitPath = `${root}/etc/systemd/system/crabhelm-egress.service`;
   const linkPath = `${root}/etc/systemd/system/multi-user.target.wants/crabhelm-egress.service`;
   const systemdRuntimeDirectory = `${root}/run/systemd/system`;
@@ -803,6 +905,7 @@ egress_apply_dir=${shellQuote(applyDirectory)}
 egress_unit_dir=${shellQuote(unitDirectory)}
 egress_link_dir=${shellQuote(linkDirectory)}
 egress_apply_path=${shellQuote(applyPath)}
+egress_verify_path=${shellQuote(verifyPath)}
 egress_unit_path=${shellQuote(unitPath)}
 egress_link_path=${shellQuote(linkPath)}
 egress_systemd_runtime_dir=${shellQuote(systemdRuntimeDirectory)}
@@ -864,7 +967,7 @@ disable_egress_lockdown() {
   nft_binary="$(find_egress_binary nft || true)"
   systemctl_binary="$(find_egress_binary systemctl || true)"
   rm_binary="$(find_egress_binary rm || true)"
-  if [[ ! -e "$egress_apply_path" && ! -e "$egress_unit_path" && ! -e "$egress_link_path" && -z "$nft_binary" ]]; then
+  if [[ ! -e "$egress_apply_path" && ! -e "$egress_verify_path" && ! -e "$egress_unit_path" && ! -e "$egress_link_path" && -z "$nft_binary" ]]; then
     return 0
   fi
   set_egress_privileged || return 1
@@ -872,7 +975,7 @@ disable_egress_lockdown() {
   if [[ -e "$egress_unit_path" && -n "$systemctl_binary" && -d "$egress_systemd_runtime_dir" ]]; then
     "\${egress_privileged[@]}" "$systemctl_binary" disable --now crabhelm-egress.service >/dev/null 2>&1 || true
   fi
-  "\${egress_privileged[@]}" "$rm_binary" -f "$egress_apply_path" "$egress_unit_path" "$egress_link_path" || cleanup_failed=1
+  "\${egress_privileged[@]}" "$rm_binary" -f "$egress_apply_path" "$egress_verify_path" "$egress_unit_path" "$egress_link_path" || cleanup_failed=1
   if [[ -n "$systemctl_binary" && -d "$egress_systemd_runtime_dir" ]]; then
     "\${egress_privileged[@]}" "$systemctl_binary" daemon-reload >/dev/null 2>&1 || true
   fi
@@ -894,20 +997,17 @@ else
 fi
 `;
   }
-  const failure = mode === "required"
-    ? `  printf '%s\\n' 'crabhelm bootstrap: egress lockdown is required but the allowlist could not be applied' >&2
-  exit 1`
-    : `  printf '%s\\n' 'crabhelm guest egress: skipped (nftables unavailable or not permitted); outbound remains unrestricted'`;
   return `${disable}install_egress_lockdown() {
-  local nft_binary systemctl_binary install_binary cp_binary mv_binary rm_binary apply_temporary unit_temporary apply_staged unit_staged apply_backup unit_backup
-  local had_apply=0 had_unit=0 had_live_table=0 was_enabled=0
+  local nft_binary systemctl_binary install_binary cp_binary mv_binary rm_binary id_binary apply_temporary unit_temporary apply_staged unit_staged apply_backup verify_backup unit_backup
+  local had_apply=0 had_verify=0 had_unit=0 had_live_table=0 was_enabled=0
   nft_binary="$(find_egress_binary nft || true)"
   systemctl_binary="$(find_egress_binary systemctl || true)"
   install_binary="$(find_egress_binary install || true)"
   cp_binary="$(find_egress_binary cp || true)"
   mv_binary="$(find_egress_binary mv || true)"
   rm_binary="$(find_egress_binary rm || true)"
-  if [[ ! -d "$egress_systemd_runtime_dir" || -z "$nft_binary" || -z "$systemctl_binary" || -z "$install_binary" || -z "$cp_binary" || -z "$mv_binary" || -z "$rm_binary" ]] || ! set_egress_privileged; then
+  id_binary="$(find_egress_binary id || true)"
+  if [[ ! -d "$egress_systemd_runtime_dir" || -z "$nft_binary" || -z "$systemctl_binary" || -z "$install_binary" || -z "$cp_binary" || -z "$mv_binary" || -z "$rm_binary" || -z "$id_binary" ]] || ! set_egress_privileged; then
     return 1
   fi
   if "\${egress_privileged[@]}" "$nft_binary" list table inet crabhelm_egress >/dev/null 2>&1; then
@@ -918,33 +1018,47 @@ fi
   apply_staged="$egress_apply_path.new-$$"
   unit_staged="$egress_unit_path.new-$$"
   apply_backup="$egress_apply_path.backup-$$"
+  verify_backup="$egress_verify_path.backup-$$"
   unit_backup="$egress_unit_path.backup-$$"
   {
     printf '%s\\n' '#!/bin/bash' 'set -euo pipefail' 'umask 077' 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' 'export PATH'
     printf 'nft_binary=%q\\n' "$nft_binary"
+    printf 'id_binary=%q\\n' "$id_binary"
     cat <<'CRABHELM_EGRESS_APPLY'
 ruleset="$(mktemp)"
 trap 'rm -f "$ruleset"' EXIT
-if "$nft_binary" list table inet crabhelm_egress >/dev/null 2>&1; then
+agent_uid="$("$id_binary" -u crabhelm-agent)"
+[[ "$agent_uid" =~ ^[1-9][0-9]*$ ]]
+if [[ "\${1:-}" != --verify ]] && "$nft_binary" list table inet crabhelm_egress >/dev/null 2>&1; then
     cat >"$ruleset" <<'CRABHELM_EGRESS_EXISTING'
 flush table inet crabhelm_egress
 CRABHELM_EGRESS_EXISTING
-else
+elif [[ "\${1:-}" != --verify ]]; then
     cat >"$ruleset" <<'CRABHELM_EGRESS_NEW'
 add table inet crabhelm_egress
-add chain inet crabhelm_egress output { type filter hook output priority 0 ; policy drop ; }
+add chain inet crabhelm_egress output { type filter hook output priority 0 ; policy accept ; }
 CRABHELM_EGRESS_NEW
 fi
-cat >>"$ruleset" <<'CRABHELM_EGRESS_RULES'
-add rule inet crabhelm_egress output oifname "lo" accept
-add rule inet crabhelm_egress output ip daddr 169.254.169.254 counter drop comment "instance metadata credentials"
-add rule inet crabhelm_egress output ip6 daddr fd00:ec2::254 counter drop comment "instance metadata credentials"
-add rule inet crabhelm_egress output meta l4proto ipv6-icmp icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept
-add rule inet crabhelm_egress output udp dport { 53, 67, 68, 123, 546, 547 } accept
-add rule inet crabhelm_egress output tcp dport { 53, 443 } accept
-add rule inet crabhelm_egress output counter drop comment "default egress deny"
+if [[ "\${1:-}" != --verify ]]; then
+cat >>"$ruleset" <<CRABHELM_EGRESS_RULES
+add rule inet crabhelm_egress output meta skuid $agent_uid oifname "lo" accept
+add rule inet crabhelm_egress output meta skuid $agent_uid ip daddr 169.254.169.254 counter drop comment "instance metadata credentials"
+add rule inet crabhelm_egress output meta skuid $agent_uid ip6 daddr fd00:ec2::254 counter drop comment "instance metadata credentials"
+add rule inet crabhelm_egress output meta skuid $agent_uid meta l4proto ipv6-icmp icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept
+add rule inet crabhelm_egress output meta skuid $agent_uid udp dport { 53, 67, 68, 123, 546, 547 } accept
+add rule inet crabhelm_egress output meta skuid $agent_uid tcp dport { 53, 443 } accept
+add rule inet crabhelm_egress output meta skuid $agent_uid counter drop comment "default agent egress deny"
 CRABHELM_EGRESS_RULES
 "$nft_binary" -f "$ruleset"
+fi
+live_rules="$($nft_binary list chain inet crabhelm_egress output)"
+grep -Fq 'policy accept' <<<"$live_rules"
+grep -Eq "meta skuid $agent_uid .*oifname \\"lo\\".*accept|oifname \\"lo\\".*meta skuid $agent_uid .*accept" <<<"$live_rules"
+grep -Eq "meta skuid $agent_uid .*ip daddr 169[.]254[.]169[.]254.*drop" <<<"$live_rules"
+grep -Eq "meta skuid $agent_uid .*ip6 daddr fd00:ec2::254.*drop" <<<"$live_rules"
+grep -Eq "meta skuid $agent_uid .*udp dport.*(53.*67.*68.*123.*546.*547|53, 67, 68, 123, 546, 547).*accept" <<<"$live_rules"
+grep -Eq "meta skuid $agent_uid .*tcp dport.*(53.*443|53, 443).*accept" <<<"$live_rules"
+grep -Eq "meta skuid $agent_uid .*drop.*comment \\"default agent egress deny\\"" <<<"$live_rules"
 CRABHELM_EGRESS_APPLY
   } >"$apply_temporary"
   cat >"$unit_temporary" <<CRABHELM_EGRESS_UNIT
@@ -958,6 +1072,7 @@ Wants=network-pre.target
 [Service]
 Type=oneshot
 ExecStart=$egress_apply_path
+ExecStartPost=$egress_verify_path --verify
 RemainAfterExit=yes
 
 [Install]
@@ -977,6 +1092,15 @@ CRABHELM_EGRESS_UNIT
       "$rm_binary" -f "$apply_temporary" "$unit_temporary"
       "\${egress_privileged[@]}" "$rm_binary" -f "$apply_staged" "$unit_staged" "$apply_backup" "$unit_backup" >/dev/null 2>&1 || true
       "\${egress_privileged[@]}" "$egress_apply_path" >/dev/null 2>&1 || return 2
+      return 1
+    fi
+  fi
+  if [[ -e "$egress_verify_path" ]]; then
+    had_verify=1
+    if ! "\${egress_privileged[@]}" "$cp_binary" -p "$egress_verify_path" "$verify_backup"; then
+      "$rm_binary" -f "$apply_temporary" "$unit_temporary"
+      "\${egress_privileged[@]}" "$rm_binary" -f "$apply_staged" "$unit_staged" "$apply_backup" "$verify_backup" "$unit_backup" >/dev/null 2>&1 || true
+      if [[ "$had_apply" = 1 ]]; then "\${egress_privileged[@]}" "$egress_apply_path" >/dev/null 2>&1 || return 2; fi
       return 1
     fi
   fi
@@ -1009,6 +1133,11 @@ CRABHELM_EGRESS_UNIT
     else
       "\${egress_privileged[@]}" "$rm_binary" -f "$egress_apply_path" || rollback_failed=1
     fi
+    if [[ "$had_verify" = 1 ]]; then
+      "\${egress_privileged[@]}" "$mv_binary" -f "$verify_backup" "$egress_verify_path" || rollback_failed=1
+    else
+      "\${egress_privileged[@]}" "$rm_binary" -f "$egress_verify_path" || rollback_failed=1
+    fi
     if [[ "$had_unit" = 1 ]]; then
       "\${egress_privileged[@]}" "$mv_binary" -f "$unit_backup" "$egress_unit_path" || rollback_failed=1
     else
@@ -1032,17 +1161,18 @@ CRABHELM_EGRESS_UNIT
     [[ "$rollback_failed" = 0 ]]
   }
   if ! "\${egress_privileged[@]}" "$mv_binary" -f "$apply_staged" "$egress_apply_path" ||
+    ! "\${egress_privileged[@]}" "$install_binary" -m 0500 "$egress_apply_path" "$egress_verify_path" ||
     ! "\${egress_privileged[@]}" "$mv_binary" -f "$unit_staged" "$egress_unit_path" ||
     ! "\${egress_privileged[@]}" "$systemctl_binary" daemon-reload >/dev/null ||
     ! "\${egress_privileged[@]}" "$systemctl_binary" enable crabhelm-egress.service >/dev/null ||
     ! "\${egress_privileged[@]}" "$systemctl_binary" is-enabled --quiet crabhelm-egress.service >/dev/null 2>&1; then
     rollback_egress_install || return 2
     "$rm_binary" -f "$apply_temporary" "$unit_temporary"
-    "\${egress_privileged[@]}" "$rm_binary" -f "$apply_staged" "$unit_staged" "$apply_backup" "$unit_backup" >/dev/null 2>&1 || true
+    "\${egress_privileged[@]}" "$rm_binary" -f "$apply_staged" "$unit_staged" "$apply_backup" "$verify_backup" "$unit_backup" >/dev/null 2>&1 || true
     return 1
   fi
   "$rm_binary" -f "$apply_temporary" "$unit_temporary"
-  "\${egress_privileged[@]}" "$rm_binary" -f "$apply_backup" "$unit_backup" >/dev/null 2>&1 || true
+  "\${egress_privileged[@]}" "$rm_binary" -f "$apply_backup" "$verify_backup" "$unit_backup" >/dev/null 2>&1 || true
 }
 install_status=0
 invalidate_egress_policy_marker || install_status=1
@@ -1052,13 +1182,178 @@ fi
 if [[ "$install_status" = 0 ]]; then
   printf '%s\\n' 'crabhelm guest egress: outbound restricted to loopback, DNS, NTP, DHCP, and TCP 443; instance metadata blocked'
 else
-  if [[ "$install_status" = 2 ]]; then
-    printf '%s\\n' 'crabhelm bootstrap: egress lockdown setup failed and prior state could not be restored' >&2
-    exit 1
-  fi
-${failure}
+  printf '%s\\n' 'crabhelm bootstrap: egress lockdown is required but the allowlist could not be enforced and boot-persisted' >&2
+  exit 1
 fi
 `;
+}
+
+function managedRuntimeBlock(options: {
+  releaseId: string;
+  archiveId: string;
+  nodeSha256: string;
+  policyHash: string;
+  credentialsGeneration: number;
+  egressLockdown: EgressLockdownMode;
+  persistenceRoot?: string;
+}): string {
+  if (options.persistenceRoot) {
+    return `/bin/bash "$work/bundle/guest-install.sh"
+if ! write_egress_policy_marker; then
+  printf '%s\\n' 'crabhelm bootstrap: could not record the egress policy state' >&2
+  exit 1
+fi
+marker_dir="$HOME/.openclaw"
+install -d -m 0700 "$marker_dir"
+marker_temporary="$marker_dir/crabhelm-credentials-generation.new-$$"
+printf 'c%s\\n' ${shellQuote(String(options.credentialsGeneration))} >"$marker_temporary"
+chmod 0600 "$marker_temporary"
+mv -f "$marker_temporary" "$marker_dir/crabhelm-credentials-generation"`;
+  }
+
+  const agentHome = "/var/lib/crabhelm-agent";
+  const stateDir = `${agentHome}/.openclaw`;
+  const nodeBin = `${agentHome}/.local/share/crabhelm/node-v22.23.1-${options.nodeSha256}-linux-x64/bin`;
+  const openclawBin = `${agentHome}/.local/share/crabhelm/openclaw-2026.6.11/bin`;
+  const readyId = `${options.releaseId}.${options.archiveId}.${options.nodeSha256}:${options.policyHash}`;
+  const egressDependencies = options.egressLockdown === "required"
+    ? "Requires=crabhelm-egress.service\nAfter=crabhelm-egress.service network-online.target"
+    : "After=network-online.target";
+  return `agent_user=crabhelm-agent
+agent_home=${shellQuote(agentHome)}
+agent_state=${shellQuote(stateDir)}
+agent_work="$agent_home/bootstrap-$$"
+[[ -x /usr/sbin/useradd && -x /usr/sbin/runuser && -x /usr/bin/systemctl && -x /usr/bin/id && -x /usr/bin/install && -x /usr/bin/chown && -x /usr/bin/pgrep && -x /usr/bin/pkill && -x /usr/bin/stat ]] || {
+  printf '%s\\n' 'crabhelm bootstrap: required system account tools are unavailable' >&2
+  exit 1
+}
+set_egress_privileged || {
+  printf '%s\\n' 'crabhelm bootstrap: system runtime isolation requires root or passwordless sudo' >&2
+  exit 1
+}
+if ! /usr/bin/id "$agent_user" >/dev/null 2>&1; then
+  "\${egress_privileged[@]}" /usr/sbin/useradd --system --user-group --create-home --home-dir "$agent_home" --shell /usr/sbin/nologin "$agent_user"
+fi
+[[ "$(/usr/bin/id -u "$agent_user")" != 0 ]] || {
+  printf '%s\\n' 'crabhelm bootstrap: isolated runtime account must not be root' >&2
+  exit 1
+}
+agent_uid="$(/usr/bin/id -u "$agent_user")"
+"\${egress_privileged[@]}" /usr/bin/systemctl stop crabhelm-agent.service >/dev/null 2>&1 || true
+"\${egress_privileged[@]}" /usr/bin/pkill -TERM -u "$agent_uid" >/dev/null 2>&1 || true
+for _ in {1..50}; do
+  "\${egress_privileged[@]}" /usr/bin/pgrep -u "$agent_uid" >/dev/null 2>&1 || break
+  sleep 0.1
+done
+if "\${egress_privileged[@]}" /usr/bin/pgrep -u "$agent_uid" >/dev/null 2>&1; then
+  printf '%s\\n' 'crabhelm bootstrap: isolated runtime processes did not stop cleanly' >&2
+  exit 1
+fi
+legacy_openclaw="$HOME/.local/share/crabhelm/openclaw-2026.6.11/bin/openclaw"
+if [[ -x "$legacy_openclaw" ]]; then
+  PATH="$HOME/.local/share/crabhelm/node-v22.23.1-${options.nodeSha256}-linux-x64/bin:$PATH" "$legacy_openclaw" gateway stop >/dev/null 2>&1 || true
+fi
+/usr/bin/systemctl --user stop openclaw-gateway.service >/dev/null 2>&1 || true
+"\${egress_privileged[@]}" /usr/bin/install -d -o "$agent_user" -g "$agent_user" -m 0700 "$agent_home" "$agent_work"
+"\${egress_privileged[@]}" /bin/cp -R "$work/bundle" "$agent_work/bundle"
+"\${egress_privileged[@]}" /usr/bin/install -o "$agent_user" -g "$agent_user" -m 0600 "$work/credentials.env" "$agent_work/credentials.env"
+"\${egress_privileged[@]}" /usr/bin/install -o "$agent_user" -g "$agent_user" -m 0600 "$work/managed-spec.json" "$agent_work/managed-spec.json"
+"\${egress_privileged[@]}" /usr/bin/chown -R "$agent_user:$agent_user" "$agent_work/bundle"
+if [[ "$(/usr/bin/id -u)" = 0 ]]; then
+  run_as_agent=(/usr/sbin/runuser -u "$agent_user" -- /usr/bin/env)
+else
+  run_as_agent=(/usr/bin/sudo -n -u "$agent_user" /usr/bin/env)
+fi
+"\${run_as_agent[@]}" \
+  HOME="$agent_home" \
+  USER="$agent_user" \
+  OPENCLAW_STATE_DIR="$agent_state" \
+  CRABHELM_BUNDLE_MANIFEST_SHA256="$CRABHELM_BUNDLE_MANIFEST_SHA256" \
+  CRABHELM_NODE_SHA256="$CRABHELM_NODE_SHA256" \
+  CRABHELM_RELEASE_ID="$CRABHELM_RELEASE_ID" \
+  CRABHELM_CREDENTIAL_FILE="$agent_work/credentials.env" \
+  CRABHELM_MANAGED_SPEC_FILE="$agent_work/managed-spec.json" \
+  CRABHELM_POLICY_HASH="$CRABHELM_POLICY_HASH" \
+  CRABBOX_ADAPTER_ROOT_SESSION_ID="$CRABBOX_ADAPTER_ROOT_SESSION_ID" \
+  CRABHELM_STANDALONE=true \
+  CRABHELM_SYSTEM_GATEWAY=true \
+  CRABHELM_MODEL="$CRABHELM_MODEL" \
+  CRABHELM_MODEL_BASE_URL="\${CRABHELM_MODEL_BASE_URL:-}" \
+  CRABHELM_SLACK_ENABLED="$CRABHELM_SLACK_ENABLED" \
+  CRABHELM_CREDENTIALS_GENERATION="$CRABHELM_CREDENTIALS_GENERATION" \
+  /bin/bash "$agent_work/bundle/guest-install.sh"
+"\${egress_privileged[@]}" /bin/rm -rf "$agent_work"
+if "\${run_as_agent[@]}" /usr/bin/sudo -n /usr/bin/true >/dev/null 2>&1; then
+  printf '%s\\n' 'crabhelm bootstrap: isolated runtime account unexpectedly has sudo access' >&2
+  exit 1
+fi
+unit_temporary="$(mktemp)"
+cat >"$unit_temporary" <<'CRABHELM_AGENT_UNIT'
+[Unit]
+Description=Crabhelm isolated OpenClaw Gateway
+Wants=network-online.target
+${egressDependencies}
+
+[Service]
+Type=simple
+User=crabhelm-agent
+Group=crabhelm-agent
+Environment=HOME=${agentHome}
+Environment=OPENCLAW_STATE_DIR=${stateDir}
+Environment=PATH=${nodeBin}:${openclawBin}:/usr/local/bin:/usr/bin:/bin
+ExecStart=${openclawBin}/openclaw gateway --port 18789
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=${agentHome}
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target
+CRABHELM_AGENT_UNIT
+"\${egress_privileged[@]}" /usr/bin/install -m 0644 "$unit_temporary" /etc/systemd/system/crabhelm-agent.service
+rm -f "$unit_temporary"
+"\${egress_privileged[@]}" /usr/bin/systemctl daemon-reload
+"\${egress_privileged[@]}" /usr/bin/systemctl enable --now crabhelm-agent.service
+verify_agent_service() {
+  local main_pid process_uid
+  "\${egress_privileged[@]}" /usr/bin/systemctl is-active --quiet crabhelm-agent.service || return 1
+  main_pid="$("\${egress_privileged[@]}" /usr/bin/systemctl show --property MainPID --value crabhelm-agent.service)"
+  [[ "$main_pid" =~ ^[1-9][0-9]*$ && -d "/proc/$main_pid" ]] || return 1
+  process_uid="$(/usr/bin/stat -c '%u' "/proc/$main_pid")"
+  [[ "$process_uid" = "$agent_uid" ]]
+}
+for _ in {1..60}; do
+  if verify_agent_service && curl --fail --silent --show-error --max-time 2 http://127.0.0.1:18789/readyz >/dev/null; then
+    break
+  fi
+  sleep 1
+done
+verify_agent_service && curl --fail --silent --show-error --max-time 2 http://127.0.0.1:18789/readyz >/dev/null || {
+  printf '%s\\n' 'crabhelm bootstrap: isolated Gateway did not become ready' >&2
+  exit 1
+}
+${options.egressLockdown === "required" ? `"\${egress_privileged[@]}" /usr/local/sbin/crabhelm-egress-verify
+` : ""}if ! write_egress_policy_marker; then
+  printf '%s\\n' 'crabhelm bootstrap: could not record the egress policy state' >&2
+  exit 1
+fi
+ready_temporary="$(mktemp)"
+credential_temporary="$(mktemp)"
+printf '%s\\n' ${shellQuote(readyId)} >"$ready_temporary"
+printf 'c%s\\n' ${shellQuote(String(options.credentialsGeneration))} >"$credential_temporary"
+"\${egress_privileged[@]}" /usr/bin/install -d -m 0755 /var/lib/crabhelm
+"\${egress_privileged[@]}" /usr/bin/install -m 0644 "$ready_temporary" /var/lib/crabhelm/ready
+"\${egress_privileged[@]}" /usr/bin/install -m 0644 "$credential_temporary" /var/lib/crabhelm/credentials-generation
+rm -f "$ready_temporary" "$credential_temporary"`;
 }
 
 export function bootstrapInstallScript(options: {
@@ -1070,18 +1365,23 @@ export function bootstrapInstallScript(options: {
   model: string;
   slack: string;
   credentialsGeneration: number;
+  policyHash: string;
   egressLockdown?: EgressLockdownMode;
+  modelBaseUrl?: string;
   // Tests redirect system paths into a temporary root; production omits this.
   egressPersistenceRoot?: string;
 }): string {
-  const egressLockdown = options.egressLockdown ?? "attempt";
+  const egressLockdown = options.egressLockdown ?? "required";
+  const managedSpecUrl = new URL(`${options.base}/managed-spec.json`);
+  managedSpecUrl.searchParams.set("model", options.model);
+  managedSpecUrl.searchParams.set("policyHash", options.policyHash);
   return `#!/usr/bin/env bash
 set -euo pipefail
 umask 077
 : "\${CRABHELM_BOOTSTRAP_TOKEN:?missing bootstrap token}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-${egressLockdownBlock(egressLockdown, options.egressPersistenceRoot)}auth=(--header "Authorization: Bearer $CRABHELM_BOOTSTRAP_TOKEN")
+${runtimeAccountPrelude(options.egressPersistenceRoot)}${egressLockdownBlock(egressLockdown, options.egressPersistenceRoot)}auth=(--header "Authorization: Bearer $CRABHELM_BOOTSTRAP_TOKEN")
 curl --fail --silent --show-error --location "\${auth[@]}" ${shellQuote(`${options.base}/bundle.tgz`)} -o "$work/bundle.tgz"
 actual_archive_sha256="$(sha256sum "$work/bundle.tgz")"
 actual_archive_sha256="\${actual_archive_sha256%% *}"
@@ -1089,36 +1389,31 @@ actual_archive_sha256="\${actual_archive_sha256%% *}"
 tar -xzf "$work/bundle.tgz" -C "$work"
 curl --fail --silent --show-error --location "\${auth[@]}" ${shellQuote(`${options.base}/credentials.env`)} -o "$work/credentials.env"
 chmod 0600 "$work/credentials.env"
-curl --fail --silent --show-error --location "\${auth[@]}" ${shellQuote(`${options.base}/managed-spec.json`)} -o "$work/managed-spec.json"
+curl --fail --silent --show-error --location "\${auth[@]}" ${shellQuote(managedSpecUrl.toString())} -o "$work/managed-spec.json"
 chmod 0600 "$work/managed-spec.json"
 export CRABHELM_BUNDLE_MANIFEST_SHA256=${shellQuote(options.releaseId)}
 export CRABHELM_NODE_SHA256=${shellQuote(options.nodeSha256)}
+export CRABHELM_RELEASE_ID=${shellQuote(`${options.releaseId}.${options.archiveId}.${options.nodeSha256}`)}
 export CRABHELM_CREDENTIAL_FILE="$work/credentials.env"
 export CRABHELM_CREDENTIAL_REFRESH_URL=${shellQuote(`${options.base}/credentials.env`)}
 export CRABHELM_MANAGED_SPEC_FILE="$work/managed-spec.json"
+export CRABHELM_POLICY_HASH=${shellQuote(options.policyHash)}
 export CRABBOX_ADAPTER_ROOT_SESSION_ID=${shellQuote(options.childId)}
 export CRABHELM_STANDALONE=true
 export CRABHELM_MODEL=${shellQuote(options.model)}
 export CRABHELM_SLACK_ENABLED=${shellQuote(options.slack)}
 export CRABHELM_CREDENTIALS_GENERATION=${shellQuote(String(options.credentialsGeneration))}
-/bin/bash "$work/bundle/guest-install.sh"
-if ! write_egress_policy_marker && set_egress_privileged; then
-  printf '%s\\n' 'crabhelm bootstrap: could not record the privileged egress policy state' >&2
-  exit 1
-fi
-marker_dir="$HOME/.openclaw"
-install -d -m 0700 "$marker_dir"
-marker_temporary="$marker_dir/crabhelm-credentials-generation.new-$$"
-printf 'c%s\\n' ${shellQuote(String(options.credentialsGeneration))} >"$marker_temporary"
-chmod 0600 "$marker_temporary"
-mv -f "$marker_temporary" "$marker_dir/crabhelm-credentials-generation"
-marker_temporary="$marker_dir/crabhelm-egress-policy.new-$$"
-printf '%s\\n' ${shellQuote(`v${EGRESS_POLICY_VERSION}:${egressLockdown}`)} >"$marker_temporary"
-chmod 0600 "$marker_temporary"
-mv -f "$marker_temporary" "$marker_dir/crabhelm-egress-policy"
+${options.modelBaseUrl ? `export CRABHELM_MODEL_BASE_URL=${shellQuote(options.modelBaseUrl)}\n` : ""}${managedRuntimeBlock({
+    releaseId: options.releaseId,
+    archiveId: options.archiveId,
+    nodeSha256: options.nodeSha256,
+    policyHash: options.policyHash,
+    credentialsGeneration: options.credentialsGeneration,
+    egressLockdown,
+    persistenceRoot: options.egressPersistenceRoot,
+  })}
 `;
 }
-
 function base64Url(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);

@@ -26,6 +26,7 @@ import type {
 import { CrabboxWorkspaceBootstrap, normalizeEgressLockdownMode } from "./bootstrap.js";
 import { DurableObjectStateDatabase } from "./state.js";
 import { GovernanceController } from "./governance-controller.js";
+import { modelProxyAdmissionReady } from "./model-proxy.js";
 import { signClaims } from "./security.js";
 
 const maxBodyBytes = 64 * 1024;
@@ -50,12 +51,13 @@ export class CrabhelmControlPlane extends DurableObject<Env> {
       validSigningSecret(env.SESSION_SIGNING_SECRET) &&
       validSigningSecret(env.INVOCATION_SIGNING_SECRET) &&
       validSigningSecret(env.RUNTIME_SIGNING_SECRET) &&
-      validVaultKey(env.VAULT_MASTER_KEY),
+      validVaultKey(env.VAULT_MASTER_KEY) &&
+      modelProxyAdmissionReady(env),
     );
     const runtimeTarget: DeploymentRuntimeTarget = {
       ...target,
       admissionOpen,
-      ...(admissionOpen ? {} : { message: "Crabbox, signing, or vault secrets are not configured" }),
+      ...(admissionOpen ? {} : { message: "Crabbox, signing, vault, or enabled model-proxy secrets are not configured" }),
     };
     const provider = new CrabboxChildCoreProvider({
       baseUrl: env.CRABBOX_URL,
@@ -68,6 +70,7 @@ export class CrabhelmControlPlane extends DurableObject<Env> {
         publicUrl: env.RUNTIME_URL,
         releaseId: env.APPLIANCE_MANIFEST_SHA256,
         archiveId: env.APPLIANCE_ARCHIVE_SHA256,
+        nodeId: env.NODE_RUNTIME_SHA256,
         signingSecret: env.BOOTSTRAP_SIGNING_SECRET,
         egressLockdown: normalizeEgressLockdownMode(env.CRABHELM_EGRESS_LOCKDOWN),
         coordinators: env.CLAW_COORDINATOR,

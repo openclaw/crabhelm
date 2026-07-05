@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import type { InvocationGrantClaims, PrincipalRole, RuntimeClaims, RuntimeTicketClaims, SessionClaims, TurnClaims } from "../src/governance-types.js";
+import type { InvocationGrantClaims, ModelClaims, PrincipalRole, RuntimeClaims, RuntimeTicketClaims, SessionClaims, TurnClaims } from "../src/governance-types.js";
 
-type Claims = InvocationGrantClaims | SessionClaims | RuntimeClaims | RuntimeTicketClaims | TurnClaims;
+type Claims = InvocationGrantClaims | SessionClaims | RuntimeClaims | RuntimeTicketClaims | TurnClaims | ModelClaims;
 const encoder = new TextEncoder();
 
 export async function signClaims<T extends Claims>(secret: string, claims: Omit<T, "iss" | "jti" | "iat" | "exp">, ttlSeconds: number): Promise<string> {

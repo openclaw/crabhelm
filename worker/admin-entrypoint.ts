@@ -21,6 +21,10 @@ export class CrabhelmAdmin extends WorkerEntrypoint<Env> {
     return this.#request("POST", "/api/claws", input);
   }
 
+  async updateClaw(clawId: string, input: unknown): Promise<AdminResponse> {
+    return this.#request("PATCH", `/api/claws/${encodeURIComponent(identifier(clawId))}`, input);
+  }
+
   async updatePersona(personaId: string, input: unknown): Promise<AdminResponse> {
     return this.#request("PATCH", `/api/personas/${encodeURIComponent(identifier(personaId))}`, input);
   }

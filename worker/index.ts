@@ -2,7 +2,10 @@ import { bootstrapInstallScript, bootstrapTokenClaims, normalizeEgressLockdownMo
 import { signClaims, verifyClaims } from "./security.js";
 import type { GovernanceAuditEvent, RuntimeClaims, RuntimeTicketClaims, SessionClaims } from "../src/governance-types.js";
 import { verifyAccessIdentity } from "./access.js";
+import { handleModelProxy, modelCredentialEntries, modelProxyEnabled } from "./model-proxy.js";
 import { handleSlackRequest } from "./slack.js";
+import { standaloneBootstrapHashFor } from "../src/domain.js";
+import type { ObservabilityPolicy } from "../src/types.js";
 export { CrabhelmControlPlane } from "./control-plane.js";
 export { CrabhelmClawCoordinator } from "./claw-coordinator.js";
 export { CrabhelmAdmin } from "./admin-entrypoint.js";
@@ -26,6 +29,10 @@ export default {
     if (url.pathname === "/api/runtime/ticket") {
       if (!isRuntimeHost(url, env)) return new Response("not found", { status: 404 });
       return handleRuntimeTicket(request, env);
+    }
+    if (url.pathname.startsWith("/model/")) {
+      if (!isRuntimeHost(url, env)) return new Response("not found", { status: 404 });
+      return handleModelProxy(request, env, url);
     }
     if (url.pathname.startsWith("/api/runtime/")) {
       if (!isRuntimeHost(url, env)) return new Response("not found", { status: 404 });
@@ -86,6 +93,16 @@ async function handleBootstrap(request: Request, env: Env, url: URL): Promise<Re
     return new Response("unauthorized", { status: 401, headers: { "cache-control": "no-store" } });
   }
   const headers = { "cache-control": "no-store, max-age=0", "x-content-type-options": "nosniff" };
+  const model = url.searchParams.get("model") ?? "openai/gpt-5.5";
+  const slack = url.searchParams.get("slack") ?? "false";
+  const policyHash = url.searchParams.get("policyHash") ?? "";
+  const credentials = url.searchParams.get("credentials") ?? "1";
+  if (!/^[a-z0-9][a-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(model)) {
+    return new Response("invalid model", { status: 400, headers });
+  }
+  if (slack !== "true" && slack !== "false") {
+    return new Response("invalid Slack desired state", { status: 400, headers });
+  }
   if (file === "bundle.tgz") {
     const object = await env.APPLIANCES.get(`releases/${release.archiveId}.tgz`);
     if (!object) return new Response("appliance unavailable", { status: 503, headers });
@@ -94,7 +111,16 @@ async function handleBootstrap(request: Request, env: Env, url: URL): Promise<Re
     });
   }
   if (file === "managed-spec.json") {
-    return env.CONTROL_PLANE.getByName("openclaw-org").managedSpec(childId);
+    if (!/^[0-9a-f]{64}$/u.test(policyHash)) {
+      return new Response("invalid managed policy hash", { status: 400, headers });
+    }
+    const response = await env.CONTROL_PLANE.getByName("openclaw-org").managedSpec(childId);
+    if (!response.ok) return response;
+    const spec = await response.json() as { observability?: ObservabilityPolicy };
+    if (!spec.observability || standaloneBootstrapHashFor(model, spec.observability) !== policyHash) {
+      return new Response("managed policy changed", { status: 409, headers });
+    }
+    return Response.json(spec, { headers });
   }
   if (file === "credentials.env") {
     const runtimeToken = await signClaims<RuntimeClaims>(env.RUNTIME_SIGNING_SECRET, {
@@ -102,8 +128,12 @@ async function handleBootstrap(request: Request, env: Env, url: URL): Promise<Re
     }, 10 * 60);
     const claims = await verifyClaims<RuntimeClaims>(env.RUNTIME_SIGNING_SECRET, runtimeToken, { typ: "runtime", aud: "crabhelm-runtime" });
     await env.CLAW_COORDINATOR.getByName(childId).registerRuntimeRefresh({ jti: claims.jti, expiresAt: claims.exp * 1000 });
+    // Model access: with the edge proxy enabled the child receives a per-claw,
+    // audience-bound model token plus a base URL pointing at the Worker, and
+    // never the raw provider key. With it off (default) delivery is unchanged.
+    const modelEntries = await modelCredentialEntries(env, childId);
     const values = [
-      `OPENAI_API_KEY=${shellValue(env.OPENAI_API_KEY)}`,
+      ...modelEntries.map(([key, value]) => `${key}=${shellValue(value)}`),
       `CRABHELM_CONTROL_URL=${shellValue(env.RUNTIME_URL)}`,
       `CRABHELM_RUNTIME_TOKEN=${shellValue(runtimeToken)}`,
       `CRABHELM_CHILD_ID=${shellValue(childId)}`,
@@ -112,14 +142,8 @@ async function handleBootstrap(request: Request, env: Env, url: URL): Promise<Re
       headers: { ...headers, "content-type": "text/plain; charset=utf-8" },
     });
   }
-  const model = url.searchParams.get("model") ?? "openai/gpt-5.5";
-  const slack = url.searchParams.get("slack") ?? "false";
-  const credentials = url.searchParams.get("credentials") ?? "1";
-  if (!/^[a-z0-9][a-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(model)) {
-    return new Response("invalid model", { status: 400, headers });
-  }
-  if (slack !== "true" && slack !== "false") {
-    return new Response("invalid Slack desired state", { status: 400, headers });
+  if (!/^[0-9a-f]{64}$/u.test(policyHash)) {
+    return new Response("invalid managed policy hash", { status: 400, headers });
   }
   if (!/^[1-9][0-9]{0,8}$/u.test(credentials)) {
     return new Response("invalid credentials generation", { status: 400, headers });
@@ -128,12 +152,16 @@ async function handleBootstrap(request: Request, env: Env, url: URL): Promise<Re
     base: `${url.origin}/bootstrap/${encodeURIComponent(childId)}`,
     archiveId: release.archiveId,
     releaseId: release.releaseId,
-    nodeSha256: env.NODE_RUNTIME_SHA256,
+    nodeSha256: release.nodeId,
     childId,
     model,
     slack,
     credentialsGeneration: Number(credentials),
+    policyHash,
     egressLockdown: normalizeEgressLockdownMode(env.CRABHELM_EGRESS_LOCKDOWN),
+    ...(modelProxyEnabled(env)
+      ? { modelBaseUrl: `${new URL(env.RUNTIME_URL).origin}/model/v1` }
+      : {}),
   });
   return new Response(script, {
     headers: { ...headers, "content-type": "text/x-shellscript; charset=utf-8" },

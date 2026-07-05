@@ -21,6 +21,8 @@ test("creates an independent child-core desired state with safe defaults", () =>
   assert.equal(claw.desired.channels.slack.mode, "socket");
   assert.equal(claw.desired.observability.metadataOnly, true);
   assert.equal(claw.desired.observability.logLevel, "info");
+  assert.equal(claw.desired.observability.otel.enabled, false);
+  assert.equal(claw.desired.observability.otel.serviceName, "crabhelm-ada-s-maintainer-claw");
   assert.equal(claw.observed.controlLink.status, "pending");
   assert.equal(claw.observed.controlLink.transport, "openclaw-node");
   assert.equal(claw.observed.controlLink.command, "crabhelm.child.status");
@@ -36,6 +38,43 @@ test("child policy hash covers managed access and logging policy", () => {
     observability: { logLevel: "debug" },
   });
   assert.notEqual(childPolicyHash(updated), childPolicyHash(claw));
+});
+
+test("validates and hashes managed OpenTelemetry policy", () => {
+  const claw = createClawRecord({
+    name: "Observed",
+    owner: { subject: "github:observed", label: "@observed", source: "github" },
+  });
+  const enabled = updateClawRecord(claw, {
+    observability: {
+      otel: {
+        enabled: true,
+        endpoint: "https://otel.example.test/v1",
+        traces: true,
+        metrics: true,
+        logs: false,
+        sampleRate: 0.2,
+      },
+    },
+  });
+  assert.equal(enabled.desired.observability.otel.endpoint, "https://otel.example.test/v1");
+  assert.notEqual(childPolicyHash(enabled), childPolicyHash(claw));
+  assert.throws(
+    () => updateClawRecord(claw, { observability: { otel: { enabled: true, endpoint: "http://collector.test:4318" } } }),
+    /HTTPS URL/,
+  );
+  assert.throws(
+    () => updateClawRecord(claw, { observability: { otel: { enabled: true, endpoint: "https://collector.test", traces: false, metrics: false } } }),
+    /requires traces, metrics, or both/,
+  );
+  for (const field of ["enabled", "traces", "metrics"] as const) {
+    assert.throws(
+      () => updateClawRecord(claw, {
+        observability: { otel: { [field]: "false" as unknown as boolean } },
+      }),
+      new RegExp(`${field} must be a boolean`),
+    );
+  }
 });
 
 test("desired updates advance generation and preserve identity", () => {
@@ -64,6 +103,29 @@ test("semantic no-op updates do not advance generation", () => {
   const updated = updateClawRecord(claw, { name: "Release Claw" });
   assert.equal(updated, claw);
   assert.equal(updated.revision, claw.revision);
+});
+
+test("validates and hashes per-claw appliance release overrides", () => {
+  const claw = createClawRecord({
+    name: "Canary",
+    owner: { subject: "github:canary", label: "@canary", source: "github" },
+  });
+  const canary = updateClawRecord(claw, {
+    deployment: {
+      appliance: { manifestSha256: "a".repeat(64), archiveSha256: "b".repeat(64), nodeSha256: "c".repeat(64) },
+    },
+  });
+  assert.equal(canary.desired.deployment.appliance?.manifestSha256, "a".repeat(64));
+  assert.notEqual(childPolicyHash(canary), childPolicyHash(claw));
+  const reverted = updateClawRecord(canary, { deployment: { appliance: null } });
+  assert.equal(reverted.desired.deployment.appliance, undefined);
+  assert.notEqual(childPolicyHash(reverted), childPolicyHash(canary));
+  assert.throws(
+    () => updateClawRecord(claw, {
+      deployment: { appliance: { manifestSha256: "not-a-digest", archiveSha256: "b".repeat(64), nodeSha256: "c".repeat(64) } },
+    }),
+    /lowercase SHA-256/,
+  );
 });
 
 test("credential rotation advances the epoch, generation, and policy hash", () => {
@@ -107,7 +169,6 @@ test("records persisted before the credential epoch behave as epoch one", () => 
   const rotated = rotateClawCredentials(legacy);
   assert.equal(clawCredentialsGeneration(rotated), 2);
 });
-
 test("rejects an inference provider that disagrees with the model", () => {
   assert.throws(
     () =>

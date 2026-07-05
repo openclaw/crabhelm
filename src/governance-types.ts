@@ -191,6 +191,20 @@ export type ManagedAgentSpec = {
   capabilityIds: string[];
   instructions: PersonaInstructions;
   publishedContext: PublishedContext[];
+  observability: {
+    logLevel: "error" | "warn" | "info" | "debug";
+    metadataOnly: true;
+    otel: {
+      enabled: boolean;
+      endpoint?: string;
+      serviceName: string;
+      traces: boolean;
+      metrics: boolean;
+      logs: false;
+      sampleRate: number;
+      flushIntervalMs: number;
+    };
+  };
   skills: Array<Pick<SkillRecord, "id" | "name" | "slug" | "version" | "digest" | "files">>;
   readOnly: true;
 };
@@ -327,4 +341,17 @@ export type TurnClaims = {
   workspaceId?: string;
   channelId?: string;
   threadTs?: string;
+};
+
+// Bearer presented by a child Gateway to the edge model proxy. It stands in for
+// the raw provider key on the agent VM: per-claw, audience-bound, and only ever
+// exchanged for the real key inside the Worker.
+export type ModelClaims = {
+  typ: "model";
+  iss: "crabhelm";
+  aud: "crabhelm-model";
+  jti: string;
+  iat: number;
+  exp: number;
+  clawId: string;
 };
