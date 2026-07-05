@@ -27,6 +27,10 @@ export type ApplianceRelease = {
   nodeSha256: string;
 };
 
+export type DeploymentInput = Partial<Omit<DeploymentSpec, "appliance">> & {
+  appliance?: ApplianceRelease | null;
+};
+
 export type InferencePolicy = {
   provider: string;
   model: string;
@@ -214,7 +218,7 @@ export type CreateClawInput = {
   owner: OwnerRef;
   templateId?: string;
   templateVersion?: number;
-  deployment?: Partial<DeploymentSpec>;
+  deployment?: DeploymentInput;
   inference?: Partial<InferencePolicy>;
   slack?: Partial<SlackPolicy>;
   access?: Partial<AccessPolicy>;
@@ -224,7 +228,7 @@ export type CreateClawInput = {
 export type UpdateClawInput = Partial<
   Pick<ClawDesired, "name" | "templateId" | "templateVersion" | "owner">
 > & {
-  deployment?: Partial<DeploymentSpec>;
+  deployment?: DeploymentInput;
   inference?: Partial<InferencePolicy>;
   slack?: Partial<SlackPolicy>;
   access?: Partial<AccessPolicy>;

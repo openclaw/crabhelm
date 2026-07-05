@@ -71,6 +71,9 @@ test("validates and hashes per-claw appliance release overrides", () => {
   });
   assert.equal(canary.desired.deployment.appliance?.manifestSha256, "a".repeat(64));
   assert.notEqual(childPolicyHash(canary), childPolicyHash(claw));
+  const reverted = updateClawRecord(canary, { deployment: { appliance: null } });
+  assert.equal(reverted.desired.deployment.appliance, undefined);
+  assert.notEqual(childPolicyHash(reverted), childPolicyHash(canary));
   assert.throws(
     () => updateClawRecord(claw, {
       deployment: { appliance: { manifestSha256: "not-a-digest", archiveSha256: "b".repeat(64), nodeSha256: "c".repeat(64) } },

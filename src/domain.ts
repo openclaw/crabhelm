@@ -206,6 +206,7 @@ export function createClawRecord(input: CreateClawInput, now = new Date()): Claw
   if (!slugPattern.test(profile)) {
     throw new Error("deployment profile must be a lowercase DNS label");
   }
+  const appliance = normalizeAppliance(input.deployment);
   const timestamp = now.toISOString();
   return {
     id: randomUUID(),
@@ -223,7 +224,7 @@ export function createClawRecord(input: CreateClawInput, now = new Date()): Claw
         ...(input.deployment?.region
           ? { region: requireText(input.deployment.region, "region", 80) }
           : {}),
-        ...(normalizeAppliance(input.deployment) ? { appliance: normalizeAppliance(input.deployment) } : {}),
+        ...(appliance ? { appliance } : {}),
       },
       inference: normalizeModels(input.inference),
       channels: { slack: normalizeSlack(input.slack, slug) },

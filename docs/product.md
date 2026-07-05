@@ -65,7 +65,7 @@ Targets are administrator policy. Each pins adapter, region, appliance profile, 
 
 Current production target: AWS US East through Crabbox. The data model and provider router are not Crabbox-specific.
 
-Each claw may override the fleet appliance with explicit manifest, archive, and bootstrap-Node SHA-256 values. Changing them keeps the allocated workspace, advances desired generation, and reinstalls until the complete release identity plus live inference converge. Canary one claw and verify readiness before changing the fleet default or applying the release elsewhere.
+Each claw may override the fleet appliance with explicit manifest, archive, and bootstrap-Node SHA-256 values. Changing them keeps the allocated workspace, advances desired generation, and reinstalls until the complete release identity plus live inference converge. Canary one claw and verify readiness before changing the fleet default or applying the release elsewhere; set the override to `null` afterward to resume following fleet defaults.
 
 ## Policies
 
