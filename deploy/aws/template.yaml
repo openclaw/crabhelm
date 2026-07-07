@@ -1,0 +1,1444 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  AWS commercial-partition and GovCloud peer deployment for Crabhelm: singleton
+  ECS/Fargate service behind an HTTPS Application Load Balancer, PostgreSQL,
+  private S3 buckets, and SQS. AWS China Regions are not supported.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Image and rollout
+        Parameters:
+          - CreateEcrRepository
+          - EcrRepositoryName
+          - ImageUri
+          - ImageTag
+          - ProvisionService
+      - Label:
+          default: HTTPS ingress
+        Parameters:
+          - CertificateArn
+          - ConsoleHostname
+          - RuntimeHostname
+          - IngressCidr
+          - LoadBalancerDeletionProtection
+          - OidcIssuer
+          - OidcAuthorizationEndpoint
+          - OidcTokenEndpoint
+          - OidcUserInfoEndpoint
+          - OidcClientId
+          - OidcScopes
+          - OidcClientSecretVersion
+      - Label:
+          default: Crabhelm configuration
+        Parameters:
+          - ApplicationSecretArn
+          - ApplicationSecretKmsKeyArn
+          - CrabboxUrl
+          - CrabboxTargetId
+          - CrabboxTargetLabel
+          - CrabboxTargetRegion
+          - CrabboxProfile
+          - CrabboxTtlSeconds
+          - CrabboxIdleTimeoutSeconds
+          - AdminEmails
+          - AdminGroups
+          - ProbeEmail
+          - GitHubOauthClientId
+          - EgressLockdown
+          - ModelProxyMode
+          - NodeRuntimeSha256
+          - ApplianceArchiveSha256
+          - ApplianceManifestSha256
+      - Label:
+          default: Database and retention
+        Parameters:
+          - DatabaseName
+          - DatabaseInstanceClass
+          - DatabaseAllocatedStorage
+          - DatabaseMultiAz
+          - DatabaseDeletionProtection
+          - PostgresMajorVersion
+          - LogRetentionDays
+      - Label:
+          default: Monitoring and operations
+        Parameters:
+          - OperatorAlertTopicName
+
+Parameters:
+  CreateEcrRepository:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Create a retained ECR repository in this stack.
+
+  EcrRepositoryName:
+    Type: String
+    Default: crabhelm
+    AllowedPattern: "^[a-z0-9]+(?:[._/-][a-z0-9]+)*$"
+    Description: Repository used when CreateEcrRepository is true.
+
+  ImageUri:
+    Type: String
+    Default: ""
+    Description: Full immutable container image URI when using an existing repository.
+
+  ImageTag:
+    Type: String
+    Default: bootstrap
+    AllowedPattern: "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+    Description: Image tag in the stack-created ECR repository. Prefer a commit SHA.
+
+  ProvisionService:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Create the ECS service. Set false on the first stack-owned-ECR deployment,
+      push the image, then update to true.
+
+  CertificateArn:
+    Type: String
+    AllowedPattern: "^arn:(aws|aws-us-gov):acm:[a-z0-9-]+:[0-9]{12}:certificate/[A-Za-z0-9-]+$"
+    Description: ACM certificate in this Region covering both hostnames.
+
+  ConsoleHostname:
+    Type: String
+    AllowedPattern: "^[A-Za-z0-9.-]+$"
+    Description: Console hostname, without scheme or path.
+
+  RuntimeHostname:
+    Type: String
+    AllowedPattern: "^[A-Za-z0-9.-]+$"
+    Description: Runtime hostname, without scheme or path.
+
+  IngressCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    AllowedPattern: "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}/(?:[0-9]|[12][0-9]|3[0-2])$"
+    Description: IPv4 range allowed to reach ALB HTTPS. Runtime claws need access.
+
+  LoadBalancerDeletionProtection:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Keep false for initial rollback safety; enable after validating the deployment.
+
+  OidcIssuer:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^https://.+$"
+    Description: HTTPS OIDC issuer URL used by the ALB.
+
+  OidcAuthorizationEndpoint:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^https://.+$"
+    Description: HTTPS OIDC authorization endpoint.
+
+  OidcTokenEndpoint:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^https://.+$"
+    Description: HTTPS OIDC token endpoint.
+
+  OidcUserInfoEndpoint:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^https://.+$"
+    Description: HTTPS OIDC user-info endpoint.
+
+  OidcClientId:
+    Type: String
+    MaxLength: 512
+    Description: OIDC client ID. Store OIDC_CLIENT_SECRET in ApplicationSecretArn.
+
+  OidcScopes:
+    Type: String
+    Default: openid email profile
+    MaxLength: 512
+    AllowedPattern: "^openid email(?: [^\\s]+)*$"
+    Description: Space-delimited scopes starting with openid email. Append the provider's group scope when using AdminGroups.
+
+  OidcClientSecretVersion:
+    Type: String
+    Default: "1"
+    AllowedPattern: "^[A-Za-z0-9]{1,16}$"
+    Description: Increment after rotating OIDC_CLIENT_SECRET so CloudFormation refreshes the ALB rule.
+
+  ApplicationSecretArn:
+    Type: String
+    AllowedPattern: "^arn:(aws|aws-us-gov):secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:.+$"
+    Description: ARN of the same-account, same-Region Secrets Manager JSON secret documented in deploy/aws/README.md.
+
+  ApplicationSecretKmsKeyArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:(aws|aws-us-gov):kms:[a-z0-9-]+:[0-9]{12}:key/.+$"
+    Description: Optional customer-managed KMS key ARN encrypting ApplicationSecretArn.
+
+  CrabboxUrl:
+    Type: String
+    AllowedPattern: "^https://.+$"
+    Description: HTTPS Crabbox control-plane URL.
+
+  CrabboxTargetId:
+    Type: String
+    Default: default
+    AllowedPattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+
+  CrabboxTargetLabel:
+    Type: String
+    Default: Default provider target
+    MaxLength: 120
+
+  CrabboxTargetRegion:
+    Type: String
+    Default: default
+    MaxLength: 128
+
+  CrabboxProfile:
+    Type: String
+    Default: openclaw-core
+    AllowedPattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+
+  CrabboxTtlSeconds:
+    Type: Number
+    Default: 14400
+    MinValue: 300
+    MaxValue: 86400
+
+  CrabboxIdleTimeoutSeconds:
+    Type: Number
+    Default: 14400
+    MinValue: 300
+    MaxValue: 86400
+
+  AdminEmails:
+    Type: String
+    MaxLength: 4096
+    AllowedPattern: "^\\s*[^,\\s@]+@[^,\\s@]+\\.[^,\\s@]+(?:\\s*,\\s*[^,\\s@]+@[^,\\s@]+\\.[^,\\s@]+)*\\s*$"
+    Description: Required comma-separated bootstrap administrator emails matched from verified OIDC claims.
+
+  AdminGroups:
+    Type: String
+    Default: ""
+    Description: Comma-separated administrator groups matched from verified OIDC claims.
+
+  ProbeEmail:
+    Type: String
+    Default: ""
+    Description: Administrator identity used by the production probe.
+
+  GitHubOauthClientId:
+    Type: String
+    MaxLength: 512
+
+  EgressLockdown:
+    Type: String
+    Default: required
+    AllowedValues: [required, "off"]
+
+  ModelProxyMode:
+    Type: String
+    Default: "off"
+    AllowedValues: ["on", "off"]
+
+  NodeRuntimeSha256:
+    Type: String
+    AllowedPattern: "^[0-9a-f]{64}$"
+
+  ApplianceArchiveSha256:
+    Type: String
+    AllowedPattern: "^[0-9a-f]{64}$"
+
+  ApplianceManifestSha256:
+    Type: String
+    AllowedPattern: "^[0-9a-f]{64}$"
+
+  DatabaseName:
+    Type: String
+    Default: crabhelm
+    AllowedPattern: "^[A-Za-z][A-Za-z0-9_]{0,62}$"
+
+  DatabaseInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+    AllowedPattern: "^db\\.[a-z0-9]+\\.[a-z0-9]+$"
+
+  DatabaseAllocatedStorage:
+    Type: Number
+    Default: 20
+    MinValue: 20
+    MaxValue: 500
+
+  DatabaseMultiAz:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+
+  DatabaseDeletionProtection:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Keep false for initial rollback safety; enable after validating the deployment.
+
+  PostgresMajorVersion:
+    Type: String
+    Default: "17"
+    AllowedValues: ["16", "17"]
+
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [7, 14, 30, 60, 90, 120, 150, 180, 365]
+
+  OperatorAlertTopicName:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^[A-Za-z0-9_-]{1,256}$"
+    Description: Optional same-account, same-Region SNS topic name for audit dead-letter queue alarms. Subscriptions are managed outside this stack.
+
+Rules:
+  ImageSourceRequired:
+    Assertions:
+      - Assert: !Or
+          - !Equals [!Ref CreateEcrRepository, "true"]
+          - !Not [!Equals [!Ref ImageUri, ""]]
+        AssertDescription: Set ImageUri or set CreateEcrRepository to true.
+
+  DistinctHosts:
+    Assertions:
+      - Assert: !Not [!Equals [!Ref ConsoleHostname, !Ref RuntimeHostname]]
+        AssertDescription: ConsoleHostname and RuntimeHostname must differ.
+
+  OidcConfigurationRequired:
+    Assertions:
+      - Assert: !And
+          - !Not [!Equals [!Ref OidcIssuer, ""]]
+          - !Not [!Equals [!Ref OidcAuthorizationEndpoint, ""]]
+          - !Not [!Equals [!Ref OidcTokenEndpoint, ""]]
+          - !Not [!Equals [!Ref OidcUserInfoEndpoint, ""]]
+          - !Not [!Equals [!Ref OidcClientId, ""]]
+        AssertDescription: All OIDC endpoint and client parameters are required.
+
+  AdministratorRequired:
+    Assertions:
+      - Assert: !Not [!Equals [!Ref AdminEmails, ""]]
+        AssertDescription: Set at least one bootstrap administrator email. Groups may grant additional administrators.
+
+Conditions:
+  CreateRepository: !Equals [!Ref CreateEcrRepository, "true"]
+  StartService: !Equals [!Ref ProvisionService, "true"]
+  UseModelProxy: !Equals [!Ref ModelProxyMode, "on"]
+  UseDatabaseMultiAz: !Equals [!Ref DatabaseMultiAz, "true"]
+  ProtectDatabase: !Equals [!Ref DatabaseDeletionProtection, "true"]
+  ProtectLoadBalancer: !Equals [!Ref LoadBalancerDeletionProtection, "true"]
+  UseApplicationSecretKmsKey:
+    !Not [!Equals [!Ref ApplicationSecretKmsKeyArn, ""]]
+  UseOperatorAlertTopic: !Not [!Equals [!Ref OperatorAlertTopicName, ""]]
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.42.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-vpc
+        - Key: Project
+          Value: crabhelm
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-igw
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: 10.42.0.0/24
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-public-a
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: 10.42.1.0/24
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-public-b
+
+  ApplicationSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: 10.42.10.0/24
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-app-a
+
+  ApplicationSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: 10.42.11.0/24
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-app-b
+
+  DatabaseSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: 10.42.20.0/24
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-db-a
+
+  DatabaseSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: 10.42.21.0/24
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-db-b
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-public
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetA
+
+  PublicSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetB
+
+  NatEip:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-nat
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEip.AllocationId
+      ConnectivityType: public
+      SubnetId: !Ref PublicSubnetA
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-nat
+
+  ApplicationRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-application
+
+  ApplicationDefaultRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+      RouteTableId: !Ref ApplicationRouteTable
+
+  ApplicationSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref ApplicationRouteTable
+      SubnetId: !Ref ApplicationSubnetA
+
+  ApplicationSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref ApplicationRouteTable
+      SubnetId: !Ref ApplicationSubnetB
+
+  DatabaseRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-database
+
+  DatabaseSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref DatabaseRouteTable
+      SubnetId: !Ref DatabaseSubnetA
+
+  DatabaseSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref DatabaseRouteTable
+      SubnetId: !Ref DatabaseSubnetB
+
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Crabhelm task egress and ALB-only ingress
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - Description: HTTPS APIs and AWS public endpoints
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - Description: DNS over UDP
+          IpProtocol: udp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: 10.42.0.2/32
+        - Description: DNS over TCP
+          IpProtocol: tcp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: 10.42.0.2/32
+        - Description: ECS task credentials and metadata
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 169.254.170.2/32
+        - Description: PostgreSQL
+          IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          DestinationSecurityGroupId: !GetAtt DatabaseSecurityGroup.GroupId
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-task
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public HTTPS ingress for Crabhelm
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - Description: HTTPS
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref IngressCidr
+      SecurityGroupEgress:
+        - Description: Crabhelm task HTTP
+          IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          DestinationSecurityGroupId: !GetAtt TaskSecurityGroup.GroupId
+        - Description: OIDC provider HTTPS
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-alb
+
+  TaskIngressFromAlb:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: ALB health checks and application traffic
+      FromPort: 8080
+      GroupId: !GetAtt TaskSecurityGroup.GroupId
+      IpProtocol: tcp
+      SourceSecurityGroupId: !GetAtt AlbSecurityGroup.GroupId
+      ToPort: 8080
+
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PostgreSQL reachable only from Crabhelm tasks
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - Description: No outbound initiation; stateful replies remain allowed
+          IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 127.0.0.1/32
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-database
+
+  DatabaseIngressFromTask:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: PostgreSQL from Crabhelm tasks
+      FromPort: 5432
+      GroupId: !GetAtt DatabaseSecurityGroup.GroupId
+      IpProtocol: tcp
+      SourceSecurityGroupId: !GetAtt TaskSecurityGroup.GroupId
+      ToPort: 5432
+
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Isolated Crabhelm database subnets
+      SubnetIds:
+        - !Ref DatabaseSubnetA
+        - !Ref DatabaseSubnetB
+      Tags:
+        - Key: Project
+          Value: crabhelm
+
+  DatabaseParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: !Sub Crabhelm PostgreSQL ${PostgresMajorVersion} parameters
+      Family: !Sub postgres${PostgresMajorVersion}
+      Parameters:
+        rds.force_ssl: "1"
+      Tags:
+        - Key: Project
+          Value: crabhelm
+
+  DatabaseCredentials:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub ${AWS::StackName} PostgreSQL credentials
+      GenerateSecretString:
+        ExcludeCharacters: ' /@"'
+        GenerateStringKey: password
+        PasswordLength: 48
+        RequireEachIncludedType: true
+        SecretStringTemplate: '{"username":"crabhelm_admin"}'
+      Tags:
+        - Key: DataClassification
+          Value: database-credential
+        - Key: Project
+          Value: crabhelm
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      AllocatedStorage: !Ref DatabaseAllocatedStorage
+      AllowMajorVersionUpgrade: false
+      AutoMinorVersionUpgrade: true
+      BackupRetentionPeriod: 7
+      CopyTagsToSnapshot: true
+      DBInstanceClass: !Ref DatabaseInstanceClass
+      DBName: !Ref DatabaseName
+      DBParameterGroupName: !Ref DatabaseParameterGroup
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      DeleteAutomatedBackups: false
+      DeletionProtection: !If [ProtectDatabase, true, false]
+      EnableCloudwatchLogsExports:
+        - postgresql
+        - upgrade
+      Engine: postgres
+      EngineVersion: !Ref PostgresMajorVersion
+      MasterUsername: !Sub "{{resolve:secretsmanager:${DatabaseCredentials}:SecretString:username}}"
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DatabaseCredentials}:SecretString:password}}"
+      MaxAllocatedStorage: 1024
+      MultiAZ: !If [UseDatabaseMultiAz, true, false]
+      NetworkType: IPV4
+      Port: 5432
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      StorageType: gp3
+      VPCSecurityGroups:
+        - !GetAtt DatabaseSecurityGroup.GroupId
+      Tags:
+        - Key: Project
+          Value: crabhelm
+
+  AppliancesBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: abort-incomplete-multipart-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: DataClassification
+          Value: private-appliance
+        - Key: Project
+          Value: crabhelm
+
+  OAuthVaultBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: abort-incomplete-multipart-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: DataClassification
+          Value: encrypted-oauth-vault
+        - Key: Project
+          Value: crabhelm
+
+  AuditArchiveBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: abort-incomplete-multipart-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: DataClassification
+          Value: audit-metadata
+        - Key: Project
+          Value: crabhelm
+
+  AppliancesBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Bucket: !Ref AppliancesBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt AppliancesBucket.Arn
+              - !Sub ${AppliancesBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  OAuthVaultBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Bucket: !Ref OAuthVaultBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt OAuthVaultBucket.Arn
+              - !Sub ${OAuthVaultBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  AuditArchiveBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      Bucket: !Ref AuditArchiveBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt AuditArchiveBucket.Arn
+              - !Sub ${AuditArchiveBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  AuditDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Project
+          Value: crabhelm
+
+  AuditQueue:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      MessageRetentionPeriod: 1209600
+      ReceiveMessageWaitTimeSeconds: 20
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt AuditDeadLetterQueue.Arn
+        maxReceiveCount: 5
+      SqsManagedSseEnabled: true
+      VisibilityTimeout: 300
+      Tags:
+        - Key: DataClassification
+          Value: audit-metadata
+        - Key: Project
+          Value: crabhelm
+
+  AuditDeadLetterQueueVisibleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: UseOperatorAlertTopic
+    Properties:
+      ActionsEnabled: true
+      AlarmActions:
+        - !Sub arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:${OperatorAlertTopicName}
+      AlarmDescription: !Sub Visible messages require operator review and redrive in ${AuditDeadLetterQueue.QueueName}.
+      ComparisonOperator: GreaterThanThreshold
+      DatapointsToAlarm: 1
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt AuditDeadLetterQueue.QueueName
+      EvaluationPeriods: 1
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Period: 60
+      Statistic: Maximum
+      Threshold: 0
+      TreatMissingData: notBreaching
+
+  AuditQueueOldestMessageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: UseOperatorAlertTopic
+    Properties:
+      ActionsEnabled: true
+      AlarmActions:
+        - !Sub arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:${OperatorAlertTopicName}
+      AlarmDescription: !Sub Audit messages have remained visible in ${AuditQueue.QueueName} for more than five minutes.
+      ComparisonOperator: GreaterThanThreshold
+      DatapointsToAlarm: 2
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt AuditQueue.QueueName
+      EvaluationPeriods: 2
+      MetricName: ApproximateAgeOfOldestMessage
+      Namespace: AWS/SQS
+      Period: 60
+      Statistic: Maximum
+      Threshold: 300
+      TreatMissingData: notBreaching
+
+  ContainerRepository:
+    Type: AWS::ECR::Repository
+    Condition: CreateRepository
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: IMMUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: >-
+          {"rules":[{"rulePriority":1,"description":"remove untagged images after seven days","selection":{"tagStatus":"untagged","countType":"sinceImagePushed","countUnit":"days","countNumber":7},"action":{"type":"expire"}}]}
+      RepositoryName: !Ref EcrRepositoryName
+      Tags:
+        - Key: Project
+          Value: crabhelm
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/ecs/${AWS::StackName}/crabhelm
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Project
+          Value: crabhelm
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: Project
+          Value: crabhelm
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: read-runtime-secrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref ApplicationSecretArn
+                  - !Ref DatabaseCredentials
+              - !If
+                - UseApplicationSecretKmsKey
+                - Sid: DecryptApplicationSecret
+                  Effect: Allow
+                  Action: kms:Decrypt
+                  Resource: !Ref ApplicationSecretKmsKeyArn
+                  Condition:
+                    StringEquals:
+                      kms:ViaService: !Sub secretsmanager.${AWS::Region}.${AWS::URLSuffix}
+                - !Ref AWS::NoValue
+      Tags:
+        - Key: Project
+          Value: crabhelm
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: crabhelm-data-plane
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ListPrivateBuckets
+                Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
+                Resource:
+                  - !GetAtt AppliancesBucket.Arn
+                  - !GetAtt OAuthVaultBucket.Arn
+                  - !GetAtt AuditArchiveBucket.Arn
+              - Sid: ReadAppliances
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub ${AppliancesBucket.Arn}/releases/*
+              - Sid: ManageEncryptedVault
+                Effect: Allow
+                Action:
+                  - s3:AbortMultipartUpload
+                  - s3:DeleteObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:ListMultipartUploadParts
+                  - s3:PutObject
+                Resource: !Sub ${OAuthVaultBucket.Arn}/*
+              - Sid: WriteAuditArchive
+                Effect: Allow
+                Action:
+                  - s3:AbortMultipartUpload
+                  - s3:ListMultipartUploadParts
+                  - s3:PutObject
+                Resource: !Sub ${AuditArchiveBucket.Arn}/*
+              - Sid: ProcessAuditQueue
+                Effect: Allow
+                Action:
+                  - sqs:ChangeMessageVisibility
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:GetQueueUrl
+                  - sqs:ReceiveMessage
+                  - sqs:SendMessage
+                Resource: !GetAtt AuditQueue.Arn
+      Tags:
+        - Key: Project
+          Value: crabhelm
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Cpu: "512"
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      Family: !Sub ${AWS::StackName}-crabhelm
+      Memory: "1024"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: crabhelm
+          Essential: true
+          Image: !If
+            - CreateRepository
+            - !Sub ${ContainerRepository.RepositoryUri}:${ImageTag}
+            - !Ref ImageUri
+          PortMappings:
+            - Name: http
+              AppProtocol: http
+              ContainerPort: 8080
+              HostPort: 8080
+              Protocol: tcp
+          Environment:
+            - Name: NODE_ENV
+              Value: production
+            - Name: PORT
+              Value: "8080"
+            - Name: CRABHELM_PLATFORM
+              Value: aws
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: AWS_LOAD_BALANCER_ARN
+              Value: !Ref LoadBalancer
+            - Name: PUBLIC_URL
+              Value: !Sub https://${ConsoleHostname}
+            - Name: RUNTIME_URL
+              Value: !Sub https://${RuntimeHostname}
+            - Name: OIDC_ISSUER
+              Value: !Ref OidcIssuer
+            - Name: OIDC_CLIENT_ID
+              Value: !Ref OidcClientId
+            - Name: ACCESS_ADMIN_EMAILS
+              Value: !Ref AdminEmails
+            - Name: ACCESS_ADMIN_GROUPS
+              Value: !Ref AdminGroups
+            - Name: CRABHELM_PROBE_EMAIL
+              Value: !Ref ProbeEmail
+            - Name: GITHUB_OAUTH_CLIENT_ID
+              Value: !Ref GitHubOauthClientId
+            - Name: CRABBOX_URL
+              Value: !Ref CrabboxUrl
+            - Name: CRABBOX_TARGET_ID
+              Value: !Ref CrabboxTargetId
+            - Name: CRABBOX_TARGET_LABEL
+              Value: !Ref CrabboxTargetLabel
+            - Name: CRABBOX_TARGET_REGION
+              Value: !Ref CrabboxTargetRegion
+            - Name: CRABBOX_PROFILE
+              Value: !Ref CrabboxProfile
+            - Name: CRABBOX_TTL_SECONDS
+              Value: !Sub ${CrabboxTtlSeconds}
+            - Name: CRABBOX_IDLE_TIMEOUT_SECONDS
+              Value: !Sub ${CrabboxIdleTimeoutSeconds}
+            - Name: CRABHELM_EGRESS_LOCKDOWN
+              Value: !Ref EgressLockdown
+            - Name: CRABHELM_MODEL_PROXY
+              Value: !Ref ModelProxyMode
+            - Name: NODE_RUNTIME_SHA256
+              Value: !Ref NodeRuntimeSha256
+            - Name: APPLIANCE_ARCHIVE_SHA256
+              Value: !Ref ApplianceArchiveSha256
+            - Name: APPLIANCE_MANIFEST_SHA256
+              Value: !Ref ApplianceManifestSha256
+            - Name: AWS_APPLIANCES_BUCKET
+              Value: !Ref AppliancesBucket
+            - Name: AWS_OAUTH_VAULT_BUCKET
+              Value: !Ref OAuthVaultBucket
+            - Name: AWS_AUDIT_ARCHIVE_BUCKET
+              Value: !Ref AuditArchiveBucket
+            - Name: AWS_AUDIT_QUEUE_URL
+              Value: !Ref AuditQueue
+            - Name: DATABASE_HOST
+              Value: !GetAtt Database.Endpoint.Address
+            - Name: DATABASE_PORT
+              Value: !GetAtt Database.Endpoint.Port
+            - Name: DATABASE_NAME
+              Value: !Ref DatabaseName
+          Secrets:
+            - Name: CRABBOX_TOKEN
+              ValueFrom: !Sub "${ApplicationSecretArn}:CRABBOX_TOKEN::"
+            - Name: BOOTSTRAP_SIGNING_SECRET
+              ValueFrom: !Sub "${ApplicationSecretArn}:BOOTSTRAP_SIGNING_SECRET::"
+            - Name: SESSION_SIGNING_SECRET
+              ValueFrom: !Sub "${ApplicationSecretArn}:SESSION_SIGNING_SECRET::"
+            - Name: INVOCATION_SIGNING_SECRET
+              ValueFrom: !Sub "${ApplicationSecretArn}:INVOCATION_SIGNING_SECRET::"
+            - Name: RUNTIME_SIGNING_SECRET
+              ValueFrom: !Sub "${ApplicationSecretArn}:RUNTIME_SIGNING_SECRET::"
+            - Name: VAULT_MASTER_KEY
+              ValueFrom: !Sub "${ApplicationSecretArn}:VAULT_MASTER_KEY::"
+            - Name: OPENAI_API_KEY
+              ValueFrom: !Sub "${ApplicationSecretArn}:OPENAI_API_KEY::"
+            - Name: SLACK_BOT_TOKEN
+              ValueFrom: !Sub "${ApplicationSecretArn}:SLACK_BOT_TOKEN::"
+            - Name: SLACK_SIGNING_SECRET
+              ValueFrom: !Sub "${ApplicationSecretArn}:SLACK_SIGNING_SECRET::"
+            - Name: GITHUB_OAUTH_CLIENT_SECRET
+              ValueFrom: !Sub "${ApplicationSecretArn}:GITHUB_OAUTH_CLIENT_SECRET::"
+            - !If
+              - UseModelProxy
+              - Name: MODEL_SIGNING_SECRET
+                ValueFrom: !Sub "${ApplicationSecretArn}:MODEL_SIGNING_SECRET::"
+              - !Ref AWS::NoValue
+            - Name: DATABASE_USER
+              ValueFrom: !Join
+                - ":"
+                - - !Ref DatabaseCredentials
+                  - username
+                  - ""
+                  - ""
+            - Name: DATABASE_PASSWORD
+              ValueFrom: !Join
+                - ":"
+                - - !Ref DatabaseCredentials
+                  - password
+                  - ""
+                  - ""
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - >-
+                node -e "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+            Interval: 30
+            Retries: 3
+            StartPeriod: 60
+            Timeout: 5
+          LinuxParameters:
+            InitProcessEnabled: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: crabhelm
+              mode: non-blocking
+              max-buffer-size: 25m
+          ReadonlyRootFilesystem: true
+          StopTimeout: 120
+          Ulimits:
+            - Name: nofile
+              SoftLimit: 65535
+              HardLimit: 65535
+      Tags:
+        - Key: Project
+          Value: crabhelm
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn:
+      - InternetGatewayAttachment
+      - PublicDefaultRoute
+      - PublicSubnetARouteTableAssociation
+      - PublicSubnetBRouteTableAssociation
+    Properties:
+      IpAddressType: ipv4
+      LoadBalancerAttributes:
+        - Key: deletion_protection.enabled
+          Value: !If [ProtectLoadBalancer, "true", "false"]
+        - Key: idle_timeout.timeout_seconds
+          Value: "1200"
+        - Key: routing.http.desync_mitigation_mode
+          Value: strictest
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: "true"
+        - Key: routing.http.preserve_host_header.enabled
+          Value: "true"
+      Scheme: internet-facing
+      SecurityGroups:
+        - !GetAtt AlbSecurityGroup.GroupId
+      Subnets:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+      Type: application
+      Tags:
+        - Key: Project
+          Value: crabhelm
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /healthz
+      HealthCheckPort: traffic-port
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Matcher:
+        HttpCode: "200"
+      Port: 8080
+      Protocol: HTTP
+      ProtocolVersion: HTTP1
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "120"
+      TargetType: ip
+      UnhealthyThresholdCount: 3
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Project
+          Value: crabhelm
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            ContentType: application/json
+            MessageBody: '{"error":"not found"}'
+            StatusCode: "404"
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+
+  RuntimeHostRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: forward
+          ForwardConfig:
+            TargetGroups:
+              - TargetGroupArn: !Ref TargetGroup
+                Weight: 1
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values:
+              - !Ref RuntimeHostname
+      ListenerArn: !Ref HttpsListener
+      Priority: 10
+
+  ConsoleHostRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: authenticate-oidc
+          Order: 1
+          AuthenticateOidcConfig:
+            AuthorizationEndpoint: !Ref OidcAuthorizationEndpoint
+            ClientId: !Ref OidcClientId
+            ClientSecret: !Sub "{{resolve:secretsmanager:${ApplicationSecretArn}:SecretString:OIDC_CLIENT_SECRET}}"
+            Issuer: !Ref OidcIssuer
+            OnUnauthenticatedRequest: authenticate
+            Scope: !Ref OidcScopes
+            SessionCookieName: !Sub AWSELBAuthSessionCookie-${OidcClientSecretVersion}
+            SessionTimeout: 3600
+            TokenEndpoint: !Ref OidcTokenEndpoint
+            UserInfoEndpoint: !Ref OidcUserInfoEndpoint
+        - Type: forward
+          Order: 2
+          ForwardConfig:
+            TargetGroups:
+              - TargetGroupArn: !Ref TargetGroup
+                Weight: 1
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values:
+              - !Ref ConsoleHostname
+      ListenerArn: !Ref HttpsListener
+      Priority: 20
+
+  EcsService:
+    Type: AWS::ECS::Service
+    Condition: StartService
+    DependsOn:
+      - ApplicationDefaultRoute
+      - ApplicationSubnetARouteTableAssociation
+      - ApplicationSubnetBRouteTableAssociation
+      - ConsoleHostRule
+      - DatabaseIngressFromTask
+      - RuntimeHostRule
+      - TaskIngressFromAlb
+    Properties:
+      Cluster: !Ref EcsCluster
+      DeploymentConfiguration:
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+        MaximumPercent: 100
+        MinimumHealthyPercent: 0
+      DesiredCount: 1
+      EnableECSManagedTags: true
+      EnableExecuteCommand: false
+      HealthCheckGracePeriodSeconds: 120
+      LaunchType: FARGATE
+      LoadBalancers:
+        - ContainerName: crabhelm
+          ContainerPort: 8080
+          TargetGroupArn: !Ref TargetGroup
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !GetAtt TaskSecurityGroup.GroupId
+          Subnets:
+            - !Ref ApplicationSubnetA
+            - !Ref ApplicationSubnetB
+      PlatformVersion: LATEST
+      PropagateTags: SERVICE
+      SchedulingStrategy: REPLICA
+      TaskDefinition: !Ref TaskDefinition
+      Tags:
+        - Key: Project
+          Value: crabhelm
+
+Outputs:
+  AlbDnsName:
+    Description: Point both externally managed hostnames at this ALB DNS name.
+    Value: !GetAtt LoadBalancer.DNSName
+
+  ConsoleOrigin:
+    Value: !Sub https://${ConsoleHostname}
+
+  RuntimeOrigin:
+    Value: !Sub https://${RuntimeHostname}
+
+  EcrRepositoryUri:
+    Condition: CreateRepository
+    Description: Push Dockerfile.aws images here before enabling ProvisionService.
+    Value: !GetAtt ContainerRepository.RepositoryUri
+
+  EcsClusterName:
+    Value: !Ref EcsCluster
+
+  EcsServiceArn:
+    Condition: StartService
+    Value: !Ref EcsService
+
+  DatabaseEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+
+  DatabaseMasterSecretArn:
+    Value: !Ref DatabaseCredentials
+
+  AppliancesBucketName:
+    Value: !Ref AppliancesBucket
+
+  OAuthVaultBucketName:
+    Value: !Ref OAuthVaultBucket
+
+  AuditArchiveBucketName:
+    Value: !Ref AuditArchiveBucket
+
+  AuditQueueUrl:
+    Value: !Ref AuditQueue
+
+  AuditDeadLetterQueueUrl:
+    Value: !Ref AuditDeadLetterQueue
+
+  AuditDeadLetterQueueArn:
+    Value: !GetAtt AuditDeadLetterQueue.Arn
+
+  AuditDeadLetterQueueVisibleAlarmName:
+    Condition: UseOperatorAlertTopic
+    Value: !Ref AuditDeadLetterQueueVisibleAlarm
+
+  AuditQueueOldestMessageAlarmName:
+    Condition: UseOperatorAlertTopic
+    Value: !Ref AuditQueueOldestMessageAlarm
+
+  VpcId:
+    Value: !Ref Vpc

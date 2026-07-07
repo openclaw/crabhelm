@@ -9,5 +9,5 @@
     "types": ["node"]
   },
   "include": ["index.ts", "src/**/*.ts", "dev/**/*.ts", "tests/**/*.ts"],
-  "exclude": ["tests/workers/**"]
+  "exclude": ["tests/aws/**", "tests/http-service.test.ts", "tests/workers/**"]
 }

@@ -1,13 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-
-type StateEntry<T> = { key: string; value: T; createdAt: number };
-type StateStore<T> = {
-  register(key: string, value: T): Promise<void>;
-  lookup(key: string): Promise<T | undefined>;
-  delete(key: string): Promise<boolean>;
-  entries(): Promise<StateEntry<T>[]>;
-};
-type StateTransaction = <T>(operation: () => Promise<T>) => Promise<T>;
+import type { StateEntry, StateStore, StateTransaction } from "../src/state.js";
 
 type Storage = Pick<
   DurableObjectStorage,

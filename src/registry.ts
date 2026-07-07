@@ -158,7 +158,7 @@ export class CrabhelmRegistry {
       const timestamp = new Date().toISOString();
       const spec = normalizeManagedPolicySpec(input.spec);
       const latest = current.versions.at(-1)!;
-      if (JSON.stringify(spec) === JSON.stringify(latest.spec)) {
+      if (canonicalJson(spec) === canonicalJson(latest.spec)) {
         throw new Error("new policy version must change at least one managed field");
       }
       const next: PolicyTemplate = {
@@ -551,4 +551,13 @@ function assertPolicyTargetMutable(claw: ClawRecord): void {
   if (claw.observed.phase === "deleted" || claw.observed.phase === "deleting" || claw.observed.deletion) {
     throw new Error(`cannot apply policy to deleting or deleted claw ${claw.desired.name}`);
   }
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+    a.localeCompare(b),
+  );
+  return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`;
 }

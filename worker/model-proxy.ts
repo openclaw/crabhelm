@@ -3,9 +3,9 @@ import { signClaims, verifyClaims } from "./security.js";
 
 // The child Gateway calls the model provider through this edge proxy instead of
 // holding the raw provider key. The child presents a per-claw, audience-bound
-// model token; the Worker verifies it, strips any caller-supplied auth, injects
+// model token; the control plane verifies it, strips caller-supplied auth, injects
 // the real OPENAI_API_KEY, and forwards to a single fixed upstream. The raw
-// provider key never leaves Cloudflare.
+// provider key never leaves the control-plane trust boundary.
 
 // Structural subset of the Worker Env this module needs. Declared locally (not
 // the ambient `Env` global) so the Node test suite can import this file under a

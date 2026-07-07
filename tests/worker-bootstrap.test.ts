@@ -110,7 +110,7 @@ test("workspace bootstrap selects a per-claw appliance canary", async () => {
   assert.notEqual(command, newNodeCommand);
 });
 
-test("Cloudflare workspace lifecycle drains the central runtime queue", async () => {
+test("workspace lifecycle drains the central runtime queue", async () => {
   const claw = createClawRecord({
     name: "Queued child",
     owner: { subject: "github:queued", label: "@queued", source: "github" },
@@ -129,7 +129,7 @@ test("Cloudflare workspace lifecycle drains the central runtime queue", async ()
   const drain = await bootstrap.drain(claw);
   assert.equal(drain.drained, false);
   assert.equal(drain.activeRuns, 4);
-  assert.equal(drain.message, "Cloudflare runtime queue still has active work");
+  assert.equal(drain.message, "Control-plane runtime queue still has active work");
   assert.ok(Date.parse(drain.checkedAt));
 });
 
@@ -423,6 +423,15 @@ esac
     { mode: 0o755 },
   );
   await chmod(path.join(bin, "curl"), 0o755);
+
+  for (const [name, body] of [
+    ["nft", "#!/bin/sh\nexit 1\n"],
+    ["systemctl", "#!/bin/sh\nexit 1\n"],
+    ["id", "#!/bin/sh\nprintf '0\\n'\n"],
+  ] as const) {
+    await writeFile(path.join(bin, name), body, { mode: 0o755 });
+    await chmod(path.join(bin, name), 0o755);
+  }
 
   const script = bootstrapInstallScript({
     base: "https://crabhelm-runtime.example.test/bootstrap/child-id",

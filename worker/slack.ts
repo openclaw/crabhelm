@@ -4,10 +4,14 @@ import { verifySlackRequest } from "./slack-signature.js";
 
 const maxSlackBodyBytes = 128 * 1024;
 
-export async function handleSlackRequest(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+export async function handleSlackRequest(
+  request: Request,
+  env: Env,
+  ctx: Pick<ExecutionContext, "waitUntil">,
+): Promise<Response> {
   if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
-  const raw = new Uint8Array(await request.arrayBuffer());
-  if (raw.byteLength > maxSlackBodyBytes) return new Response("payload too large", { status: 413 });
+  const raw = await readBoundedSlackBody(request.body, request.headers);
+  if (!raw) return new Response("payload too large", { status: 413 });
   if (!await verifySlackRequest(request.headers, raw, env.SLACK_SIGNING_SECRET)) return new Response("unauthorized", { status: 401 });
   const body = new TextDecoder().decode(raw);
   if (new URL(request.url).pathname === "/slack/interactions") {
@@ -139,12 +143,48 @@ async function slackApi(env: Env, method: string, body: Record<string, unknown>)
 }
 
 async function boundedSlackJson(response: Response): Promise<Record<string, unknown>> {
-  const length = Number(response.headers.get("content-length") ?? 0);
-  if (length > maxSlackBodyBytes) throw new Error("Slack response is too large");
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength > maxSlackBodyBytes) throw new Error("Slack response is too large");
+  const bytes = await readBoundedSlackBody(response.body, response.headers);
+  if (!bytes) throw new Error("Slack response is too large");
   try { return JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>; }
   catch { throw new Error(`Slack returned invalid JSON (${response.status})`); }
+}
+
+async function readBoundedSlackBody(
+  body: ReadableStream<Uint8Array> | null,
+  headers: Headers,
+): Promise<Uint8Array | undefined> {
+  const declaredLength = Number(headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > maxSlackBodyBytes) {
+    try { await body?.cancel("Slack body exceeds size limit"); } catch { /* Best-effort producer cancellation. */ }
+    return undefined;
+  }
+  if (!body) return new Uint8Array();
+
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > maxSlackBodyBytes) {
+        try { await reader.cancel("Slack body exceeds size limit"); } catch { /* Best-effort producer cancellation. */ }
+        return undefined;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }
 
 function escapeSlack(value: string): string { return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;"); }

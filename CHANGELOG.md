@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add AWS as an alternative per-installation control-plane backend with a singleton ECS/Fargate service, ALB OIDC and WebSockets, PostgreSQL RDS, private S3 stores, and SQS audit delivery; Cloudflare remains the reference backend, and active-active shared-fleet operation is unsupported.
 - Separate public example configuration from private deployment values, use documented public model identifiers, and keep live validation identifiers out of source.
 - Harden the public Worker boundary with exact HTTPS console/runtime origin isolation, cross-site mutation rejection, minimum-strength bootstrap HMAC admission, and non-cacheable OAuth redirects.
 - Isolate the OpenClaw runtime under a dedicated unprivileged service account and lock agent-workspace egress to loopback, DNS, NTP, DHCP, and TCP 443 with instance-metadata endpoints denied before credentials land. Root-owned boot policy and live-rule readiness checks fail closed by default; `CRABHELM_EGRESS_LOCKDOWN=off` is the explicit escape hatch.
