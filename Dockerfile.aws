@@ -1,0 +1,73 @@
+ARG NODE_VERSION=22.23.1
+ARG NODE_IMAGE_DIGEST=sha256:a149cd71dccd68704a07d4e4ca3e610c27301852b0f556865cfdb6e2856f8bed
+
+FROM node:${NODE_VERSION}-bookworm-slim@${NODE_IMAGE_DIGEST} AS dependencies
+
+ENV PNPM_HOME=/pnpm
+ENV PATH=${PNPM_HOME}:${PATH}
+WORKDIR /app
+
+RUN corepack enable && corepack prepare pnpm@11.2.2 --activate
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm config set store-dir /pnpm/store && \
+    pnpm install --frozen-lockfile
+
+FROM dependencies AS build
+
+ARG RDS_COMMERCIAL_CA_SHA256=e5bb2084ccf45087bda1c9bffdea0eb15ee67f0b91646106e466714f9de3c7e3
+ARG RDS_GOVCLOUD_CA_SHA256=bae59f78f2e2ba789e734cdcac78c13a0f0e99aa3f7bd49f1f37477c815b9b33
+
+COPY . .
+RUN test -f aws/server.ts
+RUN pnpm exec esbuild aws/server.ts \
+    --bundle \
+    --banner:js="import { createRequire as __crabhelmCreateRequire } from 'node:module'; const require = __crabhelmCreateRequire(import.meta.url);" \
+    --format=esm \
+    --legal-comments=none \
+    --outfile=dist/aws/server.js \
+    --platform=node \
+    --external:aws-crt \
+    --external:bufferutil \
+    --external:pg-native \
+    --external:utf-8-validate \
+    --target=node22
+RUN node --check dist/aws/server.js
+RUN node --input-type=module --eval \
+    "const module = await import('./dist/aws/server.js'); \
+     if (typeof module.startAwsServer !== 'function') process.exit(1);"
+RUN node --input-type=module -e \
+    "import { writeFileSync } from 'node:fs'; \
+     const bundles = [ \
+       ['commercial', 'https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem'], \
+       ['govcloud', 'https://truststore.pki.us-gov-west-1.rds.amazonaws.com/global/global-bundle.pem'], \
+     ]; \
+     for (const [name, url] of bundles) { \
+       const response = await fetch(url); \
+       if (!response.ok) throw new Error('failed to download AWS RDS ' + name + ' CA bundle'); \
+       const bundle = await response.text(); \
+       if (!bundle.includes('-----BEGIN CERTIFICATE-----')) throw new Error('invalid AWS RDS ' + name + ' CA bundle'); \
+       writeFileSync('/tmp/aws-rds-' + name + '-global-bundle.pem', bundle, { mode: 0o444 }); \
+     }"
+RUN printf '%s  %s\n' "${RDS_COMMERCIAL_CA_SHA256}" /tmp/aws-rds-commercial-global-bundle.pem | sha256sum --check --strict -
+RUN printf '%s  %s\n' "${RDS_GOVCLOUD_CA_SHA256}" /tmp/aws-rds-govcloud-global-bundle.pem | sha256sum --check --strict -
+
+FROM node:${NODE_VERSION}-bookworm-slim@${NODE_IMAGE_DIGEST} AS runtime
+
+ENV NODE_ENV=production
+ENV PORT=8080
+WORKDIR /app
+
+COPY --from=build --chown=node:node /app/package.json ./package.json
+COPY --from=build --chown=node:node /app/dist/aws/server.js ./dist/aws/server.js
+COPY --from=build --chown=node:node /app/aws/migrations ./aws/migrations
+COPY --from=build --chown=node:node /app/web ./web
+COPY --from=build /tmp/aws-rds-commercial-global-bundle.pem /etc/ssl/certs/aws-rds-commercial-global-bundle.pem
+COPY --from=build /tmp/aws-rds-govcloud-global-bundle.pem /etc/ssl/certs/aws-rds-govcloud-global-bundle.pem
+RUN chmod 0444 /etc/ssl/certs/aws-rds-commercial-global-bundle.pem /etc/ssl/certs/aws-rds-govcloud-global-bundle.pem
+
+USER node
+EXPOSE 8080
+STOPSIGNAL SIGTERM
+
+CMD ["node", "--input-type=module", "--eval", "const { startAwsServer } = await import('./dist/aws/server.js'); await startAwsServer();"]

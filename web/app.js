@@ -81,7 +81,7 @@ async function loadState(showNotice = false) {
   try {
     state.data = await request("/state");
     const viewer = (state.data.principals || []).find((principal) => principal.id === state.data.viewer?.principalId);
-    document.querySelector("#operator-state").textContent = viewer ? `${viewer.label} · ${state.data.viewer.roles.join(", ")}` : "Access verified";
+    document.querySelector("#operator-state").textContent = viewer ? `${viewer.label} · ${state.data.viewer.roles.join(", ")}` : "Identity verified";
     syncRuntimeActions();
     render();
     if (showNotice) toast("Fleet state refreshed");
@@ -97,7 +97,7 @@ async function request(path, options = {}) {
   const response = await fetch(`${apiBase}${path}`, { ...options, headers });
   if (response.status === 401) {
     document.querySelector("#operator-state").textContent = "Authentication required";
-    throw new Error("Cloudflare Access authentication required. Reload to sign in through OpenClaw.");
+    throw new Error("Control-plane authentication required. Reload to sign in through OpenClaw.");
   }
   const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
   if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
@@ -255,7 +255,8 @@ function renderDeployments() {
   const admissionOpen = runtime.targets.filter((target) => target.admissionOpen).length;
   const allocated = active.filter((claw) => claw.observed.lifecycle?.workspaceId).length;
   const integrations = state.data.integrations || {};
-  root.innerHTML = `${renderRuntimeBanner()}<section class="metrics">${metric("Provider", label(runtime.mode))}${metric("Targets", runtime.targets.length)}${metric("Admission open", admissionOpen, admissionOpen === runtime.targets.length ? "good" : "warn")}${metric(runtime.mode === "simulator" ? "Simulated records" : "Allocated", allocated, allocated ? "good" : "")}${metric("Runtime bridges", Object.values(state.data.runtimeStatuses || {}).filter((status) => status.connected > 0).length, integrations.runtimeBridge ? "good" : "warn")}${metric("Slack ingress", integrations.slack ? "configured" : "missing", integrations.slack ? "good" : "warn")}${metric("GitHub OAuth", integrations.githubOAuth ? "configured" : "missing", integrations.githubOAuth ? "good" : "warn")}${metric("Access", integrations.cloudflareAccess ? "verified" : "missing", integrations.cloudflareAccess ? "good" : "warn")}</section>
+  const accessConfigured = integrations.operatorAccess ?? integrations.cloudflareAccess;
+  root.innerHTML = `${renderRuntimeBanner()}<section class="metrics">${metric("Provider", label(runtime.mode))}${metric("Targets", runtime.targets.length)}${metric("Admission open", admissionOpen, admissionOpen === runtime.targets.length ? "good" : "warn")}${metric(runtime.mode === "simulator" ? "Simulated records" : "Allocated", allocated, allocated ? "good" : "")}${metric("Runtime bridges", Object.values(state.data.runtimeStatuses || {}).filter((status) => status.connected > 0).length, integrations.runtimeBridge ? "good" : "warn")}${metric("Slack ingress", integrations.slack ? "configured" : "missing", integrations.slack ? "good" : "warn")}${metric("GitHub OAuth", integrations.githubOAuth ? "configured" : "missing", integrations.githubOAuth ? "good" : "warn")}${metric("Access", accessConfigured ? "verified" : "missing", accessConfigured ? "good" : "warn")}</section>
     <section class="section-head"><div><h2>Placement targets</h2><p>Each target is an administrator-pinned deployment adapter and appliance profile. Crabbox is the first adapter; additional providers can be added without relocating Crabhelm.</p></div></section>
     <section class="panel" style="margin-top:12px">
       ${runtime.targets.map((target, index) => {
@@ -426,7 +427,7 @@ function renderDrawer(claw) {
         ${ownership("05", "Deployment owner", state.data.runtime.mode === "simulator" ? "Simulator" : "Crabbox", `${claw.desired.deployment.target} · ${claw.desired.deployment.region || "region unset"} · ${claw.desired.deployment.profile}`)}
         ${ownership("06", "Inference auth", claw.desired.inference.authRef || "child-local", claw.desired.inference.model)}
       </div></section>
-      <section class="detail-block"><h3>Cloudflare-routed Slack</h3><div class="detail-card"><p class="queue-note">Slack terminates at Cloudflare. The central app resolves requester identity and persona policy, then the child pulls the encrypted turn over its outbound runtime bridge.</p></div></section>
+      <section class="detail-block"><h3>Control-plane-routed Slack</h3><div class="detail-card"><p class="queue-note">Slack terminates at the control plane. The central app resolves requester identity and persona policy, then the child pulls the encrypted turn over its outbound runtime bridge.</p></div></section>
       <section class="detail-block"><h3>Edit desired state</h3><div class="detail-card"><form id="edit-claw-form" class="drawer-form">
         <label><span>Name</span><input name="name" maxlength="80" required value="${escapeAttr(claw.desired.name)}" /></label>
         <label><span>Model</span><select name="model">${modelOptions(claw.desired.inference.model)}</select></label>
@@ -435,7 +436,7 @@ function renderDrawer(claw) {
         <label><span>Child log level</span><select name="logLevel">${selectOptions(["error", "warn", "info", "debug"], claw.desired.observability.logLevel)}</select></label>
         <button class="button small" type="button" data-detail-action="save">Save desired state</button>
       </form></div></section>
-      <section class="detail-block"><h3>Controls</h3><div class="detail-actions"><button class="button small" data-detail-action="reconcile">↻ Reconcile</button><button class="button small" data-detail-action="rotate-credentials" title="Re-deliver rotated Worker secrets through a staged in-place reinstall">Rotate credentials</button><button class="button small" data-detail-action="${enabled ? "disable" : "enable"}">${enabled ? "Disable ingress" : "Enable claw"}</button></div></section>
+      <section class="detail-block"><h3>Controls</h3><div class="detail-actions"><button class="button small" data-detail-action="reconcile">↻ Reconcile</button><button class="button small" data-detail-action="rotate-credentials" title="Re-deliver rotated control-plane secrets through a staged in-place reinstall">Rotate credentials</button><button class="button small" data-detail-action="${enabled ? "disable" : "enable"}">${enabled ? "Disable ingress" : "Enable claw"}</button></div></section>
       <section class="delete-zone"><h3>Remove child core</h3><p>Disables ingress, waits for active runs to drain, releases the exact provider workspace, confirms absence, then revokes its exact control link. Type <b>${escapeHtml(claw.desired.name)}</b> to continue.</p><div class="delete-confirm"><input id="delete-confirmation" placeholder="${escapeAttr(claw.desired.name)}"/><button class="button danger small" data-detail-action="remove">Remove</button></div></section>
     </div>`;
 }

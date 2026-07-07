@@ -1,10 +1,16 @@
 # Product contract
 
-Crabhelm is the Cloudflare control plane for identity-aware OpenClaw teammates. It governs who requested work, which persona handled it, whose authority may be used, which capabilities are available, where the runtime executes, and what evidence is retained.
+Crabhelm is the control plane for identity-aware OpenClaw teammates. It governs who requested work, which persona handled it, whose authority may be used, which capabilities are available, where the runtime executes, and what evidence is retained.
 
 A **Claw** is one independently deployed OpenClaw core. A **persona** is the managed agent identity presented to people. A **requester** is the human who initiated work. An **actor** is the identity whose authority a governed tool call uses. These identities may coincide, but Crabhelm must never infer that they do.
 
 The production build implements fleet placement, bootstrap, policy rollout, readiness, evidence-driven removal, principal sessions, personas, actor policy, approved skills, encrypted OAuth connections, signed one-time invocation grants, confirmation-bound writes, a controlled GitHub wrapper, and identity-complete audit export.
+
+## Control-plane backend
+
+An installation selects either the reference Cloudflare backend or the AWS backend. Cloudflare uses Workers, Durable Objects, R2, Queues, and Cloudflare Access. AWS uses a singleton ECS/Fargate service, an Application Load Balancer with OIDC and WebSockets, PostgreSQL RDS, private S3 buckets, and SQS.
+
+The backends are separate fleet boundaries. They do not form an active-active pair, replicate state, share runtime sockets, or reuse signing material. The AWS desired task count remains one until distributed coordinator ownership and cross-task socket routing are implemented.
 
 ## Interaction models
 
@@ -28,7 +34,7 @@ Only administrators may create shared personas, bind them to shared ingress, or 
 
 Agents do not receive unrestricted provider CLIs or durable provider credentials. A tool call crosses a controlled wrapper that validates arguments, evaluates requester/persona/actor policy, checks confirmation requirements, requests an audience- and action-scoped short-lived credential, redacts output, and emits an audit event.
 
-Long-lived OAuth grants remain in a dedicated encrypted vault. Agent runtimes, Durable Object state, bootstrap bundles, logs, and read-only agent artifacts must not contain them.
+Long-lived OAuth grants remain in a dedicated encrypted vault. Agent runtimes, control-plane metadata state, bootstrap bundles, logs, and read-only agent artifacts must not contain them.
 
 Identity, baseline instructions, approved skills, tool policy, and Gateway configuration are versioned control-plane artifacts mounted or materialized read-only. Runtime-created memory and sessions remain writable but cannot alter those guardrails.
 
@@ -42,9 +48,9 @@ Each meaningful decision records timestamp, requester, persona, selected actor, 
 
 ## Operator flow
 
-Authenticate through Cloudflare Access → choose a fixed placement target → choose intended user metadata and inference policy → create → watch provider, Gateway, model-auth, and outbound runtime evidence converge → bind an approved Slack conversation to its persona.
+Authenticate through the configured operator identity layer (Cloudflare Access or ALB OIDC) → choose a fixed placement target → choose intended user metadata and inference policy → create → watch provider, Gateway, model-auth, and outbound runtime evidence converge → bind an approved Slack conversation to its persona.
 
-The intended user is materialized as a principal and personal persona. Slack requester identities merge with Access identities by canonical email. The organization Slack token remains at the edge and never becomes a child credential or OAuth grant.
+The intended user is materialized as a principal and personal persona. Slack requester identities merge with console identities by canonical email. The organization Slack token remains in the control plane and never becomes a child credential or OAuth grant.
 
 ## Readiness
 
@@ -61,7 +67,7 @@ Synthetic or echoed evidence must never render as ready.
 
 ## Placement
 
-Targets are administrator policy. Each pins adapter, region, appliance profile, TTL, and idle timeout. The create API accepts a target id, not free-form infrastructure controls. Adding another provider means implementing the provider contract and registering another fixed target; Crabhelm itself remains on Cloudflare.
+Targets are administrator policy. Each pins adapter, region, appliance profile, TTL, and idle timeout. The create API accepts a target id, not free-form infrastructure controls. Adding another child-compute provider means implementing the provider contract and registering another fixed target; it does not change the installation's selected Cloudflare or AWS control-plane backend.
 
 The production target is deployment-specific and configured outside public source. The data model and provider router are not Crabbox-specific.
 
@@ -79,23 +85,23 @@ Per-claw observability may export traces and metrics to one administrator-manage
 
 Typed-name confirmation starts a staged removal. Crabhelm disables ingress, verifies zero active work twice across a quiet period, releases the exact provider workspace, confirms absence, revokes the exact control link, and retains redacted audit evidence.
 
-## Current production scope
+## Current implementation scope
 
-- Cloudflare Worker, Durable Object state, private R2 appliance, custom domain.
+- Alternative control-plane deployments: the reference Cloudflare Worker, Durable Object, R2, Queue, and Access stack; or a separate singleton ECS/Fargate, ALB, PostgreSQL RDS, S3, SQS, and ALB OIDC stack on AWS.
 - Real Crabbox allocation and deletion.
 - Pinned OpenClaw `2026.6.11` install with exact-model live inference proof.
 - Signed central Slack ingress with DM/app-mention events, persona bindings, threaded delivery, and one-click confirmations.
 - GitHub organization import remains disabled in the Cloudflare runtime.
-- Cloudflare Access JWT authentication, with break-glass bearer and signed principal sessions retained for operations.
+- Backend-native operator authentication through verified Cloudflare Access JWTs or signed ALB OIDC assertions, with signed principal sessions retained for operations.
 - GitHub OAuth authorization-code connection, repository/issue reads, and confirmed issue comments through the controlled wrapper.
 - Per-claw encrypted turn queues, short-lived credential rotation, health, and reconnect over one authenticated outbound WebSocket; no tunnel or inbound child service.
-- AES-GCM OAuth vault, per-claw one-use grant coordination, Queue-backed audit archive, and read-only managed runtime specification.
+- AES-GCM OAuth vault, per-claw one-use grant coordination, backend-queue audit archive, and read-only managed runtime specification.
 
 ## Remaining production expansion
 
 1. Add more deployment adapters and durable runtime volumes for substrates whose instances expire.
 2. Add more provider wrappers and, where providers support it, exchange durable grants for provider-native short-lived tokens.
-3. Move lifecycle reconciliation into per-claw Durable Objects for larger fleets.
+3. Move Cloudflare lifecycle reconciliation into per-claw Durable Objects for larger fleets; distribute coordinator ownership and socket routing before scaling AWS beyond one task.
 4. Add SIEM delivery, step-up confirmation, and substrate-native workload attestation.
 
 The local simulator is test-only and visibly labeled.

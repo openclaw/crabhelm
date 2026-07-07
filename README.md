@@ -1,28 +1,36 @@
 # Crabhelm
 
-Cloudflare-hosted, identity-aware control plane for independently deployed OpenClaw teammates.
+Identity-aware control plane for independently deployed OpenClaw teammates, deployable on Cloudflare or AWS.
 
-Crabhelm itself runs as a Cloudflare Worker. One Durable Object owns fleet state, reconciliation, immutable policies, and bounded audit metadata. Private, digest-pinned agent appliances live in R2. Deployment adapters create isolated agent machines wherever an administrator configures them; the first production adapter uses Crabbox.
+Each Crabhelm installation selects one control-plane backend. The reference Cloudflare deployment uses Workers, Durable Objects, R2, and Queues. The AWS deployment uses a singleton ECS/Fargate service behind an Application Load Balancer, PostgreSQL on RDS, private S3 buckets, and SQS. Both expose the same fleet, governance, bootstrap, runtime, and audit contracts. They are alternative installations, not active-active replicas of one fleet, and must not share state or signing material.
 
-No inbound tunnel or permanent parent VM is required. The Worker calls provider APIs outbound, and every agent keeps its own OpenClaw Gateway, state root, credentials, sessions, memory, and OS identity.
+Deployment adapters create isolated agent machines wherever an administrator configures them; the first production adapter uses Crabbox.
 
-The execution plane separates requester, persona, and actor; governs skills and tool capabilities; issues signed one-time invocation grants; keeps durable OAuth credentials in an encrypted R2 vault; requires argument-bound confirmation for external writes; delivers managed identity and skills read-only; and records identity-complete audit evidence through a Cloudflare Queue and R2 archive. The first controlled provider wrapper supports bounded GitHub repository/issue reads and confirmed issue comments.
+No inbound tunnel or permanent parent VM is required. The control-plane service calls provider APIs outbound, and every agent keeps its own OpenClaw Gateway, state root, credentials, sessions, memory, and OS identity.
 
-## Production
+The execution plane separates requester, persona, and actor; governs skills and tool capabilities; issues signed one-time invocation grants; keeps durable OAuth credentials in an encrypted private object-store vault; requires argument-bound confirmation for external writes; delivers managed identity and skills read-only; and records identity-complete audit evidence through the selected backend's queue and archive. The first controlled provider wrapper supports bounded GitHub repository/issue reads and confirmed issue comments.
 
-- Console: deployment-specific HTTPS host
-- Runtime: Cloudflare Workers + Durable Objects
-- Appliance store: private Cloudflare R2 bucket configured per deployment
+## Production backends
+
+- Cloudflare (reference): Worker ingress, organization and per-claw Durable Objects, private R2, Queue-backed audit export, and Cloudflare Access.
+- AWS: one long-lived ECS/Fargate task, ALB OIDC for the console, native ALB WebSockets for the runtime host, PostgreSQL on RDS, private S3, and SQS-backed audit export.
+
+The AWS service intentionally runs one task until distributed coordinator ownership exists. Deploy Cloudflare and AWS as separate fleets; active-active operation or a shared control-plane database is unsupported.
+
+Common production properties:
+
+- Console and runtime: separate deployment-specific HTTPS hosts
+- Appliance store: private R2 or S3 bucket configured per deployment
 - Deployment target: configured privately through Crabbox
-- Operator access: Cloudflare Access identity; no shared operator bearer
-- Automation access: account-scoped Cloudflare service binding; no public administration endpoint
+- Operator access: verified Cloudflare Access identity or ALB OIDC identity; no shared operator bearer
+- Cloudflare automation access: account-scoped service binding; no public administration endpoint
 - Team ingress: one signed Slack app at the configured runtime host; personas bind approved workspaces/channels to claws
-- Provider delegation: GitHub OAuth grants stay encrypted in R2 and are used only by the governed edge wrapper
-- Agent bootstrap: deterministic per-agent HMAC token, short private R2 delivery path, outbound HTTPS/WSS only
+- Provider delegation: GitHub OAuth grants stay encrypted in the private object-store vault and are used only by the governed wrapper
+- Agent bootstrap: deterministic per-agent HMAC token, short private object-store delivery path, outbound HTTPS/WSS only
 
 The current Crabbox target creates a real workspace, installs digest-pinned OpenClaw and Crabhelm artifacts, starts a loopback Gateway, runs a real model challenge, then starts the outbound runtime bridge. A claw reports ready only after the exact inference response and bridge launch succeed. Simulator code remains for tests and local domain development; production never selects it.
 
-## Deploy
+## Deploy on Cloudflare
 
 Requirements: Node.js 22+, pnpm, Wrangler authenticated to the target Cloudflare account.
 
@@ -73,6 +81,12 @@ pnpm exec wrangler r2 object put "$CRABHELM_APPLIANCE_BUCKET/releases/$APPLIANCE
 
 Verify the remote archive bytes, then update both `APPLIANCE_ARCHIVE_SHA256` and `APPLIANCE_MANIFEST_SHA256` to the generated digests before deploying the Worker.
 
+## Deploy on AWS
+
+The AWS stack builds the same control-plane service for Node.js and provisions ECS/Fargate, an HTTPS ALB, PostgreSQL RDS, private S3 buckets, SQS, and supporting network and IAM resources. DNS may remain managed by Cloudflare or another provider; point the console and runtime hostnames at the ALB as described in the [AWS deployment guide](deploy/aws/README.md).
+
+The AWS backend is a separate installation boundary. Do not attach it to an existing Cloudflare fleet or reuse that fleet's database, buckets, queue, signing secrets, runtime credentials, or hostnames.
+
 ## Local development
 
 ```bash
@@ -80,11 +94,11 @@ pnpm install
 pnpm dev
 ```
 
-Open <http://127.0.0.1:4177>. Local development uses an explicitly labeled simulator. Production Wrangler configuration always uses the real Crabbox adapter.
+Open <http://127.0.0.1:4177>. Local development uses an explicitly labeled simulator. Production Cloudflare and AWS configurations always use the real Crabbox adapter.
 
 ## Edge model proxy (experimental)
 
-By default a claw is delivered the raw `OPENAI_API_KEY`. Setting the `CRABHELM_MODEL_PROXY` Worker var to `on` (and putting the `MODEL_SIGNING_SECRET` secret) instead delivers a per-claw, audience-bound model token plus an edge base URL, and reroutes the child's OpenClaw OpenAI provider through `${RUNTIME_URL}/model/v1`. The Worker verifies the token, strips the caller's authorization, injects the real provider key, and forwards to a single fixed upstream over an allowlisted set of endpoints. The raw provider key never reaches the agent VM, and each claw's access is independently scoped and bounded to its substrate lifetime rather than sharing one fleet-wide credential.
+By default a claw is delivered the raw `OPENAI_API_KEY`. Setting `CRABHELM_MODEL_PROXY` to `on` (and configuring the `MODEL_SIGNING_SECRET` secret) instead delivers a per-claw, audience-bound model token plus an edge base URL, and reroutes the child's OpenClaw OpenAI provider through `${RUNTIME_URL}/model/v1`. The control plane verifies the token, strips the caller's authorization, injects the real provider key, and forwards to a single fixed upstream over an allowlisted set of endpoints. The raw provider key never reaches the agent VM, and each claw's access is independently scoped and bounded to its substrate lifetime rather than sharing one fleet-wide credential.
 
 This is experimental and default-off. First enablement requires an appliance built from this version; after that appliance is pinned, change modes by rotating each claw's credential epoch so the managed provider base URL and credential are reinstalled together. The proxy continues accepting previously issued model tokens while new issuance is off, allowing a rolling rollback; keep `MODEL_SIGNING_SECRET` configured through the longest previously issued token lifetime (four hours by default, at most 24 hours). Confirm the existing live inference probe on staging before enabling in production.
 
@@ -112,7 +126,7 @@ The current contract intentionally has no collector-auth header field; use an ap
 
 ## Testing
 
-`pnpm check` runs both test tiers. `pnpm test` runs the fast Node domain suite (`node:test`). `pnpm test:workers` runs the Worker and both Durable Objects inside workerd via `@cloudflare/vitest-pool-workers` (`tests/workers/`), covering router host-splitting, the Access auth gate, SQLite-backed control-plane state, and the hibernatable runtime-bridge reconnect path against the real runtime.
+`pnpm check` runs build and type checks plus the Node, AWS adapter, and Worker test tiers. `pnpm test` runs the fast Node domain suite (`node:test`). Tests under `tests/aws/` cover AWS identity, configuration, storage, PostgreSQL state, and coordinator behavior. `pnpm test:workers` runs the Worker and both Durable Objects inside workerd via `@cloudflare/vitest-pool-workers` (`tests/workers/`), covering router host-splitting, the Access auth gate, SQLite-backed control-plane state, and the hibernatable runtime-bridge reconnect path against the real runtime.
 
 ## Safety boundaries
 
@@ -120,12 +134,12 @@ The current contract intentionally has no collector-auth header field; use an ap
 - A provider resource becomes ready only from live child evidence; allocation alone is not readiness.
 - Registry and audit state exclude prompts, messages, tool output, credential values, and opaque provider response bodies.
 - Bootstrap endpoints require a per-agent HMAC bearer, return `no-store`, and expose only that agent's fixed appliance and credentials.
-- Slack signing is verified before parsing; Cloudflare Access JWTs are verified against the team JWKS and application audience.
+- Slack signing is verified before parsing; Cloudflare Access JWTs or ALB OIDC assertions are verified against the configured issuer, audience/client, signer, and identity role-mapping policy.
 - Access-authenticated clients and enrolled runtimes may redeem governed grants; actor policy, argument digest, expiry, and the one-use fence still apply.
-- Runtime turns, credential rotation, health, and reconnect use one authenticated outbound WebSocket to a per-claw Durable Object; reset generations abort active process groups, and persona-bound job payloads remain encrypted at rest.
+- Runtime turns, credential rotation, health, and reconnect use one authenticated outbound WebSocket to a per-claw coordinator (a Durable Object on Cloudflare or transactionally persisted PostgreSQL state on AWS); reset generations abort active process groups, and persona-bound job payloads remain encrypted at rest.
 - The owner-only runtime workload credential is audience-bound, expires after ten minutes, rotates through a one-use mint fence with encrypted idempotent response replay, and is never inherited by model/tool processes; persistence permits bridge crash and host restart recovery.
 - The OpenClaw Gateway runs as a dedicated unprivileged service account. A root-owned nftables service restricts its workspace to loopback, DNS, NTP, DHCP, and TCP 443, blocks cloud instance metadata before credentials land, and must pass live-rule verification before readiness. Enforcement is fail-closed by default; `CRABHELM_EGRESS_LOCKDOWN=off` is an explicit operational escape hatch.
-- With the edge model proxy enabled the agent never holds the raw provider key: it presents a per-claw, audience-bound model token that the Worker exchanges for the real key against a single fixed, endpoint-allowlisted upstream.
+- With the edge model proxy enabled the agent never holds the raw provider key: it presents a per-claw, audience-bound model token that the control-plane service exchanges for the real key against a single fixed, endpoint-allowlisted upstream.
 - Removal remains evidence-driven: disable ingress, drain active work, release the exact provider identity, confirm absence, then revoke the exact control link.
 
-See [architecture](docs/architecture.md), [product contract](docs/product.md), and the [Crabbox appliance profile](deploy/crabbox-profile/README.md) for implementation detail and the identity-aware execution contract.
+See [architecture](docs/architecture.md), [product contract](docs/product.md), the [AWS deployment guide](deploy/aws/README.md), and the [Crabbox appliance profile](deploy/crabbox-profile/README.md) for implementation detail and the identity-aware execution contract.

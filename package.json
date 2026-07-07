@@ -2,14 +2,17 @@
   "name": "@openclaw/crabhelm",
   "version": "0.0.0",
   "private": true,
-  "description": "Cloudflare control plane for independently deployed OpenClaw agents.",
+  "description": "Cloudflare and AWS control planes for independently deployed OpenClaw agents.",
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
   },
   "scripts": {
     "build": "tsgo --noEmit && pnpm worker:check && node --check web/app.js && node --check deploy/runtime-bridge.mjs && esbuild index.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/index.js --external:openclaw/*",
-    "check": "pnpm build && pnpm test && pnpm test:workers",
+    "check": "pnpm build && pnpm test && pnpm test:workers && pnpm aws:check",
+    "aws:build": "tsgo -p tsconfig.aws.json --noEmit && esbuild aws/server.ts --bundle --banner:js=\"import { createRequire as __crabhelmCreateRequire } from 'node:module'; const require = __crabhelmCreateRequire(import.meta.url);\" --platform=node --format=esm --target=node22 --outfile=dist/aws/server.js --external:aws-crt --external:bufferutil --external:pg-native --external:utf-8-validate && node --check dist/aws/server.js && node --input-type=module --eval \"const module = await import('./dist/aws/server.js'); if (typeof module.startAwsServer !== 'function') process.exit(1);\"",
+    "aws:check": "pnpm aws:build && pnpm aws:test",
+    "aws:test": "node --import tsx --test tests/aws/*.test.ts",
     "dev": "tsx dev/server.ts",
     "prepack": "pnpm build",
     "test": "node --import tsx --test tests/*.test.ts",
@@ -27,19 +30,25 @@
     }
   },
   "devDependencies": {
+    "@aws-sdk/client-s3": "3.1075.0",
+    "@aws-sdk/client-sqs": "3.1075.0",
     "@cloudflare/vitest-pool-workers": "0.18.0",
     "@cloudflare/workers-types": "4.20260702.1",
     "@types/node": "25.9.1",
+    "@types/pg": "8.20.0",
+    "@types/ws": "8.18.1",
     "@typescript/native-preview": "7.0.0-dev.20260527.2",
     "esbuild": "0.28.1",
     "jose": "6.2.3",
+    "pg": "8.22.0",
     "tsx": "4.22.3",
     "typebox": "1.1.39",
     "vitest": "4.1.9",
-    "wrangler": "4.107.0"
+    "wrangler": "4.107.0",
+    "ws": "8.21.0"
   },
   "files": [
-    "dist",
+    "dist/index.js",
     "web",
     "docs",
     "deploy",

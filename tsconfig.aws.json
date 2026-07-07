@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": [
+    "aws/**/*.ts",
+    "src/**/*.ts",
+    "tests/aws/**/*.ts",
+    "tests/http-service.test.ts",
+    "worker/access.ts",
+    "worker/bootstrap.ts",
+    "worker/control-plane-service.ts",
+    "worker/governance-controller.ts",
+    "worker/http-service.ts",
+    "worker/model-proxy.ts",
+    "worker/security.ts",
+    "worker/slack.ts",
+    "worker/slack-delivery.ts",
+    "worker/slack-signature.ts",
+    "worker/turn-envelope.ts",
+    "worker/vault.ts",
+    "worker-configuration.d.ts",
+    "worker/env.d.ts"
+  ]
+}

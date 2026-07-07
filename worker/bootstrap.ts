@@ -12,6 +12,11 @@ const decoder = new TextDecoder();
 const BOOTSTRAP_TOKEN_TTL_MS = 20 * 60 * 1000;
 const EGRESS_POLICY_VERSION = 2;
 type WorkerWebSocket = WebSocket & { accept(): void };
+export type TerminalSocket = Pick<
+  WebSocket,
+  "addEventListener" | "binaryType" | "close" | "send"
+>;
+export type TerminalDialer = (attachUrl: string, brokerToken: string) => Promise<TerminalSocket>;
 type WorkspaceTerminalState =
   | "ready"
   | "started"
@@ -56,6 +61,7 @@ export class CrabboxWorkspaceBootstrap {
   readonly #signingSecret: string;
   readonly #egressLockdown: EgressLockdownMode;
   readonly #coordinators?: { getByName(name: string): { runtimeStatus(): Promise<{ pending: number; running: number; awaitingDelivery: number }> } };
+  readonly #terminalDialer: TerminalDialer;
 
   constructor(options: {
     brokerToken: string;
@@ -66,6 +72,7 @@ export class CrabboxWorkspaceBootstrap {
     signingSecret: string;
     egressLockdown?: EgressLockdownMode;
     coordinators?: { getByName(name: string): { runtimeStatus(): Promise<{ pending: number; running: number; awaitingDelivery: number }> } };
+    terminalDialer?: TerminalDialer;
   }) {
     if (!/^[0-9a-f]{64}$/u.test(options.releaseId)) {
       throw new Error("Crabbox appliance release id must be a SHA-256 digest");
@@ -84,6 +91,7 @@ export class CrabboxWorkspaceBootstrap {
     this.#signingSecret = options.signingSecret;
     this.#egressLockdown = options.egressLockdown ?? "required";
     this.#coordinators = options.coordinators;
+    this.#terminalDialer = options.terminalDialer ?? cloudflareTerminalDialer;
   }
 
   async command(claw: ClawRecord): Promise<string> {
@@ -174,6 +182,7 @@ export class CrabboxWorkspaceBootstrap {
           this.#egressLockdown,
         ),
         probeLabel,
+        this.#terminalDialer,
       );
     } catch (error) {
       console.error(JSON.stringify({
@@ -194,7 +203,7 @@ export class CrabboxWorkspaceBootstrap {
       message: result === "started"
         ? "Workspace ready; OpenClaw installation is running"
         : result === "installing-download"
-        ? "Workspace ready; downloading the reviewed appliance from Cloudflare"
+        ? "Workspace ready; downloading the reviewed appliance from the private control-plane store"
         : result === "installing-openclaw"
         ? "Workspace ready; installing the pinned OpenClaw appliance"
         : result === "installing-plugin"
@@ -261,7 +270,7 @@ export class CrabboxWorkspaceBootstrap {
     return {
       applied: true,
       health: claw.observed.health,
-      message: "Cloudflare ingress rejects disabled claws",
+      message: "Control-plane ingress rejects disabled claws",
       lifecycle: claw.observed.lifecycle,
       controlLink: claw.observed.controlLink,
       lastSeenAt: new Date().toISOString(),
@@ -291,6 +300,7 @@ export class CrabboxWorkspaceBootstrap {
         `printf '%s_END\\n' ${shellQuote(label)}`,
       ].join("\n"),
       label,
+      this.#terminalDialer,
     );
     const events: Array<Record<string, unknown>> = [];
     const processes: string[] = [];
@@ -327,7 +337,7 @@ export class CrabboxWorkspaceBootstrap {
       drained: activeRuns === 0,
       activeRuns,
       checkedAt: new Date().toISOString(),
-      message: activeRuns === 0 ? "Cloudflare runtime queue is drained" : "Cloudflare runtime queue still has active work",
+      message: activeRuns === 0 ? "Control-plane runtime queue is drained" : "Control-plane runtime queue still has active work",
     };
   }
 
@@ -336,7 +346,7 @@ export class CrabboxWorkspaceBootstrap {
       removedPairedDevice: false,
       rejectedPendingRequest: false,
       alreadyAbsent: true,
-      message: "No native parent pairing exists for the Cloudflare workspace control link",
+      message: "No native parent pairing exists for the managed workspace control link",
     };
   }
 }
@@ -423,22 +433,10 @@ async function inspectTerminal(
   policyHash: string,
   statusCommand: string,
   probeLabel: string,
+  dialer: TerminalDialer,
 ): Promise<WorkspaceTerminalState> {
-  const url = new URL(attachUrl);
-  if (url.protocol !== "wss:") throw new Error("Crabbox terminal URL must use WSS");
-  url.protocol = "https:";
-  const response = await fetch(url, {
-    headers: {
-      authorization: `Bearer ${brokerToken}`,
-      upgrade: "websocket",
-    },
-  }) as Response & { webSocket?: WorkerWebSocket };
-  const socket = response.webSocket;
-  if (response.status !== 101 || !socket) {
-    throw new Error(`Crabbox terminal upgrade failed (HTTP ${response.status})`);
-  }
+  const socket = await dialer(attachUrl, brokerToken);
   socket.binaryType = "arraybuffer";
-  socket.accept();
   return new Promise((resolve) => {
     let output = "";
     let settled = false;
@@ -523,17 +521,10 @@ async function captureTerminalSection(
   brokerToken: string,
   command: string,
   label: string,
+  dialer: TerminalDialer,
 ): Promise<string[]> {
-  const url = new URL(attachUrl);
-  if (url.protocol !== "wss:") throw new Error("Crabbox terminal URL must use WSS");
-  url.protocol = "https:";
-  const response = await fetch(url, {
-    headers: { authorization: `Bearer ${brokerToken}`, upgrade: "websocket" },
-  }) as Response & { webSocket?: WorkerWebSocket };
-  const socket = response.webSocket;
-  if (response.status !== 101 || !socket) throw new Error(`Crabbox terminal upgrade failed (HTTP ${response.status})`);
+  const socket = await dialer(attachUrl, brokerToken);
   socket.binaryType = "arraybuffer";
-  socket.accept();
   return new Promise((resolve, reject) => {
     let output = "";
     let settled = false;
@@ -564,6 +555,22 @@ async function captureTerminalSection(
     socket.addEventListener("error", () => finish(new Error("runtime diagnostics terminal failed")));
     socket.send(`${command}\n`);
   });
+}
+
+async function cloudflareTerminalDialer(
+  attachUrl: string,
+  brokerToken: string,
+): Promise<TerminalSocket> {
+  const url = new URL(attachUrl);
+  if (url.protocol !== "wss:") throw new Error("Crabbox terminal URL must use WSS");
+  url.protocol = "https:";
+  const response = await fetch(url, {
+    headers: { authorization: `Bearer ${brokerToken}`, upgrade: "websocket" },
+  }) as Response & { webSocket?: WorkerWebSocket };
+  const socket = response.webSocket;
+  if (response.status !== 101 || !socket) throw new Error(`Crabbox terminal upgrade failed (HTTP ${response.status})`);
+  socket.accept();
+  return socket;
 }
 
 function terminalInferenceFailure(

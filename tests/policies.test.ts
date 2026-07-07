@@ -82,6 +82,45 @@ test("versioned policy preview and generation CAS apply desired state atomically
   assert.equal(v2.versions[0]?.spec.observability.logLevel, "warn");
 });
 
+test("policy version equality ignores persisted JSON object key order", async () => {
+  const policies = createMemoryStateStore<PolicyTemplate>();
+  const registry = new CrabhelmRegistry(
+    createMemoryStateStore<ClawRecord>(),
+    createMemoryStateStore<AuditEvent>(),
+    { policies },
+  );
+  const policy = await registry.createPolicy({
+    name: "Canonical",
+    spec: policySpec,
+  }, "operator");
+  const persisted = await policies.lookup(policy.id);
+  assert.ok(persisted);
+  const latest = persisted.versions[0]!;
+  await policies.register(policy.id, {
+    ...persisted,
+    versions: [{
+      ...latest,
+      spec: {
+        observability: { logLevel: latest.spec.observability.logLevel },
+        access: {
+          groupPolicy: latest.spec.access.groupPolicy,
+          dmPolicy: latest.spec.access.dmPolicy,
+        },
+        slackEnabled: latest.spec.slackEnabled,
+        inference: {
+          fallbackModels: latest.spec.inference.fallbackModels,
+          model: latest.spec.inference.model,
+        },
+      },
+    }],
+  });
+
+  await assert.rejects(
+    registry.addPolicyVersion(policy.id, { spec: policySpec }, "operator"),
+    /must change at least one managed field/u,
+  );
+});
+
 test("policy API requires and verifies a converged canary before applying the remainder", async () => {
   const registry = createRegistry();
   const reconciler = new CrabhelmReconciler(registry, new SimulatorChildCoreProvider());
