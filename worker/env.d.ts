@@ -15,6 +15,7 @@ interface Env {
   CF_ACCESS_AUD: string;
   CF_ACCESS_ADMIN_EMAILS: string;
   CF_ACCESS_ADMIN_GROUPS?: string;
+  CRABHELM_PROBE_EMAIL: string;
   RUNTIME_URL: string;
   // Edge model proxy secret (draft). Only required when the CRABHELM_MODEL_PROXY
   // Worker var is "on"; delivered via `wrangler secret put`.
@@ -36,5 +37,6 @@ declare namespace Cloudflare {
     CF_ACCESS_AUD: string;
     CF_ACCESS_ADMIN_EMAILS: string;
     CF_ACCESS_ADMIN_GROUPS?: string;
+    CRABHELM_PROBE_EMAIL: string;
   }
 }

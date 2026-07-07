@@ -13,14 +13,14 @@ import {
 import type { ModelClaims } from "../src/governance-types.js";
 
 const SECRET = ["model-signing", "test-fixture", "long-enough-32b"].join("-");
-const RAW_KEY = "sk-real-provider-key";
+const RAW_KEY = "test-provider-key";
 
 function baseEnv(overrides: Partial<ModelProxyEnv> = {}): ModelProxyEnv {
   return {
     CRABHELM_MODEL_PROXY: "on",
     MODEL_SIGNING_SECRET: SECRET,
     OPENAI_API_KEY: RAW_KEY,
-    RUNTIME_URL: "https://crabhelm-runtime.example.com",
+    RUNTIME_URL: "https://crabhelm-runtime.example.test",
     ...overrides,
   };
 }
@@ -30,7 +30,7 @@ function mintToken(clawId = "685b2bda-351e-450b-a91c-45938c54454f"): Promise<str
 }
 
 function request(path: string, init: RequestInit = {}): { req: Request; url: URL } {
-  const url = new URL(`https://crabhelm-runtime.example.com${path}`);
+  const url = new URL(`https://crabhelm-runtime.example.test${path}`);
   return { req: new Request(url, init), url };
 }
 
@@ -288,8 +288,8 @@ test("credential delivery swaps in a per-claw model token when the proxy is on",
   const entries = await modelCredentialEntries(env, "claw-77");
   const map = Object.fromEntries(entries);
   assert.notEqual(map.OPENAI_API_KEY, RAW_KEY);
-  assert.equal(map.OPENAI_BASE_URL, "https://crabhelm-runtime.example.com/model/v1");
-  assert.equal(map.CRABHELM_MODEL_BASE_URL, "https://crabhelm-runtime.example.com/model/v1");
+  assert.equal(map.OPENAI_BASE_URL, "https://crabhelm-runtime.example.test/model/v1");
+  assert.equal(map.CRABHELM_MODEL_BASE_URL, "https://crabhelm-runtime.example.test/model/v1");
 
   // The delivered token is a valid, claw-scoped model credential the proxy accepts.
   const claims = await verifyClaims<ModelClaims>(SECRET, map.OPENAI_API_KEY!, { typ: "model", aud: "crabhelm-model" });

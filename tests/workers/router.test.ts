@@ -43,7 +43,7 @@ describe("worker router in workerd", () => {
 
     const wrongSameSiteOrigin = await SELF.fetch(`${CONSOLE}/api/claws/${CHILD_ID}/reconcile`, {
       method: "POST",
-      headers: { origin: "https://evil.openclaw.ai", "sec-fetch-site": "same-site" },
+      headers: { origin: "https://evil.example.com", "sec-fetch-site": "same-site" },
     });
     expect(wrongSameSiteOrigin.status).toBe(403);
 

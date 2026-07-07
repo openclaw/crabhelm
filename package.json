@@ -15,8 +15,8 @@
     "test": "node --import tsx --test tests/*.test.ts",
     "test:workers": "vitest run --config vitest.workers.config.ts",
     "worker:check": "tsgo -p tsconfig.worker.json --noEmit && tsgo -p tsconfig.workers-test.json --noEmit && wrangler deploy --dry-run",
-    "worker:deploy": "wrangler deploy",
-    "worker:types": "wrangler types"
+    "worker:deploy": "wrangler deploy --config wrangler.production.jsonc",
+    "worker:types": "wrangler types --strict-vars false"
   },
   "peerDependencies": {
     "openclaw": ">=2026.6.11"

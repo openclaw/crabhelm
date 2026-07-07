@@ -228,7 +228,7 @@ async function exchangeGithubCode(env: Env, code: string): Promise<{ token: stri
     method: "POST",
     redirect: "manual",
     signal: AbortSignal.timeout(15_000),
-    headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded", "user-agent": "crabhelm.example.com" },
+    headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded", "user-agent": "openclaw-crabhelm" },
     body: new URLSearchParams({ client_id: env.GITHUB_OAUTH_CLIENT_ID, client_secret: env.GITHUB_OAUTH_CLIENT_SECRET, code, redirect_uri: `${env.PUBLIC_URL}/api/oauth/github/callback` }),
   });
   const value = await boundedProviderJson(response);
@@ -241,7 +241,7 @@ async function githubProfile(token: string): Promise<{ login: string }> {
   const response = await fetch("https://api.github.com/user", {
     redirect: "manual",
     signal: AbortSignal.timeout(15_000),
-    headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "crabhelm.example.com", "x-github-api-version": "2022-11-28" },
+    headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "openclaw-crabhelm", "x-github-api-version": "2022-11-28" },
   });
   const value = await boundedProviderJson(response);
   if (!response.ok || typeof value.login !== "string" || !value.login.trim()) throw new Error(`GitHub profile lookup failed (${response.status})`);
@@ -257,7 +257,7 @@ async function revokeGithubCredential(env: Env, token: string): Promise<void> {
       authorization: `Basic ${Buffer.from(`${env.GITHUB_OAUTH_CLIENT_ID}:${env.GITHUB_OAUTH_CLIENT_SECRET}`).toString("base64")}`,
       accept: "application/vnd.github+json",
       "content-type": "application/json",
-      "user-agent": "crabhelm.example.com",
+      "user-agent": "openclaw-crabhelm",
       "x-github-api-version": "2022-11-28",
     },
     body: JSON.stringify({ access_token: token }),
@@ -295,7 +295,7 @@ async function githubRequest(claims: InvocationGrantClaims, args: Record<string,
   } else if (claims.capabilityId !== "github.repository.read" && claims.capabilityId !== "github.issue.read") {
     throw new Error("GitHub capability is unsupported");
   }
-  const response = await fetch(url, { method, redirect: "manual", signal: AbortSignal.timeout(15_000), headers: { authorization: `Bearer ${credential}`, accept: "application/vnd.github+json", "content-type": "application/json", "user-agent": "crabhelm.example.com", "x-github-api-version": "2022-11-28" }, ...(body ? { body } : {}) });
+  const response = await fetch(url, { method, redirect: "manual", signal: AbortSignal.timeout(15_000), headers: { authorization: `Bearer ${credential}`, accept: "application/vnd.github+json", "content-type": "application/json", "user-agent": "openclaw-crabhelm", "x-github-api-version": "2022-11-28" }, ...(body ? { body } : {}) });
   const data = await boundedProviderJson(response);
   if (!response.ok) throw new Error(`GitHub request failed (${response.status}): ${typeof data.message === "string" ? data.message.slice(0, 200) : "provider error"}`);
   if (claims.capabilityId === "github.repository.read") return pick(data, ["id", "name", "full_name", "private", "html_url", "description", "default_branch", "archived"]);

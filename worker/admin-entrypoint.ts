@@ -41,6 +41,8 @@ export class CrabhelmAdmin extends WorkerEntrypoint<Env> {
   async startSlackProbe(workspaceId: string, channelId: string): Promise<SlackProbe> {
     const workspace = slackId(workspaceId, "workspace");
     const channel = slackId(channelId, "channel");
+    const probeEmail = this.env.CRABHELM_PROBE_EMAIL?.trim();
+    if (!probeEmail) throw new Error("CRABHELM_PROBE_EMAIL is required for production probes");
     const jobId = crypto.randomUUID();
     const marker = `CRABHELM-PRODUCTION-PROBE-${jobId.slice(0, 8).toUpperCase()}`;
     const parent = await slackPost(this.env.SLACK_BOT_TOKEN, {
@@ -53,7 +55,7 @@ export class CrabhelmAdmin extends WorkerEntrypoint<Env> {
       channelId: channel,
       threadTs: parent.ts,
       userId: "CRABHELM_PROBE",
-      email: "probe@example.com",
+      email: probeEmail,
       label: "Crabhelm production probe",
     });
     await this.env.CLAW_COORDINATOR.getByName(route.clawId).enqueueTurn({
