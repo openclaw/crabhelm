@@ -47,7 +47,13 @@ Metadata:
           - ProbeEmail
           - GitHubOauthClientId
           - EgressLockdown
-          - ModelProxyMode
+          - ClawRouterMode
+          - ClawRouterBaseUrl
+          - ClawRouterTenantId
+          - ClawRouterAllowedProviders
+          - ClawRouterModelProviderMap
+          - ClawRouterDefaultModel
+          - ClawRouterAccessServiceToken
           - NodeRuntimeSha256
           - ApplianceArchiveSha256
           - ApplianceManifestSha256
@@ -64,6 +70,7 @@ Metadata:
       - Label:
           default: Monitoring and operations
         Parameters:
+          - PrometheusMode
           - OperatorAlertTopicName
 
 Parameters:
@@ -240,10 +247,45 @@ Parameters:
     Default: required
     AllowedValues: [required, "off"]
 
-  ModelProxyMode:
+  ClawRouterMode:
     Type: String
     Default: "off"
     AllowedValues: ["on", "off"]
+    Description: Use first-class per-claw ClawRouter policies and credentials instead of direct OpenAI keys.
+
+  ClawRouterBaseUrl:
+    Type: String
+    Default: https://clawrouter.invalid
+    AllowedPattern: "^https://[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?$"
+    Description: Exact non-production ClawRouter HTTPS origin; routed mode rejects the placeholder.
+
+  ClawRouterTenantId:
+    Type: String
+    Default: fakeco
+    AllowedPattern: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$"
+
+  ClawRouterAllowedProviders:
+    Type: String
+    Default: openai
+    AllowedPattern: "^[a-z0-9][a-z0-9-]{0,63}(,[a-z0-9][a-z0-9-]{0,63})*$"
+    Description: Fleet allowlist of canonical ClawRouter provider ids.
+
+  ClawRouterModelProviderMap:
+    Type: String
+    Default: clawrouter/openai/gpt-5.5=openai
+    AllowedPattern: "^clawrouter/[a-z0-9][a-z0-9-]{0,63}/[A-Za-z0-9][A-Za-z0-9_.:/-]{0,199}=[a-z0-9][a-z0-9-]{0,63}(,clawrouter/[a-z0-9][a-z0-9-]{0,63}/[A-Za-z0-9][A-Za-z0-9_.:/-]{0,199}=[a-z0-9][a-z0-9-]{0,63})*$"
+    Description: Comma-separated exact OpenClaw model ref to canonical ClawRouter provider id mappings.
+
+  ClawRouterDefaultModel:
+    Type: String
+    Default: clawrouter/openai/gpt-5.5
+    AllowedPattern: "^clawrouter/[a-z0-9][a-z0-9-]{0,63}/[A-Za-z0-9][A-Za-z0-9_.:/-]{0,199}$"
+
+  ClawRouterAccessServiceToken:
+    Type: String
+    Default: "off"
+    AllowedValues: ["on", "off"]
+    Description: Inject a Cloudflare Access service-token pair for ClawRouter admin API calls.
 
   NodeRuntimeSha256:
     Type: String
@@ -300,6 +342,12 @@ Parameters:
     AllowedPattern: "^$|^[A-Za-z0-9_-]{1,256}$"
     Description: Optional same-account, same-Region SNS topic name for audit dead-letter queue alarms. Subscriptions are managed outside this stack.
 
+  PrometheusMode:
+    Type: String
+    Default: "off"
+    AllowedValues: ["on", "off"]
+    Description: Serve metadata-only Prometheus metrics on the runtime host with bearer authentication.
+
 Rules:
   ImageSourceRequired:
     Assertions:
@@ -328,10 +376,22 @@ Rules:
       - Assert: !Not [!Equals [!Ref AdminEmails, ""]]
         AssertDescription: Set at least one bootstrap administrator email. Groups may grant additional administrators.
 
+  ClawRouterOriginRequired:
+    Assertions:
+      - Assert: !Or
+          - !Equals [!Ref ClawRouterMode, "off"]
+          - !Not [!Equals [!Ref ClawRouterBaseUrl, "https://clawrouter.invalid"]]
+        AssertDescription: Routed mode requires an explicit non-placeholder ClawRouterBaseUrl.
+
 Conditions:
   CreateRepository: !Equals [!Ref CreateEcrRepository, "true"]
   StartService: !Equals [!Ref ProvisionService, "true"]
-  UseModelProxy: !Equals [!Ref ModelProxyMode, "on"]
+  UseClawRouter: !Equals [!Ref ClawRouterMode, "on"]
+  UseDirectInference: !Equals [!Ref ClawRouterMode, "off"]
+  UseClawRouterAccessServiceToken: !And
+    - !Condition UseClawRouter
+    - !Equals [!Ref ClawRouterAccessServiceToken, "on"]
+  UsePrometheus: !Equals [!Ref PrometheusMode, "on"]
   UseDatabaseMultiAz: !Equals [!Ref DatabaseMultiAz, "true"]
   ProtectDatabase: !Equals [!Ref DatabaseDeletionProtection, "true"]
   ProtectLoadBalancer: !Equals [!Ref LoadBalancerDeletionProtection, "true"]
@@ -1130,8 +1190,20 @@ Resources:
               Value: !Sub ${CrabboxIdleTimeoutSeconds}
             - Name: CRABHELM_EGRESS_LOCKDOWN
               Value: !Ref EgressLockdown
-            - Name: CRABHELM_MODEL_PROXY
-              Value: !Ref ModelProxyMode
+            - Name: CRABHELM_CLAWROUTER
+              Value: !Ref ClawRouterMode
+            - Name: CLAWROUTER_BASE_URL
+              Value: !Ref ClawRouterBaseUrl
+            - Name: CLAWROUTER_TENANT_ID
+              Value: !Ref ClawRouterTenantId
+            - Name: CLAWROUTER_ALLOWED_PROVIDERS
+              Value: !Ref ClawRouterAllowedProviders
+            - Name: CLAWROUTER_MODEL_PROVIDER_MAP
+              Value: !Ref ClawRouterModelProviderMap
+            - Name: CLAWROUTER_DEFAULT_MODEL
+              Value: !Ref ClawRouterDefaultModel
+            - Name: CRABHELM_PROMETHEUS
+              Value: !Ref PrometheusMode
             - Name: NODE_RUNTIME_SHA256
               Value: !Ref NodeRuntimeSha256
             - Name: APPLIANCE_ARCHIVE_SHA256
@@ -1165,8 +1237,11 @@ Resources:
               ValueFrom: !Sub "${ApplicationSecretArn}:RUNTIME_SIGNING_SECRET::"
             - Name: VAULT_MASTER_KEY
               ValueFrom: !Sub "${ApplicationSecretArn}:VAULT_MASTER_KEY::"
-            - Name: OPENAI_API_KEY
-              ValueFrom: !Sub "${ApplicationSecretArn}:OPENAI_API_KEY::"
+            - !If
+              - UseDirectInference
+              - Name: OPENAI_API_KEY
+                ValueFrom: !Sub "${ApplicationSecretArn}:OPENAI_API_KEY::"
+              - !Ref AWS::NoValue
             - Name: SLACK_BOT_TOKEN
               ValueFrom: !Sub "${ApplicationSecretArn}:SLACK_BOT_TOKEN::"
             - Name: SLACK_SIGNING_SECRET
@@ -1174,9 +1249,29 @@ Resources:
             - Name: GITHUB_OAUTH_CLIENT_SECRET
               ValueFrom: !Sub "${ApplicationSecretArn}:GITHUB_OAUTH_CLIENT_SECRET::"
             - !If
-              - UseModelProxy
-              - Name: MODEL_SIGNING_SECRET
-                ValueFrom: !Sub "${ApplicationSecretArn}:MODEL_SIGNING_SECRET::"
+              - UseClawRouter
+              - Name: CLAWROUTER_ADMIN_TOKEN
+                ValueFrom: !Sub "${ApplicationSecretArn}:CLAWROUTER_ADMIN_TOKEN::"
+              - !Ref AWS::NoValue
+            - !If
+              - UseClawRouter
+              - Name: CLAWROUTER_CREDENTIAL_SECRET
+                ValueFrom: !Sub "${ApplicationSecretArn}:CLAWROUTER_CREDENTIAL_SECRET::"
+              - !Ref AWS::NoValue
+            - !If
+              - UseClawRouterAccessServiceToken
+              - Name: CLAWROUTER_ACCESS_CLIENT_ID
+                ValueFrom: !Sub "${ApplicationSecretArn}:CLAWROUTER_ACCESS_CLIENT_ID::"
+              - !Ref AWS::NoValue
+            - !If
+              - UseClawRouterAccessServiceToken
+              - Name: CLAWROUTER_ACCESS_CLIENT_SECRET
+                ValueFrom: !Sub "${ApplicationSecretArn}:CLAWROUTER_ACCESS_CLIENT_SECRET::"
+              - !Ref AWS::NoValue
+            - !If
+              - UsePrometheus
+              - Name: METRICS_BEARER_TOKEN
+                ValueFrom: !Sub "${ApplicationSecretArn}:METRICS_BEARER_TOKEN::"
               - !Ref AWS::NoValue
             - Name: DATABASE_USER
               ValueFrom: !Join

@@ -17,7 +17,7 @@ export const childPairingListCommand = "crabhelm.child.pairing.list" as const;
 export const childPairingApproveCommand = "crabhelm.child.pairing.approve" as const;
 export const childHealthCommand = "crabhelm.child.health" as const;
 export const childDrainCommand = "crabhelm.child.drain.status" as const;
-const protocolVersion = 2;
+const protocolVersion = 3;
 const healthProbeMaxAgeMs = 5 * 60 * 1000;
 const execFileAsync = promisify(execFile);
 
@@ -117,6 +117,9 @@ export function registerChildCommands(api: NodeRegistrationApi, childId: string)
       const params = parseRecord(paramsJSON);
       requireChildId(params, childId);
       const desired = parseManagedDesired(params.desired);
+      if (desired.routerProjectId && desired.routerProjectId !== childId) {
+        throw new Error("desired.routerProjectId must match the immutable child id");
+      }
       const generation = requirePositiveInteger(params.generation, "generation");
       const desiredHash = requireString(params.desiredHash, "desiredHash", 128);
       const expectedManagedHash = requireString(
@@ -139,12 +142,14 @@ export function registerChildCommands(api: NodeRegistrationApi, childId: string)
             }
             applyManagedDesired(draft, desired);
             const pluginConfig = ensurePluginConfig(draft);
+            const nextManagedHash = managedHash(readManagedState(draft));
             pluginConfig.appliedGeneration = generation;
             pluginConfig.appliedDesiredHash = desiredHash;
+            pluginConfig.appliedManagedHash = nextManagedHash;
             return {
               generation,
               desiredHash,
-              managedHash: managedHash(readManagedState(draft)),
+              managedHash: nextManagedHash,
             };
           },
         });
@@ -367,6 +372,16 @@ export class OpenClawNodeControl {
         status: "pending",
       };
     }
+    if (claw.desired.inference.router.kind === "clawrouter" && status.protocolVersion < 3) {
+      return {
+        ...this.#evidence(
+          node.nodeId,
+          status,
+          "Child node paired; protocol v3 upgrade is required for ClawRouter attribution",
+        ),
+        status: "pending",
+      };
+    }
     let appliedNow = false;
     if (options.reconcileDesired !== false && status.appliedDesiredHash !== desiredHash) {
       if (!node.commands.includes(childApplyCommand)) {
@@ -388,6 +403,12 @@ export class OpenClawNodeControl {
           desired: {
             model: claw.desired.inference.model,
             fallbackModels: claw.desired.inference.fallbackModels,
+            ...(claw.desired.inference.router.kind === "clawrouter"
+              ? {
+                  routerBaseUrl: claw.desired.inference.router.baseUrl,
+                  routerProjectId: claw.desired.inference.router.projectId,
+                }
+              : {}),
             slackEnabled: claw.desired.channels.slack.enabled,
             dmPolicy: claw.desired.access.dmPolicy,
             groupPolicy: claw.desired.access.groupPolicy,
@@ -726,7 +747,7 @@ export class OpenClawNodeControl {
 }
 
 type ChildStatusPayload = {
-  protocolVersion: 1 | 2;
+  protocolVersion: 1 | 2 | 3;
   gatewayReady: boolean;
   gatewayVersion?: string;
   managedHash: string;
@@ -737,6 +758,9 @@ type ChildStatusPayload = {
 type ManagedDesired = {
   model: string;
   fallbackModels: string[];
+  routerBaseUrl?: string;
+  routerProjectId?: string;
+  legacyOpenAiBaseUrl?: string;
   slackEnabled: boolean;
   dmPolicy: "pairing" | "allowlist" | "disabled";
   groupPolicy: "allowlist" | "disabled";
@@ -756,6 +780,8 @@ type ManagedDesired = {
 async function childStatus(runtime: ConfigRuntime, childId: string): Promise<Record<string, unknown>> {
   const config = runtime.config.current();
   const pluginConfig = readPluginConfig(config);
+  const currentManagedHash = managedHash(readManagedState(config));
+  const managedStateConverged = pluginConfig.appliedManagedHash === currentManagedHash;
   return {
     ok: true,
     childId,
@@ -763,12 +789,12 @@ async function childStatus(runtime: ConfigRuntime, childId: string): Promise<Rec
     protocolVersion,
     gatewayReady: await probeLocalGateway(config),
     gatewayVersion: runtime.version,
-    managedHash: managedHash(readManagedState(config)),
+    managedHash: currentManagedHash,
     ingressDisabled: pluginConfig.ingressDisabled === true,
     ...(typeof pluginConfig.appliedGeneration === "number"
       ? { appliedGeneration: pluginConfig.appliedGeneration }
       : {}),
-    ...(typeof pluginConfig.appliedDesiredHash === "string"
+    ...(managedStateConverged && typeof pluginConfig.appliedDesiredHash === "string"
       ? { appliedDesiredHash: pluginConfig.appliedDesiredHash }
       : {}),
   };
@@ -778,12 +804,14 @@ async function probeLocalGateway(config: Record<string, unknown>): Promise<boole
   const gateway = asRecord(config.gateway);
   const port = typeof gateway.port === "number" && Number.isInteger(gateway.port) ? gateway.port : 18_789;
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/readyz`, {
-      method: "GET",
-      redirect: "manual",
-      signal: AbortSignal.timeout(2_000),
-    });
-    return response.ok;
+    const [health, readiness] = await Promise.all(
+      ["healthz", "readyz"].map((endpoint) => fetch(`http://127.0.0.1:${port}/${endpoint}`, {
+        method: "GET",
+        redirect: "manual",
+        signal: AbortSignal.timeout(2_000),
+      })),
+    );
+    return health.ok && readiness.ok;
   } catch {
     return false;
   }
@@ -792,7 +820,7 @@ async function probeLocalGateway(config: Record<string, unknown>): Promise<boole
 function parseManagedDesired(value: unknown): ManagedDesired {
   const input = asRecord(value);
   const model = requireString(input.model, "desired.model", 220);
-  if (!/^[a-z0-9][a-z0-9_.-]*\/[a-zA-Z0-9][a-zA-Z0-9_.:\-]{0,199}$/.test(model)) {
+  if (!/^[a-z0-9][a-z0-9_.-]*(?:\/[a-zA-Z0-9][a-zA-Z0-9_.:\-]{0,199})+$/.test(model)) {
     throw new Error("desired.model must use provider/model form");
   }
   const fallbackModels = Array.isArray(input.fallbackModels)
@@ -811,9 +839,30 @@ function parseManagedDesired(value: unknown): ManagedDesired {
   if (!(logLevel === "error" || logLevel === "warn" || logLevel === "info" || logLevel === "debug")) {
     throw new Error("desired.logLevel is invalid");
   }
+  const routerBaseUrl = typeof input.routerBaseUrl === "string" ? input.routerBaseUrl.trim() : undefined;
+  if (routerBaseUrl) {
+    const url = new URL(routerBaseUrl);
+    if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
+      throw new Error("desired.routerBaseUrl must be an exact HTTPS origin");
+    }
+  }
+  if (model.startsWith("clawrouter/") !== Boolean(routerBaseUrl)) {
+    throw new Error("desired.model and desired.routerBaseUrl must select ClawRouter together");
+  }
+  const routerProjectId = typeof input.routerProjectId === "string"
+    ? input.routerProjectId.trim().toLowerCase()
+    : undefined;
+  if (Boolean(routerProjectId) !== Boolean(routerBaseUrl)) {
+    throw new Error("desired.routerProjectId and desired.routerBaseUrl must select ClawRouter together");
+  }
+  if (routerProjectId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(routerProjectId)) {
+    throw new Error("desired.routerProjectId must be a UUID");
+  }
   return {
     model,
     fallbackModels,
+    ...(routerBaseUrl ? { routerBaseUrl } : {}),
+    ...(routerProjectId ? { routerProjectId } : {}),
     slackEnabled: input.slackEnabled,
     dmPolicy,
     groupPolicy,
@@ -891,6 +940,16 @@ function readManagedState(config: Record<string, unknown>): ManagedDesired {
   const diagnostics = asRecord(config.diagnostics);
   const diagnosticsOtel = asRecord(diagnostics.otel);
   const plugins = asRecord(config.plugins);
+  const providers = asRecord(asRecord(config.models).providers);
+  const openAiBaseUrl = asRecord(providers.openai).baseUrl;
+  const clawRouterEntry = asRecord(asRecord(plugins.entries).clawrouter);
+  const clawRouterProvider = asRecord(providers.clawrouter);
+  const clawRouterApiKey = asRecord(clawRouterProvider.apiKey);
+  const clawRouterHeaders = asRecord(clawRouterProvider.headers);
+  const headerKeys = Object.keys(clawRouterHeaders);
+  const hasDynamicAttribution = headerKeys.some((name) => dynamicClawRouterHeaders.has(name.toLowerCase()));
+  const projectHeaderKeys = headerKeys.filter((name) => name.toLowerCase() === clawRouterProjectHeader.toLowerCase());
+  const clawRouterAllowed = Array.isArray(plugins.allow) && plugins.allow.includes("clawrouter");
   const diagnosticsEntry = asRecord(asRecord(plugins.entries)["diagnostics-otel"]);
   const diagnosticsAllowed = Array.isArray(plugins.allow) && plugins.allow.includes("diagnostics-otel");
   return {
@@ -898,6 +957,22 @@ function readManagedState(config: Record<string, unknown>): ManagedDesired {
     fallbackModels: Array.isArray(fallbacks)
       ? fallbacks.filter((item): item is string => typeof item === "string")
       : [],
+    ...(clawRouterAllowed &&
+      clawRouterEntry.enabled === true &&
+      typeof clawRouterProvider.baseUrl === "string" &&
+      clawRouterApiKey.source === "env" &&
+      clawRouterApiKey.provider === "default" &&
+      clawRouterApiKey.id === "CLAWROUTER_API_KEY" &&
+      !hasDynamicAttribution &&
+      projectHeaderKeys.length === 1 &&
+      projectHeaderKeys[0] === clawRouterProjectHeader &&
+      typeof clawRouterHeaders[clawRouterProjectHeader] === "string"
+      ? {
+          routerBaseUrl: String(clawRouterProvider.baseUrl),
+          routerProjectId: String(clawRouterHeaders[clawRouterProjectHeader]),
+        }
+      : {}),
+    ...(typeof openAiBaseUrl === "string" ? { legacyOpenAiBaseUrl: openAiBaseUrl } : {}),
     slackEnabled: hasSlack && slack.enabled !== false,
     dmPolicy:
       slack.dmPolicy === "allowlist" || slack.dmPolicy === "disabled"
@@ -939,7 +1014,46 @@ function applyManagedDesired(config: Record<string, unknown>, desired: ManagedDe
   slack.groupPolicy = desired.groupPolicy;
   ensureRecord(config, "logging").level = desired.logLevel;
   const plugins = ensureRecord(config, "plugins");
-  plugins.allow = ["crabhelm", "slack", ...(desired.otel.enabled ? ["diagnostics-otel"] : [])];
+  const existingAllow = Array.isArray(plugins.allow)
+    ? plugins.allow.filter((id): id is string => typeof id === "string")
+    : [];
+  const managedAllow = new Set(["crabhelm", "slack", "clawrouter", "diagnostics-otel"]);
+  plugins.allow = [
+    ...existingAllow.filter(
+      (id, index) => !managedAllow.has(id) && existingAllow.indexOf(id) === index,
+    ),
+    "crabhelm",
+    "slack",
+    ...(desired.routerBaseUrl ? ["clawrouter"] : []),
+    ...(desired.otel.enabled ? ["diagnostics-otel"] : []),
+  ];
+  const clawRouterEntry = ensureRecord(ensureRecord(plugins, "entries"), "clawrouter");
+  clawRouterEntry.enabled = Boolean(desired.routerBaseUrl);
+  const modelProviders = ensureRecord(ensureRecord(config, "models"), "providers");
+  if (desired.routerBaseUrl) {
+    const clawRouterProvider = ensureRecord(modelProviders, "clawrouter");
+    clawRouterProvider.baseUrl = desired.routerBaseUrl;
+    clawRouterProvider.apiKey = {
+      source: "env",
+      provider: "default",
+      id: "CLAWROUTER_API_KEY",
+    };
+    const headers = ensureRecord(clawRouterProvider, "headers");
+    for (const name of Object.keys(headers)) {
+      const normalized = name.toLowerCase();
+      if (normalized === clawRouterProjectHeader.toLowerCase() || dynamicClawRouterHeaders.has(normalized)) {
+        delete headers[name];
+      }
+    }
+    headers[clawRouterProjectHeader] = desired.routerProjectId;
+  } else {
+    delete modelProviders.clawrouter;
+  }
+  const openAiProvider = asRecord(modelProviders.openai);
+  delete openAiProvider.baseUrl;
+  if (modelProviders.openai !== undefined && Object.keys(openAiProvider).length === 0) {
+    delete modelProviders.openai;
+  }
   const diagnosticsEntry = ensureRecord(ensureRecord(plugins, "entries"), "diagnostics-otel");
   diagnosticsEntry.enabled = desired.otel.enabled;
   const diagnostics = ensureRecord(config, "diagnostics");
@@ -969,6 +1083,15 @@ function applyManagedDesired(config: Record<string, unknown>, desired: ManagedDe
     flushIntervalMs: desired.otel.flushIntervalMs,
   };
 }
+
+const clawRouterProjectHeader = "X-ClawRouter-Project-Id";
+const dynamicClawRouterHeaders = new Set([
+  "x-clawrouter-agent-id",
+  "x-clawrouter-parent-agent-id",
+  "x-clawrouter-session-id",
+  "x-clawrouter-request-id",
+  "x-request-id",
+]);
 
 function managedHash(value: ManagedDesired): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -1562,8 +1685,8 @@ function requirePositiveInteger(value: unknown, label: string): number {
   return value;
 }
 
-function isSupportedChildProtocol(value: unknown): value is 1 | 2 {
-  return value === 1 || value === 2;
+function isSupportedChildProtocol(value: unknown): value is 1 | 2 | 3 {
+  return value === 1 || value === 2 || value === 3;
 }
 
 function parseRecord(value?: string | null): Record<string, unknown> {

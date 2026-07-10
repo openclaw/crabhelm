@@ -1,4 +1,5 @@
 import path from "node:path";
+import { resolveClawRouterConfig } from "../src/clawrouter.js";
 
 const encoder = new TextEncoder();
 
@@ -19,7 +20,13 @@ export type AwsControlPlaneVariables = {
   CRABBOX_TTL_SECONDS: string;
   CRABBOX_IDLE_TIMEOUT_SECONDS: string;
   CRABHELM_EGRESS_LOCKDOWN: "required" | "off";
-  CRABHELM_MODEL_PROXY: "on" | "off";
+  CRABHELM_CLAWROUTER: "on" | "off";
+  CLAWROUTER_BASE_URL?: string;
+  CLAWROUTER_TENANT_ID?: string;
+  CLAWROUTER_ALLOWED_PROVIDERS?: string;
+  CLAWROUTER_MODEL_PROVIDER_MAP?: string;
+  CLAWROUTER_DEFAULT_MODEL?: string;
+  CRABHELM_PROMETHEUS: "on" | "off";
   NODE_RUNTIME_SHA256: string;
   APPLIANCE_ARCHIVE_SHA256: string;
   APPLIANCE_MANIFEST_SHA256: string;
@@ -29,11 +36,15 @@ export type AwsControlPlaneVariables = {
   INVOCATION_SIGNING_SECRET: string;
   RUNTIME_SIGNING_SECRET: string;
   VAULT_MASTER_KEY: string;
-  OPENAI_API_KEY: string;
+  OPENAI_API_KEY?: string;
   SLACK_SIGNING_SECRET: string;
   SLACK_BOT_TOKEN: string;
   GITHUB_OAUTH_CLIENT_SECRET: string;
-  MODEL_SIGNING_SECRET?: string;
+  CLAWROUTER_ADMIN_TOKEN?: string;
+  CLAWROUTER_CREDENTIAL_SECRET?: string;
+  CLAWROUTER_ACCESS_CLIENT_ID?: string;
+  CLAWROUTER_ACCESS_CLIENT_SECRET?: string;
+  METRICS_BEARER_TOKEN?: string;
   SLACK_APP_TOKEN?: string;
 };
 
@@ -122,20 +133,36 @@ export function loadAwsConfig(environment: Environment = process.env): AwsConfig
     ["required", "off"] as const,
     "required",
   );
-  const modelProxy = choice(
+  const clawRouterMode = choice(
     environment,
-    "CRABHELM_MODEL_PROXY",
+    "CRABHELM_CLAWROUTER",
+    ["on", "off"] as const,
+    "off",
+  );
+  const prometheusMode = choice(
+    environment,
+    "CRABHELM_PROMETHEUS",
     ["on", "off"] as const,
     "off",
   );
 
   const bootstrapSigningSecret = signingSecret(environment, "BOOTSTRAP_SIGNING_SECRET");
   const sessionSigningSecret = signingSecret(environment, "SESSION_SIGNING_SECRET");
-  const invocationSigningSecret = signingSecret(environment, "INVOCATION_SIGNING_SECRET");
-  const runtimeSigningSecret = signingSecret(environment, "RUNTIME_SIGNING_SECRET");
-  const modelSigningSecret = modelProxy === "on"
-    ? signingSecret(environment, "MODEL_SIGNING_SECRET")
-    : optionalSigningSecret(environment, "MODEL_SIGNING_SECRET");
+  const invocationSecret = signingSecret(environment, "INVOCATION_SIGNING_SECRET");
+  const runtimeSecret = signingSecret(environment, "RUNTIME_SIGNING_SECRET");
+  const clawRouter = resolveClawRouterConfig({
+    ...environment,
+    CRABHELM_CLAWROUTER: clawRouterMode,
+  });
+  const routerAdmin = clawRouter?.adminToken ?? "";
+  const routerSeed = clawRouter?.credentialSecret ?? "";
+  const routerAccess = clawRouter?.accessClientSecret ?? "";
+  const openAiApiKey = clawRouterMode === "off"
+    ? requiredSecret(environment, "OPENAI_API_KEY")
+    : undefined;
+  const metricsToken = prometheusMode === "on"
+    ? minimumSecret(environment, "METRICS_BEARER_TOKEN", 32)
+    : optionalSecret(environment, "METRICS_BEARER_TOKEN");
 
   const adminEmails = csv(environment.ACCESS_ADMIN_EMAILS, "ACCESS_ADMIN_EMAILS", true)
     .map((value) => email(value, "ACCESS_ADMIN_EMAILS"));
@@ -170,21 +197,41 @@ export function loadAwsConfig(environment: Environment = process.env): AwsConfig
     CRABBOX_TTL_SECONDS: String(ttlSeconds),
     CRABBOX_IDLE_TIMEOUT_SECONDS: String(idleTimeoutSeconds),
     CRABHELM_EGRESS_LOCKDOWN: egressLockdown,
-    CRABHELM_MODEL_PROXY: modelProxy,
+    CRABHELM_CLAWROUTER: clawRouterMode,
+    CRABHELM_PROMETHEUS: prometheusMode,
+    ...(clawRouter
+      ? {
+          CLAWROUTER_BASE_URL: clawRouter.baseUrl,
+          CLAWROUTER_TENANT_ID: clawRouter.tenantId,
+          CLAWROUTER_ALLOWED_PROVIDERS: clawRouter.allowedProviders.join(","),
+          CLAWROUTER_MODEL_PROVIDER_MAP: Object.entries(clawRouter.modelProviders)
+            .map(([model, provider]) => `${model}=${provider}`)
+            .join(","),
+          CLAWROUTER_DEFAULT_MODEL: clawRouter.defaultModel,
+          CLAWROUTER_ADMIN_TOKEN: routerAdmin,
+          CLAWROUTER_CREDENTIAL_SECRET: routerSeed,
+          ...(clawRouter.accessClientId && clawRouter.accessClientSecret
+            ? {
+                CLAWROUTER_ACCESS_CLIENT_ID: clawRouter.accessClientId,
+                CLAWROUTER_ACCESS_CLIENT_SECRET: routerAccess,
+              }
+            : {}),
+        }
+      : {}),
     NODE_RUNTIME_SHA256: nodeSha256,
     APPLIANCE_ARCHIVE_SHA256: archiveSha256,
     APPLIANCE_MANIFEST_SHA256: manifestSha256,
     CRABBOX_TOKEN: requiredSecret(environment, "CRABBOX_TOKEN"),
     BOOTSTRAP_SIGNING_SECRET: bootstrapSigningSecret,
     SESSION_SIGNING_SECRET: sessionSigningSecret,
-    INVOCATION_SIGNING_SECRET: invocationSigningSecret,
-    RUNTIME_SIGNING_SECRET: runtimeSigningSecret,
+    INVOCATION_SIGNING_SECRET: invocationSecret,
+    RUNTIME_SIGNING_SECRET: runtimeSecret,
     VAULT_MASTER_KEY: vaultMasterKey(environment),
-    OPENAI_API_KEY: requiredSecret(environment, "OPENAI_API_KEY"),
+    ...(openAiApiKey ? { OPENAI_API_KEY: openAiApiKey } : {}),
+    ...(metricsToken ? { METRICS_BEARER_TOKEN: metricsToken } : {}),
     SLACK_SIGNING_SECRET: requiredSecret(environment, "SLACK_SIGNING_SECRET"),
     SLACK_BOT_TOKEN: requiredSecret(environment, "SLACK_BOT_TOKEN"),
     GITHUB_OAUTH_CLIENT_SECRET: requiredSecret(environment, "GITHUB_OAUTH_CLIENT_SECRET"),
-    ...(modelSigningSecret ? { MODEL_SIGNING_SECRET: modelSigningSecret } : {}),
     ...(slackAppToken ? { SLACK_APP_TOKEN: slackAppToken } : {}),
   };
 
@@ -491,11 +538,10 @@ function signingSecret(environment: Environment, name: string): string {
   return value;
 }
 
-function optionalSigningSecret(environment: Environment, name: string): string | undefined {
-  const value = optionalSecret(environment, name);
-  if (!value) return undefined;
-  if (encoder.encode(value).byteLength < 32) {
-    throw new Error(`${name} must contain at least 32 bytes when configured`);
+function minimumSecret(environment: Environment, name: string, minimumBytes: number): string {
+  const value = requiredSecret(environment, name);
+  if (encoder.encode(value).byteLength < minimumBytes) {
+    throw new Error(`${name} must contain at least ${minimumBytes} bytes`);
   }
   return value;
 }

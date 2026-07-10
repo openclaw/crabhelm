@@ -15,6 +15,7 @@ import {
   handleCrabhelmRequest,
   type BackgroundContext,
 } from "../worker/http-service.js";
+import { bootstrapToken } from "../worker/bootstrap.js";
 import { signClaims } from "../worker/security.js";
 
 const CONSOLE = "https://crabhelm.example.test";
@@ -176,6 +177,30 @@ test("portable HTTP and control-plane services persist policy state across recon
   assert.throws(() => service.restartForDeployment(), (error) => error === restart);
 });
 
+test("runtime state reports requested ClawRouter mode when admission is closed", async () => {
+  let service: CrabhelmControlPlaneService;
+  const env = fakeEnv(() => service);
+  env.CRABHELM_CLAWROUTER = "on";
+  service = new CrabhelmControlPlaneService(memoryStateDatabase(), env, {
+    async schedule() {},
+    restart(): never { throw new Error("unused"); },
+  });
+  const token = await signClaims<SessionClaims>(SIGNING_SECRET, {
+    typ: "session",
+    aud: "crabhelm-control-plane",
+    principalId: "principal:portable-admin",
+    roles: ["administrator"],
+  }, 300);
+  const response = await routedRequest(env, token, "/api/state");
+  assert.equal(response.status, 200);
+  const state = await response.json() as {
+    runtime: { mode: string; inference: { kind: string }; targets: Array<{ admissionOpen: boolean }> };
+  };
+  assert.equal(state.runtime.mode, "unconfigured");
+  assert.equal(state.runtime.inference.kind, "clawrouter");
+  assert.equal(state.runtime.targets[0]?.admissionOpen, false);
+});
+
 test("Cloudflare entrypoint delegates to the portable HTTP service with its stable label", async () => {
   const source = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
   assert.match(
@@ -194,6 +219,133 @@ test("Cloudflare entrypoint delegates to the portable HTTP service with its stab
     service: "crabhelm",
     runtime: "cloudflare-workers",
   });
+});
+
+test("bootstrap accepts the authoritative multi-segment ClawRouter model and origin", async () => {
+  const childId = "685b2bda-351e-450b-a91c-45938c54454f";
+  let refreshRegistrations = 0;
+  let inferenceEntries = [
+    ["CLAWROUTER_API_KEY", "clawrouter-live-crabhelm_685b2bda351e450ba91c45938c54454f-test-secret"],
+    ["CRABHELM_ROUTER_BASE_URL", "https://clawrouter.example.test"],
+  ];
+  const token = await bootstrapToken(
+    SIGNING_SECRET,
+    childId,
+    DIGEST,
+    DIGEST,
+    DIGEST,
+    Date.now() + 60_000,
+  );
+  const controlPlane = {
+    bootstrapInference: async () => ({
+      model: "clawrouter/openai/gpt-5.5",
+      router: {
+        kind: "clawrouter" as const,
+        baseUrl: "https://clawrouter.example.test",
+        tenantId: "fakeco",
+        policyId: "crabhelm_685b2bda351e450ba91c45938c54454f",
+        credentialId: "crabhelm_685b2bda351e450ba91c45938c54454f",
+        projectId: "685b2bda-351e-450b-a91c-45938c54454f",
+        allowedProviders: ["openai"],
+        modelProviders: { "clawrouter/openai/gpt-5.5": "openai" },
+        providers: ["openai"],
+      },
+      credentialsGeneration: 2,
+    }),
+    inferenceCredentials: async () => inferenceEntries,
+  };
+  const env = {
+    RUNTIME_URL: RUNTIME,
+    BOOTSTRAP_SIGNING_SECRET: SIGNING_SECRET,
+    APPLIANCE_MANIFEST_SHA256: DIGEST,
+    APPLIANCE_ARCHIVE_SHA256: DIGEST,
+    NODE_RUNTIME_SHA256: DIGEST,
+    RUNTIME_SIGNING_SECRET: SIGNING_SECRET,
+    CRABHELM_EGRESS_LOCKDOWN: "required",
+    CONTROL_PLANE: { getByName: () => controlPlane },
+    CLAW_COORDINATOR: {
+      getByName: () => ({
+        async registerRuntimeRefresh() {
+          refreshRegistrations += 1;
+        },
+      }),
+    },
+  } as unknown as Env;
+  const url = new URL(`${RUNTIME}/bootstrap/${childId}/install.sh`);
+  url.searchParams.set("model", "clawrouter/openai/gpt-5.5");
+  url.searchParams.set("slack", "false");
+  url.searchParams.set("credentials", "2");
+  url.searchParams.set("policyHash", DIGEST);
+  const response = await handleCrabhelmRequest(
+    new Request(url, { headers: { authorization: `Bearer ${token}` } }),
+    env,
+    background,
+    { runtimeLabel: "portable-test" },
+  );
+
+  assert.equal(response.status, 200);
+  const script = await response.text();
+  assert.match(script, /CRABHELM_MODEL='clawrouter\/openai\/gpt-5\.5'/u);
+  assert.match(script, /CRABHELM_ROUTER_BASE_URL='https:\/\/clawrouter\.example\.test'/u);
+  assert.match(script, /credentials\.env\?credentials=2/u);
+
+  url.pathname = `/bootstrap/${childId}/credentials.env`;
+  const credentialsResponse = await handleCrabhelmRequest(
+    new Request(url, { headers: { authorization: `Bearer ${token}` } }),
+    env,
+    background,
+    { runtimeLabel: "portable-test" },
+  );
+  assert.equal(credentialsResponse.status, 200);
+  const credentials = await credentialsResponse.text();
+  assert.match(credentials, /^CLAWROUTER_API_KEY=/mu);
+  assert.match(credentials, /^CRABHELM_ROUTER_BASE_URL='https:\/\/clawrouter\.example\.test'$/mu);
+  assert.match(credentials, /^CRABHELM_RUNTIME_TOKEN=/mu);
+  assert.doesNotMatch(credentials, /OPENAI_API_KEY|CLAWROUTER_ADMIN_TOKEN|upstream/iu);
+  assert.equal(refreshRegistrations, 1);
+
+  inferenceEntries = [["OPENAI_API_KEY", "upstream-provider-secret"]];
+  const rejected = await handleCrabhelmRequest(
+    new Request(url, { headers: { authorization: `Bearer ${token}` } }),
+    env,
+    background,
+    { runtimeLabel: "portable-test" },
+  );
+  assert.equal(rejected.status, 503);
+  assert.equal(refreshRegistrations, 1);
+});
+
+test("Prometheus endpoint requires its machine credential and exports metadata only", async () => {
+  const database = memoryStateDatabase();
+  let service: CrabhelmControlPlaneService;
+  const env = fakeEnv(() => service);
+  env.CRABHELM_PROMETHEUS = "on";
+  env.METRICS_BEARER_TOKEN = "m".repeat(40);
+  service = new CrabhelmControlPlaneService(database, env, {
+    async schedule() {},
+    restart(): never { throw new Error("unused"); },
+  });
+  const missing = await handleCrabhelmRequest(
+    new Request(`${RUNTIME}/metrics`),
+    env,
+    background,
+    { runtimeLabel: "portable-test" },
+  );
+  assert.equal(missing.status, 401);
+  const response = await handleCrabhelmRequest(
+    new Request(`${RUNTIME}/metrics`, {
+      headers: { authorization: `Bearer ${env.METRICS_BEARER_TOKEN}` },
+    }),
+    env,
+    background,
+    { runtimeLabel: "portable-test" },
+  );
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type") ?? "", /version=0\.0\.4/u);
+  const body = await response.text();
+  assert.match(body, /crabhelm_claws\{phase="ready"\} 0/u);
+  assert.match(body, /crabhelm_clawrouter_routes_verified 0/u);
+  assert.doesNotMatch(body, /prompt|completion|message|credential|tool.output/iu);
 });
 
 function memoryStateDatabase(): ControlPlaneStateDatabase {
@@ -255,6 +407,10 @@ function fakeEnv(currentService: () => CrabhelmControlPlaneService): Env {
         return {
           fetch: (request: Request) => currentService().fetch(request),
           managedSpec: (clawId: string) => currentService().managedSpec(clawId),
+          bootstrapInference: (clawId: string) => currentService().bootstrapInference(clawId),
+          inferenceCredentials: (clawId: string, generation: number) =>
+            currentService().inferenceCredentials(clawId, generation),
+          prometheusMetrics: () => currentService().prometheusMetrics(),
           resolveAccessIdentity: (identity: Parameters<CrabhelmControlPlaneService["resolveAccessIdentity"]>[0]) =>
             currentService().resolveAccessIdentity(identity),
         };
@@ -272,7 +428,8 @@ function fakeEnv(currentService: () => CrabhelmControlPlaneService): Env {
     CRABBOX_TTL_SECONDS: "14400",
     CRABBOX_IDLE_TIMEOUT_SECONDS: "14400",
     CRABHELM_EGRESS_LOCKDOWN: "required",
-    CRABHELM_MODEL_PROXY: "off",
+    CRABHELM_CLAWROUTER: "off",
+    CRABHELM_PROMETHEUS: "off",
     NODE_RUNTIME_SHA256: DIGEST,
     APPLIANCE_ARCHIVE_SHA256: DIGEST,
     APPLIANCE_MANIFEST_SHA256: DIGEST,

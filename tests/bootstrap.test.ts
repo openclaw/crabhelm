@@ -43,6 +43,12 @@ test("child bootstrap verifies artifacts, allowlists Crabhelm, and strips ambien
 printf 'auth=%s/%s argv=' "\${OPENCLAW_GATEWAY_TOKEN+present}" "\${OPENCLAW_GATEWAY_PASSWORD+present}" >>"$CRABHELM_TEST_LOG"
 printf '%q ' "$@" >>"$CRABHELM_TEST_LOG"
 printf '\n' >>"$CRABHELM_TEST_LOG"
+if [[ "$1" = config && "$2" = get && "$3" = plugins.allow ]]; then
+  printf '["browser","crabhelm"]\n'
+fi
+if [[ "$1" = config && "$2" = get && "$3" = models.providers.clawrouter.headers ]]; then
+  printf '{"X-Static":"preserved","x-clawrouter-project-id":"stale","X-ClawRouter-Agent-Id":"stale","X-ClawRouter-Session-Id":"stale","X-ClawRouter-Request-Id":"stale"}\n'
+fi
 `);
   await executable(path.join(bin, "curl"), "#!/usr/bin/env bash\nexit 0\n");
   const digest = createHash("sha256").update(await readFile(plugin)).digest("hex");
@@ -67,19 +73,22 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
       CRABHELM_RUNTIME_BRIDGE: runtimeBridge,
       CRABHELM_RUNTIME_BRIDGE_SHA256: runtimeBridgeDigest,
       CRABHELM_RELEASE_ID: `${"b".repeat(64)}.${"c".repeat(64)}.${"d".repeat(64)}`,
-      CRABHELM_MODEL: "openai/gpt-5.4-mini",
-      CRABHELM_MODEL_BASE_URL: "https://crabhelm-runtime.example.test/model/v1",
+      CRABHELM_MODEL: "clawrouter/openai/gpt-5.5",
+      CRABHELM_ROUTER_BASE_URL: "https://clawrouter.example.test",
       CRABHELM_SLACK_ENABLED: "true",
-      OPENCLAW_GATEWAY_TOKEN: "must-not-reach-openclaw",
-      OPENCLAW_GATEWAY_PASSWORD: "must-not-reach-openclaw",
+      OPENCLAW_GATEWAY_TOKEN: "blocked",
+      OPENCLAW_GATEWAY_PASSWORD: "blocked",
     },
   });
 
   const calls = await readFile(log, "utf8");
   assert.doesNotMatch(calls, /auth=present/);
   assert.match(calls, /config set plugins\.allow/);
+  assert.match(calls, /plugins\.allow .*browser/);
   assert.match(calls, /plugins\.allow .*crabhelm.*slack/);
   assert.match(calls, /plugins\.allow .*diagnostics-otel/);
+  assert.match(calls, /plugins\.allow .*clawrouter/);
+  assert.match(calls, /plugins\.entries\.clawrouter\.enabled true/);
   assert.match(calls, /plugins\.entries\.diagnostics-otel\.enabled true/);
   assert.match(calls, /diagnostics\.otel .*https:\/\/otel\.example\.test\/collect/);
   assert.match(calls, /tracesEndpoint.*https:\/\/otel\.example\.test\/collect/);
@@ -87,8 +96,17 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
   assert.match(calls, /captureContent.*enabled.*false/);
   assert.match(calls, /config set logging\.level info/);
   assert.match(calls, /channels\.slack\.mode socket/);
-  assert.match(calls, /agents\.defaults\.model\.primary openai\/gpt-5\.4-mini/);
-  assert.match(calls, /config set models\.providers\.openai\.baseUrl https:\/\/crabhelm-runtime\.example\.test\/model\/v1/);
+  assert.match(calls, /agents\.defaults\.model\.primary clawrouter\/openai\/gpt-5\.5/);
+  assert.match(calls, /config set models\.providers\.clawrouter\.baseUrl https:\/\/clawrouter\.example\.test/);
+  assert.match(calls, /config set models\.providers\.clawrouter\.apiKey .*default.*env.*CLAWROUTER_API_KEY/);
+  assert.match(calls, /config unset models\.providers\.clawrouter\.headers\.x-clawrouter-project-id/u);
+  assert.match(calls, /config unset models\.providers\.clawrouter\.headers\.X-ClawRouter-Agent-Id/u);
+  assert.match(calls, /config unset models\.providers\.clawrouter\.headers\.X-ClawRouter-Session-Id/u);
+  assert.match(calls, /config unset models\.providers\.clawrouter\.headers\.X-ClawRouter-Request-Id/u);
+  assert.match(calls, /config set models\.providers\.clawrouter\.headers\.X-ClawRouter-Project-Id 11111111-1111-4111-8111-111111111111/u);
+  assert.doesNotMatch(calls, /config unset models\.providers\.clawrouter\.headers\.X-Static/u);
+  assert.doesNotMatch(calls, /models\.providers\.clawrouter\.models/u);
+  assert.match(calls, /config unset models\.providers\.openai\.baseUrl/);
   assert.match(calls, /agents\.defaults\.workspace .*\/state\/workspace/);
   assert.match(calls, /channels\.slack\.enabled true/);
   assert.match(calls, /channels\.slack\.appToken .*SLACK_APP_TOKEN/);

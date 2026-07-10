@@ -1,11 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import type {
   AccessPolicy,
+  ClawRouterFleetPolicy,
   ClawRecord,
   CreateClawInput,
   DeploymentSpec,
   FleetSummary,
   InferencePolicy,
+  InferenceRouter,
   ManagedPolicySpec,
   ObservabilityPolicy,
   OwnerRef,
@@ -16,8 +18,14 @@ import type {
 
 const subjectPattern = /^[a-zA-Z0-9][a-zA-Z0-9_.:@/+\-]{0,199}$/;
 const slugPattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
-const modelPattern = /^[a-z0-9][a-z0-9_.-]*\/[a-zA-Z0-9][a-zA-Z0-9_.:\-]{0,199}$/;
+const directModelPattern = /^[a-z0-9][a-z0-9_.-]*(?:\/[a-zA-Z0-9][a-zA-Z0-9_.:\-]{0,199})+$/;
+const clawRouterModelPattern = /^clawrouter\/[a-z0-9][a-z0-9-]{0,63}\/[a-zA-Z0-9][a-zA-Z0-9_.:\-]{0,199}(?:\/[a-zA-Z0-9][a-zA-Z0-9_.:\-]{0,199})*$/;
 const sha256Pattern = /^[0-9a-f]{64}$/;
+
+export type CreateClawRecordOptions = {
+  id?: string;
+  clawRouter?: ClawRouterFleetPolicy;
+};
 
 export function slugify(value: string): string {
   return value
@@ -56,12 +64,26 @@ function normalizeOwner(owner: OwnerRef): OwnerRef {
   };
 }
 
-function normalizeModels(input?: Partial<InferencePolicy>): InferencePolicy {
-  const model = requireText(input?.model ?? "openai/gpt-5.5", "inference model", 220);
+function normalizeModels(
+  input: CreateClawInput["inference"] | undefined,
+  clawId: string,
+  clawRouter?: ClawRouterFleetPolicy,
+  allowClawRouterTemplate = false,
+): InferencePolicy {
+  const model = requireText(
+    input?.model ?? clawRouter?.defaultModel ?? "openai/gpt-5.5",
+    "inference model",
+    220,
+  );
   const fallbackModels = [...new Set(input?.fallbackModels ?? [])];
+  const routedSyntax = Boolean(clawRouter) || (allowClawRouterTemplate && model.startsWith("clawrouter/"));
   for (const value of [model, ...fallbackModels]) {
-    if (!modelPattern.test(value)) {
-      throw new Error(`model must use provider/model form: ${value}`);
+    if (routedSyntax
+      ? !clawRouterModelPattern.test(value)
+      : value.startsWith("clawrouter/") || !directModelPattern.test(value)) {
+      throw new Error(routedSyntax
+        ? `ClawRouter fleets require clawrouter/provider/model form: ${value}`
+        : `model must use provider/model form: ${value}`);
     }
   }
   const modelProvider = model.slice(0, model.indexOf("/"));
@@ -78,13 +100,52 @@ function normalizeModels(input?: Partial<InferencePolicy>): InferencePolicy {
   ) {
     throw new Error("monthly budget must be between 0 and 1000000 USD");
   }
+  let router: InferenceRouter = { kind: "direct" };
+  let authRef = input?.authRef
+    ? requireText(input.authRef, "inference auth ref", 240)
+    : undefined;
+  if (clawRouter) {
+    const models = [model, ...fallbackModels];
+    if (models.some((value) => !value.startsWith("clawrouter/"))) {
+      throw new Error("ClawRouter fleets require clawrouter/provider/model references");
+    }
+    const providers = [...new Set(models.map((value) => clawRouter.modelProviders[value] ?? ""))].sort();
+    if (providers.includes("")) {
+      throw new Error("every ClawRouter model requires an explicit fleet model-to-provider mapping");
+    }
+    if (providers.some((provider) => !clawRouter.allowedProviders.includes(provider))) {
+      throw new Error("inference model provider is outside the fleet ClawRouter allowlist");
+    }
+    const credentialId = clawRouterCredentialId(clawId);
+    router = {
+      kind: "clawrouter",
+      baseUrl: clawRouter.baseUrl,
+      tenantId: clawRouter.tenantId,
+      policyId: credentialId,
+      credentialId,
+      projectId: clawId,
+      allowedProviders: [...clawRouter.allowedProviders],
+      modelProviders: Object.fromEntries(
+        Object.entries(clawRouter.modelProviders).sort(([first], [second]) => first.localeCompare(second)),
+      ),
+      providers,
+    };
+    authRef = `clawrouter:${credentialId}`;
+  }
   return {
     provider: modelProvider,
     model,
     fallbackModels,
-    ...(input?.authRef ? { authRef: requireText(input.authRef, "inference auth ref", 240) } : {}),
+    ...(authRef ? { authRef } : {}),
     ...(monthlyBudgetUsd !== undefined ? { monthlyBudgetUsd } : {}),
+    router,
   };
+}
+
+function clawRouterCredentialId(clawId: string): string {
+  const compact = clawId.replaceAll("-", "").toLowerCase();
+  if (!/^[0-9a-f]{32}$/u.test(compact)) throw new Error("claw id is invalid for ClawRouter identity");
+  return `crabhelm_${compact}`;
 }
 
 function normalizeSlack(input: Partial<SlackPolicy> | undefined, slug: string): SlackPolicy {
@@ -203,7 +264,12 @@ function normalizeAppliance(input: CreateClawInput["deployment"]): DeploymentSpe
 }
 
 export function normalizeManagedPolicySpec(input: ManagedPolicySpec): ManagedPolicySpec {
-  const inference = normalizeModels(input?.inference);
+  const inference = normalizeModels(
+    input?.inference,
+    "00000000-0000-4000-8000-000000000000",
+    undefined,
+    true,
+  );
   return {
     inference: {
       model: inference.model,
@@ -253,7 +319,12 @@ export function managedPolicyDiff(record: ClawRecord, spec: ManagedPolicySpec): 
     .map(([field, before, after]) => ({ field, before, after }));
 }
 
-export function createClawRecord(input: CreateClawInput, now = new Date()): ClawRecord {
+export function createClawRecord(
+  input: CreateClawInput,
+  now = new Date(),
+  options: CreateClawRecordOptions = {},
+): ClawRecord {
+  const id = options.id ?? randomUUID();
   const name = requireText(input.name, "name", 80);
   const slug = input.slug ? requireText(input.slug, "slug", 63) : slugify(name);
   if (!slugPattern.test(slug)) {
@@ -266,7 +337,7 @@ export function createClawRecord(input: CreateClawInput, now = new Date()): Claw
   const appliance = normalizeAppliance(input.deployment);
   const timestamp = now.toISOString();
   return {
-    id: randomUUID(),
+    id,
     revision: 1,
     desired: {
       generation: 1,
@@ -283,7 +354,7 @@ export function createClawRecord(input: CreateClawInput, now = new Date()): Claw
           : {}),
         ...(appliance ? { appliance } : {}),
       },
-      inference: normalizeModels(input.inference),
+      inference: normalizeModels(input.inference, id, options.clawRouter),
       channels: { slack: normalizeSlack(input.slack, slug) },
       access: normalizeAccess(input.access),
       observability: normalizeObservability(input.observability, slug),
@@ -318,6 +389,7 @@ export function updateClawRecord(
       ? { provider: undefined }
       : {}),
   };
+  const router = record.desired.inference.router;
   const merged = createClawRecord(
     {
       name: patch.name ?? record.desired.name,
@@ -336,6 +408,20 @@ export function updateClawRecord(
       },
     },
     now,
+    {
+      id: record.id,
+      ...(router.kind === "clawrouter"
+        ? {
+            clawRouter: {
+              baseUrl: router.baseUrl,
+              tenantId: router.tenantId,
+              allowedProviders: router.allowedProviders,
+              modelProviders: router.modelProviders,
+              defaultModel: record.desired.inference.model,
+            },
+          }
+        : {}),
+    },
   );
   const desired = {
     ...merged.desired,
@@ -409,6 +495,7 @@ export function childPolicyHash(record: ClawRecord): string {
   const serialized = canonicalJson({
     model: record.desired.inference.model,
     fallbackModels: record.desired.inference.fallbackModels,
+    router: record.desired.inference.router,
     slackEnabled: record.desired.channels.slack.enabled,
     access: record.desired.access,
     logLevel: record.desired.observability.logLevel,
@@ -423,15 +510,18 @@ export function standaloneBootstrapHash(record: ClawRecord): string {
   return standaloneBootstrapHashFor(
     record.desired.inference.model,
     record.desired.observability,
+    record.desired.inference.router,
   );
 }
 
 export function standaloneBootstrapHashFor(
   model: string,
   observability: Pick<ObservabilityPolicy, "logLevel" | "otel">,
+  router: InferenceRouter = { kind: "direct" },
 ): string {
   const serialized = canonicalJson({
     model,
+    router,
     logLevel: observability.logLevel,
     otel: observability.otel,
   });

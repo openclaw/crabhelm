@@ -147,6 +147,7 @@ test("policy API requires and verifies a converged canary before applying the re
         admissionOpen: true,
       }],
       githubImport: false,
+      inference: { kind: "direct", defaultModel: "openai/gpt-5.5", metadataOnly: true },
     },
   });
   const server = createServer(async (req, res) => {

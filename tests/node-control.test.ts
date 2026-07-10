@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import test from "node:test";
 import { childPolicyHash, createClawRecord } from "../src/domain.js";
 import {
@@ -52,16 +53,56 @@ test("child status command binds evidence to the configured child id", async () 
   assert.equal(response.ok, true);
   assert.equal(response.childId, "child-1");
   assert.equal(response.pluginMode, "child");
-  assert.equal(response.protocolVersion, 2);
+  assert.equal(response.protocolVersion, 3);
   assert.equal(response.gatewayReady, false);
   assert.equal(response.gatewayVersion, "test-version");
   assert.equal(typeof response.managedHash, "string");
   await assert.rejects(handler(JSON.stringify({ clawId: "other" })), /identity mismatch/);
 });
 
+test("child status requires canonical Gateway liveness and readiness", async (context) => {
+  const paths: string[] = [];
+  const server = createServer((request, response) => {
+    paths.push(request.url ?? "");
+    response.statusCode = request.url === "/healthz" || request.url === "/readyz" ? 200 : 404;
+    response.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  context.after(() => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  let handler: ((params?: string | null) => Promise<string>) | undefined;
+  registerChildCommands(
+    {
+      runtime: registrationRuntime({ gateway: { port: address.port } }),
+      registerNodeHostCommand(command) {
+        if (command.command === childStatusCommand) handler = command.handle;
+      },
+      registerNodeInvokePolicy() {},
+    },
+    "child-1",
+  );
+
+  assert.ok(handler);
+  const response = JSON.parse(await handler(JSON.stringify({ clawId: "child-1" })));
+  assert.equal(response.gatewayReady, true);
+  assert.deepEqual(paths.toSorted(), ["/healthz", "/readyz"]);
+});
+
 test("child apply command performs managed-field compare-and-swap", async () => {
   const config: Record<string, unknown> = {
     agents: { defaults: { model: "openai/gpt-5.5" } },
+    models: {
+      providers: {
+        openai: { baseUrl: "https://crabhelm.example.test/model/v1", api: "responses" },
+        clawrouter: {
+          headers: {
+            "X-ClawRouter-Project-Id": "stale-project",
+            "X-ClawRouter-Agent-Id": "stale-agent",
+          },
+        },
+      },
+    },
     plugins: { allow: "invalid-existing-policy" },
   };
   const handlers = new Map<string, (params?: string | null) => Promise<string>>();
@@ -114,6 +155,11 @@ test("child apply command performs managed-field compare-and-swap", async () => 
     fallbacks: [],
   });
   assert.equal((config.logging as { level: string }).level, "warn");
+  assert.deepEqual(
+    ((config.models as { providers: { openai: Record<string, unknown> } }).providers.openai),
+    { api: "responses" },
+  );
+  assert.equal("clawrouter" in ((config.models as { providers: Record<string, unknown> }).providers), false);
   assert.deepEqual((config.plugins as { allow: string[] }).allow, ["crabhelm", "slack", "diagnostics-otel"]);
   assert.equal(
     ((config.plugins as { entries: { "diagnostics-otel": { enabled: boolean } } }).entries["diagnostics-otel"].enabled),
@@ -188,6 +234,113 @@ test("child apply command performs managed-field compare-and-swap", async () => 
   );
   assert.equal(disabled.ok, true);
   assert.equal((config.diagnostics as { enabled: boolean }).enabled, false);
+});
+
+test("child apply owns the ClawRouter model and origin as one managed setting", async () => {
+  const childId = "11111111-1111-4111-8111-111111111111";
+  const config: Record<string, unknown> = {
+    agents: { defaults: { model: "openai/gpt-5.5" } },
+    plugins: { allow: ["browser", "crabhelm", "slack"] },
+    models: {
+      providers: {
+        clawrouter: {
+          headers: {
+            "X-Static": "preserved",
+            "x-clawrouter-project-id": "stale-project",
+            "X-ClawRouter-Agent-Id": "stale-agent",
+            "X-ClawRouter-Session-Id": "stale-session",
+            "X-ClawRouter-Request-Id": "stale-request",
+          },
+        },
+      },
+    },
+  };
+  const handlers = new Map<string, (params?: string | null) => Promise<string>>();
+  registerChildCommands(
+    {
+      runtime: registrationRuntime(config),
+      registerNodeHostCommand(command) {
+        handlers.set(command.command, command.handle);
+      },
+      registerNodeInvokePolicy() {},
+    },
+    childId,
+  );
+  const status = JSON.parse(
+    await handlers.get(childStatusCommand)?.(JSON.stringify({ clawId: childId })) ?? "{}",
+  );
+  const apply = handlers.get(childApplyCommand);
+  assert.ok(apply);
+  const desired = {
+    model: "clawrouter/openai/gpt-5.5",
+    routerBaseUrl: "https://clawrouter.example.test",
+    routerProjectId: childId,
+    fallbackModels: [],
+    slackEnabled: false,
+    dmPolicy: "pairing",
+    groupPolicy: "allowlist",
+    logLevel: "info",
+  };
+  const applied = JSON.parse(await apply(JSON.stringify({
+    clawId: childId,
+    generation: 2,
+    desiredHash: "routed-hash",
+    expectedManagedHash: status.managedHash,
+    desired,
+  })));
+  assert.equal(applied.ok, true);
+  assert.deepEqual((config.plugins as { allow: string[] }).allow, ["browser", "crabhelm", "slack", "clawrouter"]);
+  assert.equal(
+    ((config.plugins as { entries: { clawrouter: { enabled: boolean } } }).entries.clawrouter.enabled),
+    true,
+  );
+  assert.deepEqual(
+    (((config.models as { providers: { clawrouter: Record<string, unknown> } }).providers.clawrouter)),
+    {
+      baseUrl: "https://clawrouter.example.test",
+      apiKey: { source: "env", provider: "default", id: "CLAWROUTER_API_KEY" },
+      headers: {
+        "X-Static": "preserved",
+        "X-ClawRouter-Project-Id": childId,
+      },
+    },
+  );
+  const converged = JSON.parse(
+    await handlers.get(childStatusCommand)?.(JSON.stringify({ clawId: childId })) ?? "{}",
+  );
+  const routedProvider = ((config.models as { providers: { clawrouter: Record<string, unknown> } }).providers.clawrouter);
+  (routedProvider.headers as Record<string, string>)["X-ClawRouter-Session-Id"] = "stale-session";
+  const attributionDrift = JSON.parse(
+    await handlers.get(childStatusCommand)?.(JSON.stringify({ clawId: childId })) ?? "{}",
+  );
+  assert.notEqual(attributionDrift.managedHash, converged.managedHash);
+  assert.equal(attributionDrift.appliedDesiredHash, undefined);
+  delete (routedProvider.headers as Record<string, string>)["X-ClawRouter-Session-Id"];
+  delete (((config.models as { providers: { clawrouter: Record<string, unknown> } }).providers.clawrouter).apiKey);
+  const credentialDrift = JSON.parse(
+    await handlers.get(childStatusCommand)?.(JSON.stringify({ clawId: childId })) ?? "{}",
+  );
+  assert.notEqual(credentialDrift.managedHash, converged.managedHash);
+  await assert.rejects(
+    apply(JSON.stringify({
+      clawId: childId,
+      generation: 3,
+      desiredHash: "missing-origin",
+      expectedManagedHash: "unused",
+      desired: { ...desired, routerBaseUrl: undefined },
+    })),
+    /must select ClawRouter together/u,
+  );
+  await assert.rejects(
+    apply(JSON.stringify({
+      clawId: childId,
+      generation: 3,
+      desiredHash: "wrong-project",
+      expectedManagedHash: "unused",
+      desired: { ...desired, routerProjectId: "22222222-2222-4222-8222-222222222222" },
+    })),
+    /must match the immutable child id/u,
+  );
 });
 
 test("child ingress command disables and restores existing channel states", async () => {
@@ -517,6 +670,54 @@ test("node control requires protocol v2 before enabling OpenTelemetry", async ()
   const result = await control.inspect(claw);
   assert.equal(result.status, "pending");
   assert.match(result.message, /plugin upgrade is required/u);
+  assert.equal(applyCalls, 0);
+});
+
+test("node control requires protocol v3 before applying ClawRouter attribution", async () => {
+  const model = "clawrouter/openai/gpt-5.5";
+  const claw = createClawRecord({
+    name: "Legacy routed child",
+    owner: { subject: "github:legacy-routed", label: "@legacy-routed", source: "github" },
+    inference: { model },
+  }, new Date(), {
+    clawRouter: {
+      baseUrl: "https://clawrouter.example.test",
+      tenantId: "fakeco",
+      allowedProviders: ["openai"],
+      modelProviders: { [model]: "openai" },
+      defaultModel: model,
+    },
+  });
+  let applyCalls = 0;
+  const control = new OpenClawNodeControl({
+    async list() {
+      return { nodes: [{
+        nodeId: childNodeId(claw.id),
+        displayName: childNodeDisplayName(claw.id),
+        connected: true,
+        commands: [childStatusCommand, childApplyCommand],
+      }] };
+    },
+    async invoke(params) {
+      if (params.command === childApplyCommand) applyCalls += 1;
+      return {
+        ok: true,
+        payload: {
+          ok: true,
+          childId: claw.id,
+          pluginMode: "child",
+          protocolVersion: 2,
+          gatewayReady: true,
+          managedHash: "legacy-managed",
+          appliedDesiredHash: childPolicyHash(claw),
+        },
+      };
+    },
+  });
+
+  const result = await control.inspect(claw);
+  assert.equal(result.status, "pending");
+  assert.match(result.message, /protocol v3 upgrade is required/u);
   assert.equal(applyCalls, 0);
 });
 

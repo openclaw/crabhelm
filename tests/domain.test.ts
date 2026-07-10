@@ -4,6 +4,7 @@ import {
   childPolicyHash,
   clawCredentialsGeneration,
   createClawRecord,
+  normalizeManagedPolicySpec,
   rotateClawCredentials,
   updateClawRecord,
 } from "../src/domain.js";
@@ -23,6 +24,7 @@ test("creates an independent child-core desired state with safe defaults", () =>
   assert.equal(claw.desired.observability.logLevel, "info");
   assert.equal(claw.desired.observability.otel.enabled, false);
   assert.equal(claw.desired.observability.otel.serviceName, "crabhelm-ada-s-maintainer-claw");
+  assert.deepEqual(claw.desired.inference.router, { kind: "direct" });
   assert.equal(claw.observed.controlLink.status, "pending");
   assert.equal(claw.observed.controlLink.transport, "openclaw-node");
   assert.equal(claw.observed.controlLink.command, "crabhelm.child.status");
@@ -191,4 +193,87 @@ test("rejects non provider/model inference identifiers", () => {
       }),
     /provider\/model/,
   );
+  assert.equal(
+    createClawRecord({
+      name: "Nested direct model",
+      owner: { subject: "manual:segments", label: "Segments", source: "manual" },
+      inference: { model: "openrouter/anthropic/claude-sonnet-4.6" },
+    }).desired.inference.model,
+    "openrouter/anthropic/claude-sonnet-4.6",
+  );
+  assert.throws(
+    () => createClawRecord({
+      name: "Router without fleet",
+      owner: { subject: "manual:router", label: "Router", source: "manual" },
+      inference: { model: "clawrouter/openai/gpt-5.5" },
+    }),
+    /provider\/model/u,
+  );
+});
+
+test("creates per-claw ClawRouter desired state from fleet policy", () => {
+  const claw = createClawRecord({
+    name: "Routed",
+    owner: { subject: "manual:routed", label: "Routed", source: "manual" },
+    inference: {
+      model: "clawrouter/openai/gpt-5.5",
+      fallbackModels: ["clawrouter/anthropic/claude-sonnet-4.6"],
+    },
+  }, new Date(), {
+    clawRouter: {
+      baseUrl: "https://clawrouter.example.test",
+      tenantId: "fakeco",
+      allowedProviders: ["anthropic", "openai"],
+      modelProviders: {
+        "clawrouter/anthropic/claude-sonnet-4.6": "anthropic",
+        "clawrouter/openai/gpt-5.5": "openai",
+      },
+      defaultModel: "clawrouter/openai/gpt-5.5",
+    },
+  });
+  assert.equal(claw.desired.inference.provider, "clawrouter");
+  assert.equal(claw.desired.inference.authRef?.startsWith("clawrouter:crabhelm_"), true);
+  assert.deepEqual(claw.desired.inference.router, {
+    kind: "clawrouter",
+    baseUrl: "https://clawrouter.example.test",
+    tenantId: "fakeco",
+    policyId: `crabhelm_${claw.id.replaceAll("-", "")}`,
+    credentialId: `crabhelm_${claw.id.replaceAll("-", "")}`,
+    projectId: claw.id,
+    allowedProviders: ["anthropic", "openai"],
+    modelProviders: {
+      "clawrouter/anthropic/claude-sonnet-4.6": "anthropic",
+      "clawrouter/openai/gpt-5.5": "openai",
+    },
+    providers: ["anthropic", "openai"],
+  });
+  assert.throws(
+    () => updateClawRecord(claw, { inference: { model: "clawrouter/google/gemini-2.5-pro" } }),
+    /explicit fleet model-to-provider mapping/u,
+  );
+  assert.throws(
+    () => createClawRecord({
+      name: "Direct mismatch",
+      owner: { subject: "manual:direct", label: "Direct", source: "manual" },
+      inference: { model: "openai/gpt-5.5" },
+    }, new Date(), {
+      clawRouter: {
+        baseUrl: "https://clawrouter.example.test",
+        tenantId: "fakeco",
+        allowedProviders: ["openai"],
+        modelProviders: { "clawrouter/openai/gpt-5.5": "openai" },
+        defaultModel: "clawrouter/openai/gpt-5.5",
+      },
+    }),
+    /require clawrouter\/provider\/model/u,
+  );
+  assert.equal(normalizeManagedPolicySpec({
+    inference: {
+      model: "clawrouter/openai/gpt-5.5",
+      fallbackModels: ["clawrouter/anthropic/claude-sonnet-4.6"],
+    },
+    slackEnabled: false,
+    access: { dmPolicy: "pairing", groupPolicy: "allowlist" },
+    observability: { logLevel: "info" },
+  }).inference.model, "clawrouter/openai/gpt-5.5");
 });

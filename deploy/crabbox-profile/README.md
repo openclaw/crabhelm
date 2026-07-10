@@ -1,6 +1,6 @@
 # Crabbox `openclaw-core` appliance
 
-Provider-neutral guest overlay used by Crabhelm's Crabbox deployment adapter. Crabbox owns workspace acquisition, authenticated terminal transport, and release. Cloudflare owns desired state, appliance delivery, and reconciliation.
+Provider-neutral guest overlay used by Crabhelm's Crabbox deployment adapter. Crabbox owns workspace acquisition, authenticated terminal transport, and release. The selected Crabhelm backend owns desired state, appliance delivery, and reconciliation.
 
 ## Build
 
@@ -13,7 +13,7 @@ deploy/crabbox-profile/build-bundle.sh \
   --output /absolute/empty/output
 ```
 
-The builder pins the Linux x64 Node.js `22.23.1` runtime plus OpenClaw, Slack, and `diagnostics-otel` `2026.6.11`, packs the current Crabhelm source, verifies all artifacts, and emits `manifest.json`. The installer always runs the reviewed Node artifact from a digest-specific path. Plugin inputs must contain their production dependencies under `package/node_modules`; lifecycle scripts and dependency declarations are removed from the reviewed appliance copy. Archive the output under a top-level `bundle/` directory because the Cloudflare installer executes `bundle/guest-install.sh`:
+The builder pins the Linux x64 Node.js `22.23.1` runtime plus OpenClaw, Slack, and `diagnostics-otel` `2026.6.11`, packs the current Crabhelm source, verifies all artifacts, and emits `manifest.json`. This existing version pin is the live direct-provider reference only and predates the ClawRouter provider-overlay fix. Before a live FakeCo routed deployment, prepare a separately reviewed appliance from the landed overlay commit and pin its exact manifest/archive/Node digests; this integration does not bump or release OpenClaw. The installer always runs the reviewed Node artifact from a digest-specific path. Plugin inputs must contain their production dependencies under `package/node_modules`; lifecycle scripts and dependency declarations are removed from the reviewed appliance copy. Archive the output under a top-level `bundle/` directory because the Cloudflare installer executes `bundle/guest-install.sh`:
 
 ```bash
 tar -C /path/to/parent -s '|^output|bundle|' -czf /tmp/crabhelm-bundle.tgz output
@@ -23,10 +23,10 @@ Upload the archive to `releases/<archive-sha256>.tgz` in the private R2 applianc
 
 ## Guest sequence
 
-1. Cloudflare generates a child-specific HMAC bootstrap URL containing the exact desired model.
+1. Crabhelm generates a child-specific HMAC bootstrap URL containing the exact desired model and optional ClawRouter origin.
 2. Guest downloads the private archive and credential file.
 3. `guest-install.sh` verifies manifest/artifacts, installs pinned packages and the offline OTel exporter in sanitized environments, keeps the model credential in `$HOME/.openclaw/.env`, and installs the runtime workload credential owner-only for the bridge launcher. The bridge reads it through a private file descriptor and rotates it before expiry.
-4. `bootstrap-child.sh` writes exact child and metadata-only OTel config, starts the loopback Gateway, and installs a private idempotent runtime-bridge launcher.
-5. Crabhelm attaches through Crabbox and requires a real model turn before readiness, then launches the bridge. The bridge obtains short-lived one-use connection tickets and connects outbound to the per-claw Durable Object.
+4. `bootstrap-child.sh` writes exact child, inference, and metadata-only OTel config, starts the loopback Gateway, and installs a private idempotent runtime-bridge launcher.
+5. Crabhelm attaches through Crabbox and requires a real model turn through the desired model/router configuration before readiness, then launches the bridge. The bridge obtains short-lived one-use connection tickets and connects outbound to the per-claw coordinator.
 
-Child credentials are `OPENAI_API_KEY`, the audience-bound Crabhelm runtime token, and child id. Slack and provider OAuth credentials stay on Cloudflare. Secret values never appear in workspace requests, registry records, audit rows, or terminal evidence.
+Child credentials are exactly one of `OPENAI_API_KEY` or an epoch-scoped `CLAWROUTER_API_KEY`, plus the audience-bound Crabhelm runtime token and child id. In ClawRouter mode, upstream provider credentials remain in the separate ClawRouter installation. Slack and provider OAuth credentials stay in the selected Crabhelm backend. Secret values never appear in workspace requests, registry records, audit rows, or terminal evidence.

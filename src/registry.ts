@@ -13,6 +13,7 @@ import {
 import type { StateStore, StateTransaction } from "./state.js";
 import type {
   AuditEvent,
+  ClawRouterFleetPolicy,
   ClawObserved,
   ClawRecord,
   CreatePolicyInput,
@@ -48,6 +49,7 @@ export class CrabhelmRegistry {
   readonly #policies?: StateStore<PolicyTemplate>;
   readonly #deploymentTargets?: ReadonlyMap<string, RegistryDeploymentTarget>;
   readonly #defaultDeployment?: { target: string } & RegistryDeploymentTarget;
+  readonly #clawRouter?: ClawRouterFleetPolicy;
   readonly #transaction?: StateTransaction;
   #tail: Promise<unknown> = Promise.resolve();
 
@@ -59,6 +61,7 @@ export class CrabhelmRegistry {
       defaultDeployment?: { target: string } & RegistryDeploymentTarget;
       policies?: StateStore<PolicyTemplate>;
       transaction?: StateTransaction;
+      clawRouter?: ClawRouterFleetPolicy;
     } = {},
   ) {
     this.#claws = claws;
@@ -69,6 +72,7 @@ export class CrabhelmRegistry {
     this.#defaultDeployment = options.defaultDeployment;
     this.#policies = options.policies;
     this.#transaction = options.transaction;
+    this.#clawRouter = options.clawRouter;
   }
 
   async list(): Promise<ClawRecord[]> {
@@ -250,7 +254,11 @@ export class CrabhelmRegistry {
 
   async create(input: CreateClawInput, actor: string): Promise<ClawRecord> {
     return this.#serialize(async () => {
-      const next = createClawRecord(this.#withDefaultDeployment(input));
+      const next = createClawRecord(
+        this.#withDefaultDeployment(input),
+        new Date(),
+        this.#clawRouter ? { clawRouter: this.#clawRouter } : {},
+      );
       this.#assertDeployment(next.desired.deployment);
       const duplicate = (await this.#claws.entries()).some(
         (entry) => entry.value.desired.slug === next.desired.slug && entry.value.observed.phase !== "deleted",
@@ -483,20 +491,33 @@ export class CrabhelmRegistry {
 
 function normalizeRecord(record: ClawRecord): ClawRecord {
   const legacyDesired = record.desired as ClawRecord["desired"] & {
+    inference: ClawRecord["desired"]["inference"] & {
+      router?: ClawRecord["desired"]["inference"]["router"];
+    };
     observability?: Partial<ClawRecord["desired"]["observability"]> & {
       otel?: ClawRecord["desired"]["observability"]["otel"];
     };
   };
   const observability = legacyDesired.observability;
+  const router = legacyDesired.inference.router;
+  const missingRouterProject = router?.kind === "clawrouter" &&
+    typeof (router as { projectId?: unknown }).projectId !== "string";
+  const normalizedRouter = router?.kind === "clawrouter" && missingRouterProject
+    ? { ...router, projectId: record.id }
+    : router ?? { kind: "direct" as const };
   const revision = Number.isSafeInteger(record.revision) && record.revision >= 0
     ? record.revision
     : 0;
-  if (observability?.otel && revision === record.revision) return record;
+  if (observability?.otel && router && !missingRouterProject && revision === record.revision) return record;
   return {
     ...record,
     revision,
     desired: {
       ...record.desired,
+      inference: {
+        ...record.desired.inference,
+        router: normalizedRouter,
+      },
       observability: {
         logLevel: observability?.logLevel ?? "info",
         retentionDays: observability?.retentionDays ?? 30,

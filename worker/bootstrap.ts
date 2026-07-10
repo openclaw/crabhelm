@@ -46,6 +46,7 @@ type WorkspaceTerminalState =
   | "config-failed"
   | "restart-failed"
   | "gateway-failed"
+  | "model-probe-failed"
   | "turn-failed"
   | "output-failed"
   | "output-schema-failed"
@@ -167,6 +168,9 @@ export class CrabboxWorkspaceBootstrap {
         workspace.attachUrl,
         this.#brokerToken,
         claw.desired.inference.model,
+        claw.desired.inference.router.kind === "clawrouter"
+          ? claw.desired.inference.router.baseUrl
+          : "",
         releaseMarker(release),
         release.nodeId,
         credentialsGeneration,
@@ -293,7 +297,7 @@ export class CrabboxWorkspaceBootstrap {
         `printf '%s_BEGIN\\n' ${shellQuote(label)}`,
         "tail -n 40 \"$HOME/.openclaw/crabhelm-runtime-bridge.log\" 2>/dev/null || true",
         "printf 'INSTALL_STAGE %s\\n' \"$(head -n 1 /tmp/crabhelm-install-failed-stage 2>/dev/null || echo missing)\"",
-        "tail -n 20 /tmp/crabhelm-install.log 2>/dev/null | sed -E 's/(Bearer|CRABHELM_RUNTIME_TOKEN=)[^[:space:]]+/\\1[REDACTED]/g; s/[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+/[REDACTED_JWT]/g' | sed 's/^/INSTALL_LOG /' || true",
+        "tail -n 20 /tmp/crabhelm-install.log 2>/dev/null | sed -E 's/(Bearer[[:space:]]+|CRABHELM_RUNTIME_TOKEN=|OPENAI_API_KEY=|CLAWROUTER_API_KEY=|CLAWROUTER_ACCESS_CLIENT_SECRET=)[^[:space:]]+/\\1[REDACTED]/g; s/clawrouter-live-[A-Za-z0-9_-]+-[A-Za-z0-9_-]+/[REDACTED_CLAWROUTER_KEY]/g; s/[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+/[REDACTED_JWT]/g' | sed 's/^/INSTALL_LOG /' || true",
         "bridge_pid=$(tr -cd '0-9' <\"$HOME/.openclaw/crabhelm-runtime-bridge.pid\" 2>/dev/null || true)",
         "printf 'STATE release=%s install_stage=%s turn_file=%s log_bytes=%s bridge_pid=%s stdout=%s bridge_sha256=%s\\n' \"$(head -n 1 \"$HOME/.openclaw/crabhelm-ready\" 2>/dev/null || echo missing)\" \"$(head -n 1 /tmp/crabhelm-install-failed-stage 2>/dev/null || echo missing)\" \"$(test -f \"$HOME/.openclaw/crabhelm-current-turn.json\" && echo present || echo absent)\" \"$(wc -c <\"$HOME/.openclaw/crabhelm-runtime-bridge.log\" 2>/dev/null || echo missing)\" \"${bridge_pid:-missing}\" \"$(readlink \"/proc/${bridge_pid:-0}/fd/1\" 2>/dev/null || echo missing)\" \"$(sha256sum \"$HOME/.local/share/crabhelm/runtime/runtime-bridge.mjs\" 2>/dev/null | cut -d' ' -f1 || echo missing)\"",
         "ps -eo pid=,ppid=,state=,etimes=,comm= | awk -v parent=\"${bridge_pid:-0}\" '$1 == parent || $2 == parent' | tail -n 10 || true",
@@ -427,6 +431,7 @@ async function inspectTerminal(
   attachUrl: string,
   brokerToken: string,
   model: string,
+  routerBaseUrl: string,
   releaseId: string,
   nodeId: string,
   credentialsGeneration: number,
@@ -459,7 +464,7 @@ async function inspectTerminal(
         finish("ready");
       } else if (hasTerminalLine(output, `${probeLabel}_READY`) && !probeSent) {
         probeSent = true;
-        socket.send(`${inferenceProbeCommand(model, releaseId, nodeId, `${probeLabel}_INFERENCE`, credentialsGeneration, policyHash, true)}\n`);
+        socket.send(`${inferenceProbeCommand(model, releaseId, nodeId, `${probeLabel}_INFERENCE`, credentialsGeneration, policyHash, true, routerBaseUrl)}\n`);
       } else if (
         hasTerminalLine(output, `${probeLabel}_STARTED`) ||
         hasTerminalLine(output, `${probeLabel}_INSTALLING`)
@@ -583,6 +588,7 @@ function terminalInferenceFailure(
     [`${probeLabel}_CONFIG_FAILED`, "config-failed"],
     [`${probeLabel}_RESTART_FAILED`, "restart-failed"],
     [`${probeLabel}_GATEWAY_FAILED`, "gateway-failed"],
+    [`${probeLabel}_MODEL_PROBE_FAILED`, "model-probe-failed"],
     [`${probeLabel}_TURN_FAILED`, "turn-failed"],
     [`${probeLabel}_OUTPUT_FAILED`, "output-failed"],
     [`${probeLabel}_OUTPUT_SCHEMA_FAILED`, "output-schema-failed"],
@@ -752,6 +758,7 @@ export function inferenceProbeCommand(
   credentialsGeneration = 1,
   policyHash = "",
   systemManaged = false,
+  routerBaseUrl = "",
 ): string {
   if (!/^[0-9a-f]{64}\.[0-9a-f]{64}\.[0-9a-f]{64}$/u.test(releaseId) || !/^[0-9a-f]{64}$/u.test(nodeId)) {
     throw new Error("inference probe release identity is invalid");
@@ -771,6 +778,8 @@ export function inferenceProbeCommand(
       : `v3:${releaseId}:${model}`;
   const output = "/tmp/crabhelm-inference-probe.json";
   const error = "/tmp/crabhelm-inference-probe.err";
+  const modelProbeOutput = "/tmp/crabhelm-model-probe.json";
+  const modelProbeError = "/tmp/crabhelm-model-probe.err";
   const runtimeLauncher = `${home}/.local/share/crabhelm/runtime/start-runtime-bridge.sh`;
   const openclawCli = `${home}/.local/share/crabhelm/openclaw-2026.6.11/bin/openclaw`;
   const nodeBinary = `${home}/.local/share/crabhelm/node-v22.23.1-${nodeId}-linux-x64/bin/node`;
@@ -781,6 +790,7 @@ export function inferenceProbeCommand(
   const restartCommand = systemManaged
     ? "sudo -n /usr/bin/systemctl restart crabhelm-agent.service"
     : '"$openclaw_cli" gateway restart';
+  const expectedResponse = routerBaseUrl ? "CLAWROUTER_CANARY_OK" : "671789";
   const validateResponse = [
     "const fs = require('node:fs');",
     "const raw = fs.readFileSync(process.argv[1], 'utf8').trim();",
@@ -800,8 +810,17 @@ export function inferenceProbeCommand(
     "if (!value || !Array.isArray(value.payloads)) process.exit(3);",
     "const texts = value.payloads.map((payload) => payload?.text).filter((text) => typeof text === 'string' && text.trim()).map((text) => text.trim());",
     "if (texts.length !== 1) process.exit(4);",
-    "if (texts[0] !== '671789') process.exit(5);",
+    `if (texts[0] !== ${JSON.stringify(expectedResponse)}) process.exit(5);`,
   ].join(" ");
+  const validateModelProbe = [
+    "const fs = require('node:fs');",
+    "const value = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));",
+    "const results = value?.auth?.probes?.results;",
+    `if (!Array.isArray(results) || !results.some((result) => result?.provider === 'clawrouter' && result?.model === ${JSON.stringify(model)} && result?.status === 'ok')) process.exit(3);`,
+  ].join(" ");
+  const turnCommand = routerBaseUrl
+    ? `timeout -k 10 180 "\${agent_command[@]}" "$openclaw_cli" agent --agent main --model ${shellQuote(model)} --session-id "$probe_session" --message ${shellQuote("Reply exactly: CLAWROUTER_CANARY_OK")} --json >${output} 2>${error}`
+    : `timeout -k 10 180 "\${agent_command[@]}" "$openclaw_cli" agent --agent main --session-id "$probe_session" --message ${shellQuote("Calculate 731 multiplied by 919. Reply with only the decimal integer, without formatting or punctuation.")} --thinking off --json >${output} 2>${error}`;
   return [
     `probe_label=${shellQuote(probeLabel)}`,
     "probe_session=\"crabhelm-healthcheck-$(date +%s)-$$\"",
@@ -815,16 +834,32 @@ export function inferenceProbeCommand(
     "    probe_result=BINARY_FAILED",
     "  elif ! \"${agent_command[@]}\" test -x \"$node_binary\"; then",
     "    probe_result=RUNTIME_FAILED",
+    ...(routerBaseUrl
+      ? [
+          `  elif [[ ${shellQuote(model)} != clawrouter/*/* ]]; then`,
+          "    probe_result=CONFIG_FAILED",
+          `  elif ! observed_router_base="$("\${agent_command[@]}" "$openclaw_cli" config get models.providers.clawrouter.baseUrl 2>/dev/null)" || [[ "$observed_router_base" != ${shellQuote(routerBaseUrl)} ]]; then`,
+          "    probe_result=CONFIG_FAILED",
+        ]
+      : []),
     `  elif ! "\${agent_command[@]}" "$openclaw_cli" config set agents.defaults.model.primary ${shellQuote(model)} >/dev/null; then`,
     "    probe_result=CONFIG_FAILED",
     `  elif ! ${restartCommand} >/dev/null; then`,
     "    probe_result=RESTART_FAILED",
     "  elif ! timeout 90 bash -c 'until curl --fail --silent --max-time 2 http://127.0.0.1:18789/readyz >/dev/null; do sleep 2; done'; then",
     "    probe_result=GATEWAY_FAILED",
-    `  elif ! timeout -k 10 180 "\${agent_command[@]}" "$openclaw_cli" agent --agent main --session-id "$probe_session" --message ${shellQuote("Calculate 731 multiplied by 919. Reply with only the decimal integer, without formatting or punctuation.")} --thinking off --json >${output} 2>${error}; then`,
+    ...(routerBaseUrl
+      ? [
+          `  elif ! timeout -k 10 90 "\${agent_command[@]}" "$openclaw_cli" models status --probe --probe-provider clawrouter --probe-max-tokens 8 --json >${modelProbeOutput} 2>${modelProbeError}; then`,
+          "    probe_result=MODEL_PROBE_FAILED",
+          `  elif ! chmod 0644 ${modelProbeOutput} ${modelProbeError} || ! "\${agent_command[@]}" "$node_binary" --input-type=commonjs -e ${shellQuote(validateModelProbe)} ${modelProbeOutput}; then`,
+          "    probe_result=MODEL_PROBE_FAILED",
+        ]
+      : []),
+    `  elif ! ${turnCommand}; then`,
     "    probe_result=TURN_FAILED",
     "  else",
-    `    chmod 0644 ${output}`,
+    `    chmod 0644 ${output} ${error}`,
     "    response_status=0",
     `    "\${agent_command[@]}" "$node_binary" --input-type=commonjs -e ${shellQuote(validateResponse)} ${output} || response_status=$?`,
     "    case \"$response_status\" in",
@@ -1297,7 +1332,7 @@ fi
   CRABHELM_STANDALONE=true \
   CRABHELM_SYSTEM_GATEWAY=true \
   CRABHELM_MODEL="$CRABHELM_MODEL" \
-  CRABHELM_MODEL_BASE_URL="\${CRABHELM_MODEL_BASE_URL:-}" \
+  CRABHELM_ROUTER_BASE_URL="\${CRABHELM_ROUTER_BASE_URL:-}" \
   CRABHELM_SLACK_ENABLED="$CRABHELM_SLACK_ENABLED" \
   CRABHELM_CREDENTIALS_GENERATION="$CRABHELM_CREDENTIALS_GENERATION" \
   /bin/bash "$agent_work/bundle/guest-install.sh"
@@ -1386,7 +1421,7 @@ export function bootstrapInstallScript(options: {
   credentialsGeneration: number;
   policyHash: string;
   egressLockdown?: EgressLockdownMode;
-  modelBaseUrl?: string;
+  routerBaseUrl?: string;
   // Tests redirect system paths into a temporary root; production omits this.
   egressPersistenceRoot?: string;
 }): string {
@@ -1394,6 +1429,8 @@ export function bootstrapInstallScript(options: {
   const managedSpecUrl = new URL(`${options.base}/managed-spec.json`);
   managedSpecUrl.searchParams.set("model", options.model);
   managedSpecUrl.searchParams.set("policyHash", options.policyHash);
+  const credentialsUrl = new URL(`${options.base}/credentials.env`);
+  credentialsUrl.searchParams.set("credentials", String(options.credentialsGeneration));
   return `#!/usr/bin/env bash
 set -euo pipefail
 umask 077
@@ -1406,7 +1443,7 @@ actual_archive_sha256="$(sha256sum "$work/bundle.tgz")"
 actual_archive_sha256="\${actual_archive_sha256%% *}"
 [[ "$actual_archive_sha256" = ${shellQuote(options.archiveId)} ]] || { printf '%s\\n' 'crabhelm bootstrap: appliance archive digest mismatch' >&2; exit 1; }
 tar -xzf "$work/bundle.tgz" -C "$work"
-curl --fail --silent --show-error --location "\${auth[@]}" ${shellQuote(`${options.base}/credentials.env`)} -o "$work/credentials.env"
+curl --fail --silent --show-error --location "\${auth[@]}" ${shellQuote(credentialsUrl.toString())} -o "$work/credentials.env"
 chmod 0600 "$work/credentials.env"
 curl --fail --silent --show-error --location "\${auth[@]}" ${shellQuote(managedSpecUrl.toString())} -o "$work/managed-spec.json"
 chmod 0600 "$work/managed-spec.json"
@@ -1414,7 +1451,7 @@ export CRABHELM_BUNDLE_MANIFEST_SHA256=${shellQuote(options.releaseId)}
 export CRABHELM_NODE_SHA256=${shellQuote(options.nodeSha256)}
 export CRABHELM_RELEASE_ID=${shellQuote(`${options.releaseId}.${options.archiveId}.${options.nodeSha256}`)}
 export CRABHELM_CREDENTIAL_FILE="$work/credentials.env"
-export CRABHELM_CREDENTIAL_REFRESH_URL=${shellQuote(`${options.base}/credentials.env`)}
+export CRABHELM_CREDENTIAL_REFRESH_URL=${shellQuote(credentialsUrl.toString())}
 export CRABHELM_MANAGED_SPEC_FILE="$work/managed-spec.json"
 export CRABHELM_POLICY_HASH=${shellQuote(options.policyHash)}
 export CRABBOX_ADAPTER_ROOT_SESSION_ID=${shellQuote(options.childId)}
@@ -1422,7 +1459,7 @@ export CRABHELM_STANDALONE=true
 export CRABHELM_MODEL=${shellQuote(options.model)}
 export CRABHELM_SLACK_ENABLED=${shellQuote(options.slack)}
 export CRABHELM_CREDENTIALS_GENERATION=${shellQuote(String(options.credentialsGeneration))}
-${options.modelBaseUrl ? `export CRABHELM_MODEL_BASE_URL=${shellQuote(options.modelBaseUrl)}\n` : ""}${managedRuntimeBlock({
+${options.routerBaseUrl ? `export CRABHELM_ROUTER_BASE_URL=${shellQuote(options.routerBaseUrl)}\n` : ""}${managedRuntimeBlock({
     releaseId: options.releaseId,
     archiveId: options.archiveId,
     nodeSha256: options.nodeSha256,

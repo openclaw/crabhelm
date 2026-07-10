@@ -102,6 +102,7 @@ h3 { font: 600 17px/1.2 var(--display); }
 .metric:last-child { border-right: 0; }
 .metric::before { content: ""; position: absolute; left: 18px; bottom: 14px; width: 18px; height: 2px; background: var(--dim); }
 .metric.good::before { background: var(--mint); }.metric.warn::before { background: var(--amber); }.metric.bad::before { background: var(--danger); }
+.diagnostic-output { max-height: 260px; overflow: auto; margin: 14px 0 0; padding: 12px; border: 1px solid var(--line); background: var(--ink-2); color: var(--text); white-space: pre-wrap; word-break: break-word; font: 11px/1.55 var(--mono); }
 .metric span { display: block; color: var(--dim); font: 600 8px/1 var(--mono); text-transform: uppercase; letter-spacing: .13em; }
 .metric strong { display: block; margin-top: 11px; font: 500 26px/1 var(--display); }
 

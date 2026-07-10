@@ -47,6 +47,7 @@ const api = createCrabhelmApiHandler({
       { id: "europe", label: "EU Central", region: "eu-central", profile: "openclaw-core", ttlSeconds: 14_400, idleTimeoutSeconds: 14_400, admissionOpen: true },
     ],
     githubImport: true,
+    inference: { kind: "direct", defaultModel: "openai/gpt-5.5", metadataOnly: true },
   },
 });
 

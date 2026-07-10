@@ -392,6 +392,8 @@ function renderDrawer(claw) {
   const drift = claw.desired.generation !== claw.observed.generation;
   const slackProbe = claw.observed.probes?.slack;
   const modelProbe = claw.observed.probes?.model;
+  const routerDesired = claw.desired.inference.router;
+  const routerObserved = claw.observed.inference;
   const runtimeStatus = state.data.runtimeStatuses?.[claw.id] || { connected: 0, pending: 0, running: 0, awaitingDelivery: 0 };
   const slackBindings = (state.data.personas || []).filter((persona) => persona.clawId === claw.id).flatMap((persona) => persona.bindings || []).filter((binding) => binding.surface === "slack");
   drawerContent.innerHTML = `<header class="drawer-head"><div class="drawer-head-row"><div><p class="eyebrow">Child core / ${escapeHtml(claw.desired.slug)}</p><h2>${escapeHtml(claw.desired.name)}</h2><span class="status ${tone}">${escapeHtml(phaseLabel(phase))}${drift ? " · drifted" : ""}</span></div><button class="icon-button" data-close-drawer aria-label="Close">×</button></div></header>
@@ -401,6 +403,7 @@ function renderDrawer(claw) {
         ${readinessFacet("Control node", claw.observed.controlLink.status, claw.observed.controlLink.nodeId || claw.observed.controlLink.command)}
         ${readinessFacet("Gateway", claw.observed.health === "healthy" ? "ready" : claw.observed.health, claw.observed.gatewayVersion || "Local readiness not observed")}
         ${readinessFacet("Managed policy", claw.observed.generation === claw.desired.generation && claw.observed.configHash ? "applied" : "drifted", `g${claw.observed.generation} / desired g${claw.desired.generation}`)}
+        ${routerDesired.kind === "clawrouter" ? readinessFacet("ClawRouter route", routerObserved?.routeVerified ? "verified" : routerObserved?.catalogReady ? "configured" : "pending", routerObserved ? `${routerObserved.baseUrl} · ${routerObserved.providers.join(", ")} · credential epoch ${routerObserved.credentialsGeneration}` : `Desired ${routerDesired.baseUrl} · ${routerDesired.providers.join(", ")}`) : ""}
         ${readinessFacet("Model authentication", modelProbe?.status || "pending", modelProbe ? `${modelProbe.configuredModel} · ${modelProbe.liveInferenceProbe ? "live inference probed" : "auth metadata only"}${modelProbe.missingProviders.length ? ` · missing ${modelProbe.missingProviders.join(", ")}` : ""}` : "Waiting for child model-auth status")}
         ${readinessFacet("Child log redaction", claw.observed.probes ? claw.observed.probes.diagnostics.redaction === "off" ? "warning" : "configured" : "pending", claw.observed.probes ? `Child setting: ${claw.observed.probes.diagnostics.redaction}; Crabhelm control-plane projection never stores content` : "Waiting for child diagnostics")}
         ${readinessFacet("Outbound runtime bridge", runtimeStatus.connected > 0 ? "connected" : "offline", `${runtimeStatus.connected} connected · ${runtimeStatus.pending} queued · ${runtimeStatus.running} running · ${runtimeStatus.awaitingDelivery} awaiting delivery`)}
@@ -417,6 +420,10 @@ function renderDrawer(claw) {
         <div><dt>Operational probe</dt><dd>${escapeHtml(claw.observed.probes ? relativeTime(claw.observed.probes.checkedAt) : "not observed")}</dd></div>
         <div><dt>Child process</dt><dd>${escapeHtml(claw.observed.probes ? `${formatBytes(claw.observed.probes.diagnostics.rssBytes)} RSS · ${formatDuration(claw.observed.probes.diagnostics.processUptimeSeconds)} uptime` : "not observed")}</dd></div>
         <div><dt>Log projection</dt><dd>${escapeHtml(claw.observed.probes ? `${claw.observed.probes.diagnostics.logLevel} · child redaction ${claw.observed.probes.diagnostics.redaction} · Crabhelm content capture off` : "not observed")}</dd></div>
+        ${routerDesired.kind === "clawrouter" ? `<div><dt>Desired router</dt><dd>${escapeHtml(`${routerDesired.baseUrl} · ${routerDesired.policyId} · ${routerDesired.providers.join(", ")}`)}</dd></div>
+        <div><dt>Observed router</dt><dd>${escapeHtml(routerObserved ? `${routerObserved.routerHealthy ? "healthy" : "degraded"} · policy ${routerObserved.policyActive ? "active" : "inactive"} · credential ${routerObserved.credentialActive ? "active" : "inactive"} · catalog ${routerObserved.catalogReady ? "ready" : "pending"}` : "not observed")}</dd></div>
+        <div><dt>Router usage</dt><dd>${escapeHtml(routerObserved?.usage ? `${routerObserved.usage.requestCount.toLocaleString()} requests · ${routerObserved.usage.totalTokens.toLocaleString()} tokens · ${formatMicros(routerObserved.usage.actualCostMicros)}` : "metadata unavailable")}</dd></div>
+        <div><dt>Router budget</dt><dd>${escapeHtml(routerObserved?.budget.configured ? `${formatMicros(routerObserved.budget.spentMicros || 0)} used · ${formatMicros(routerObserved.budget.remainingMicros || 0)} remaining` : "unmetered")}</dd></div>` : ""}
         <div><dt>Crabbox</dt><dd>${escapeHtml(claw.observed.lifecycle?.providerResourceId || claw.observed.lifecycle?.workspaceId || "not allocated")}</dd></div>
       </dl></div></section>
       <section class="detail-block"><h3>Identity and access intent</h3><div class="detail-card">
@@ -425,7 +432,7 @@ function renderDrawer(claw) {
         ${ownership("03", "Control link", claw.observed.controlLink.status, `${claw.observed.controlLink.transport} · ${claw.observed.controlLink.command}`)}
         ${ownership("04", "Child ingress", claw.desired.access.dmPolicy, `${claw.desired.access.groupPolicy} groups · enforced by child`)}
         ${ownership("05", "Deployment owner", state.data.runtime.mode === "simulator" ? "Simulator" : "Crabbox", `${claw.desired.deployment.target} · ${claw.desired.deployment.region || "region unset"} · ${claw.desired.deployment.profile}`)}
-        ${ownership("06", "Inference auth", claw.desired.inference.authRef || "child-local", claw.desired.inference.model)}
+        ${ownership("06", "Inference auth", claw.desired.inference.authRef || "child-local", routerDesired.kind === "clawrouter" ? `${claw.desired.inference.model} · upstream secrets stay in ClawRouter` : claw.desired.inference.model)}
       </div></section>
       <section class="detail-block"><h3>Control-plane-routed Slack</h3><div class="detail-card"><p class="queue-note">Slack terminates at the control plane. The central app resolves requester identity and persona policy, then the child pulls the encrypted turn over its outbound runtime bridge.</p></div></section>
       <section class="detail-block"><h3>Edit desired state</h3><div class="detail-card"><form id="edit-claw-form" class="drawer-form">
@@ -436,7 +443,8 @@ function renderDrawer(claw) {
         <label><span>Child log level</span><select name="logLevel">${selectOptions(["error", "warn", "info", "debug"], claw.desired.observability.logLevel)}</select></label>
         <button class="button small" type="button" data-detail-action="save">Save desired state</button>
       </form></div></section>
-      <section class="detail-block"><h3>Controls</h3><div class="detail-actions"><button class="button small" data-detail-action="reconcile">↻ Reconcile</button><button class="button small" data-detail-action="rotate-credentials" title="Re-deliver rotated control-plane secrets through a staged in-place reinstall">Rotate credentials</button><button class="button small" data-detail-action="${enabled ? "disable" : "enable"}">${enabled ? "Disable ingress" : "Enable claw"}</button></div></section>
+      <section class="detail-block"><h3>Bounded diagnostics</h3><div class="detail-card"><p class="queue-note">Returns allowlisted process state and redacted log summaries only; prompts, replies, tool output, and credentials are excluded.</p><pre id="runtime-diagnostics-output" class="diagnostic-output" hidden></pre></div></section>
+      <section class="detail-block"><h3>Controls</h3><div class="detail-actions"><button class="button small" data-detail-action="reconcile">↻ Reconcile</button><button class="button small" data-detail-action="diagnostics">View diagnostics</button><button class="button small" data-detail-action="rotate-credentials" title="Re-deliver rotated control-plane secrets through a staged in-place reinstall">Rotate credentials</button><button class="button small" data-detail-action="${enabled ? "disable" : "enable"}">${enabled ? "Disable ingress" : "Enable claw"}</button></div></section>
       <section class="delete-zone"><h3>Remove child core</h3><p>Disables ingress, waits for active runs to drain, releases the exact provider workspace, confirms absence, then revokes its exact control link. Type <b>${escapeHtml(claw.desired.name)}</b> to continue.</p><div class="delete-confirm"><input id="delete-confirmation" placeholder="${escapeAttr(claw.desired.name)}"/><button class="button danger small" data-detail-action="remove">Remove</button></div></section>
     </div>`;
 }
@@ -446,7 +454,7 @@ function ownership(index, title, value, detail) {
 }
 
 function readinessFacet(title, status, detail) {
-  const good = ["observed", "paired", "ready", "healthy", "applied", "enabled", "connected", "configured"].includes(status);
+  const good = ["observed", "paired", "ready", "healthy", "applied", "enabled", "connected", "configured", "verified"].includes(status);
   const neutral = ["not requested", "disabled"].includes(status);
   return `<div class="readiness-row"><i class="${good ? "good" : neutral ? "neutral" : "warn"}"></i><span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(detail)}</small></span><b>${escapeHtml(status)}</b></div>`;
 }
@@ -456,7 +464,13 @@ async function handleDrawerClick(event) {
   const action = event.target.closest("[data-detail-action]")?.dataset.detailAction;
   if (!action || !state.selectedId) return;
   try {
-    if (action === "remove") {
+    if (action === "diagnostics") {
+      const result = await request(`/claws/${encodeURIComponent(state.selectedId)}/runtime-diagnostics`, { method: "GET" });
+      const output = document.querySelector("#runtime-diagnostics-output");
+      output.hidden = false;
+      output.textContent = JSON.stringify(result, null, 2);
+      return;
+    } else if (action === "remove") {
       const confirmation = document.querySelector("#delete-confirmation").value;
       const result = await request(`/claws/${encodeURIComponent(state.selectedId)}`, {
         method: "DELETE",
@@ -1033,6 +1047,13 @@ function syncRuntimeActions() {
   document.querySelector("#new-button").title = blocked ? "Configure Crabbox before provisioning" : "";
   document.querySelector("#bulk-button").title = blocked ? "Configure Crabbox before provisioning" : "";
   document.querySelector("#github-button").title = !state.data.runtime.githubImport ? "Configure CRABHELM_GITHUB_TOKEN" : blocked ? "Configure Crabbox before provisioning" : "";
+  document.querySelectorAll('form select[name="model"]').forEach((select) => {
+    const previous = select.value;
+    select.innerHTML = modelOptions(previous || state.data.runtime.inference.defaultModel);
+    if (![...select.options].some((option) => option.value === previous)) {
+      select.value = state.data.runtime.inference.defaultModel;
+    }
+  });
   document.querySelectorAll("[data-deployment-target]").forEach((select) => {
     const previous = select.value;
     select.innerHTML = state.data.runtime.targets.map((target) => `<option value="${escapeAttr(target.id)}" ${target.admissionOpen ? "" : "disabled"}>${escapeHtml(target.label)} · ${escapeHtml(target.region || target.id)}${target.admissionOpen ? "" : " · admission closed"}</option>`).join("");
@@ -1087,9 +1108,21 @@ function createOutcome(claw) {
 }
 
 function modelOptions(current) {
-  return ["openai/gpt-5.5", "openai/gpt-5.4-mini"]
-    .map((model) => `<option value="${escapeAttr(model)}" ${model === current ? "selected" : ""}>${escapeHtml(label(model))}</option>`)
+  const configured = state.data?.runtime?.inference;
+  const defaults = configured?.kind === "clawrouter"
+    ? [configured.defaultModel]
+    : ["openai/gpt-5.5", "openai/gpt-5.4-mini"];
+  const compatibleCurrent = configured?.kind === "clawrouter"
+    ? /^clawrouter\/[^/]+\/[^/]+(?:\/[^/]+)*$/u.test(current || "")
+    : Boolean(current) && !String(current).startsWith("clawrouter/");
+  const selected = compatibleCurrent ? current : defaults[0];
+  return [...new Set([selected, ...defaults].filter(Boolean))]
+    .map((model) => `<option value="${escapeAttr(model)}" ${model === selected ? "selected" : ""}>${escapeHtml(label(model))}</option>`)
     .join("");
+}
+
+function formatMicros(value) {
+  return `$${(Number(value || 0) / 1_000_000).toFixed(4)}`;
 }
 
 function selectOptions(values, current) {

@@ -54,6 +54,7 @@ test("unconfigured runtime rejects single and batch creation before persistence"
         message: "Crabbox provisioning is unconfigured",
       }],
       githubImport: false,
+      inference: { kind: "direct", defaultModel: "openai/gpt-5.5", metadataOnly: true },
     },
   });
   const server = createServer(async (req, res) => {
@@ -108,6 +109,7 @@ test("partial runtime admits available targets and rejects unavailable placement
         { id: "europe", label: "Europe", region: "eu-central", profile: "openclaw-core-eu", ttlSeconds: 14_400, idleTimeoutSeconds: 14_400, admissionOpen: false, message: "Europe target token is unavailable" },
       ],
       githubImport: false,
+      inference: { kind: "direct", defaultModel: "openai/gpt-5.5", metadataOnly: true },
     },
   });
   const server = createServer(async (req, res) => {
@@ -181,6 +183,7 @@ test("GitHub import preview stays behind the parent API and returns stable membe
         { id: "europe", label: "Europe", region: "eu-central", profile: "openclaw-core-eu", ttlSeconds: 28_800, idleTimeoutSeconds: 14_400, admissionOpen: true },
       ],
       githubImport: true,
+      inference: { kind: "direct", defaultModel: "openai/gpt-5.5", metadataOnly: true },
     },
   });
   const server = createServer(async (req, res) => {
@@ -288,6 +291,7 @@ test("credential rotation is exposed through the parent API and reconverges", as
         { id: "default", label: "Default", region: "us-west", profile: "openclaw-core", ttlSeconds: 14_400, idleTimeoutSeconds: 14_400, admissionOpen: true },
       ],
       githubImport: false,
+      inference: { kind: "direct", defaultModel: "openai/gpt-5.5", metadataOnly: true },
     },
   });
   const server = createServer(async (req, res) => {

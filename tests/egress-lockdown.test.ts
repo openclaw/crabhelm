@@ -71,7 +71,7 @@ while (($#)); do
 done
 case "$url" in
   */bundle.tgz) cp ${JSON.stringify(path.join(fixtures, "bundle.tgz"))} "$dest" ;;
-  */credentials.env) printf 'OPENAI_API_KEY=k\\n' >"$dest" ;;
+  */credentials.env*) printf 'OPENAI_API_KEY=k\\n' >"$dest" ;;
   */managed-spec.json*) printf '{}\\n' >"$dest" ;;
   *) exit 22 ;;
 esac

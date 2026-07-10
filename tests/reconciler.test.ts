@@ -5,7 +5,7 @@ import { operationalError } from "../src/errors.js";
 import { CrabhelmReconciler } from "../src/reconciler.js";
 import { CrabhelmRegistry } from "../src/registry.js";
 import { createMemoryStateStore } from "../src/state.js";
-import type { AuditEvent, ClawRecord } from "../src/types.js";
+import type { AuditEvent, ChildOperationalProbes, ClawRecord, InferenceObservation } from "../src/types.js";
 
 function fixture() {
   const registry = new CrabhelmRegistry(
@@ -36,6 +36,154 @@ test("provisions one child Gateway and pairs the parent control identity", async
   assert.equal(ready.observed.probes?.diagnostics.contentCaptured, false);
   assert.match(ready.observed.lifecycle?.workspaceId ?? "", /^crabhelm-/);
   assert.equal((await registry.snapshot()).summary.ready, 1);
+});
+
+test("direct claws do not invoke a configured ClawRouter control", async () => {
+  const registry = new CrabhelmRegistry(
+    createMemoryStateStore<ClawRecord>(),
+    createMemoryStateStore<AuditEvent>(),
+  );
+  let calls = 0;
+  const reconciler = new CrabhelmReconciler(registry, new SimulatorChildCoreProvider(), {
+    inference: {
+      async reconcile(): Promise<InferenceObservation> {
+        calls += 1;
+        throw new Error("direct claws must not reach ClawRouter control");
+      },
+    },
+  });
+  const created = await registry.create(
+    { name: "Direct", owner: { subject: "email:direct@example.test", label: "Direct", source: "email" } },
+    "test-admin",
+  );
+
+  const ready = await reconciler.reconcileOne(created.id);
+  assert.equal(ready.observed.phase, "ready");
+  assert.equal(calls, 0);
+});
+
+test("routed claws fail closed before provisioning without ClawRouter control", async () => {
+  const registry = new CrabhelmRegistry(
+    createMemoryStateStore<ClawRecord>(),
+    createMemoryStateStore<AuditEvent>(),
+    {
+      clawRouter: {
+        baseUrl: "https://clawrouter.example.test",
+        tenantId: "fakeco",
+        allowedProviders: ["openai"],
+        modelProviders: { "clawrouter/openai/gpt-5.5": "openai" },
+        defaultModel: "clawrouter/openai/gpt-5.5",
+      },
+    },
+  );
+  const simulator = new SimulatorChildCoreProvider();
+  let provisionCalls = 0;
+  const provider: ChildCoreProvider = {
+    async provision(claw) {
+      provisionCalls += 1;
+      return simulator.provision(claw);
+    },
+    inspect: (claw) => simulator.inspect(claw),
+    disable: (claw) => simulator.disable(claw),
+    drain: (claw) => simulator.drain(claw),
+    remove: (claw) => simulator.remove(claw),
+    revokeControl: (claw) => simulator.revokeControl(claw),
+  };
+  const reconciler = new CrabhelmReconciler(registry, provider);
+  const created = await registry.create(
+    { name: "Unwired route", owner: { subject: "email:route@example.test", label: "Route", source: "email" } },
+    "test-admin",
+  );
+
+  const result = await reconciler.reconcileOne(created.id);
+  assert.equal(result.observed.phase, "attention");
+  assert.equal(result.observed.lifecycle, undefined);
+  assert.match(result.observed.message, /CLAWROUTER_UNCONFIGURED/u);
+  assert.equal(provisionCalls, 0);
+});
+
+test("ClawRouter readiness requires exact routed live inference proof", async () => {
+  const simulator = new SimulatorChildCoreProvider();
+  let forceDirectProof = true;
+  const alterProof = <T extends { probes?: ChildOperationalProbes }>(result: T): T => ({
+      ...result,
+      ...(result.probes
+        ? {
+            probes: {
+              ...result.probes,
+              model: {
+                ...result.probes.model,
+                liveInferenceProbe: true,
+                resolvedModel: forceDirectProof
+                  ? "openai/gpt-5.5"
+                  : result.probes.model.configuredModel,
+              },
+            },
+          }
+        : {}),
+    });
+  const provider: ChildCoreProvider = {
+    provision: async (claw) => alterProof(await simulator.provision(claw)),
+    inspect: async (claw) => alterProof(await simulator.inspect(claw)),
+    disable: (claw) => simulator.disable(claw),
+    drain: (claw) => simulator.drain(claw),
+    remove: (claw) => simulator.remove(claw),
+    revokeControl: (claw) => simulator.revokeControl(claw),
+  };
+  const registry = new CrabhelmRegistry(
+    createMemoryStateStore<ClawRecord>(),
+    createMemoryStateStore<AuditEvent>(),
+    {
+      clawRouter: {
+        baseUrl: "https://clawrouter.example.test",
+        tenantId: "fakeco",
+        allowedProviders: ["openai"],
+        modelProviders: { "clawrouter/openai/gpt-5.5": "openai" },
+        defaultModel: "clawrouter/openai/gpt-5.5",
+      },
+    },
+  );
+  const inference = {
+    async reconcile(claw: ClawRecord): Promise<InferenceObservation> {
+      const router = claw.desired.inference.router;
+      if (router.kind !== "clawrouter") throw new Error("expected routed desired state");
+      return {
+        kind: "clawrouter",
+        checkedAt: new Date().toISOString(),
+        baseUrl: router.baseUrl,
+        model: claw.desired.inference.model,
+        providers: router.providers,
+        policyId: router.policyId,
+        credentialId: router.credentialId,
+        credentialsGeneration: 1,
+        policyActive: true,
+        credentialActive: true,
+        routerHealthy: true,
+        catalogReady: true,
+        routeVerified: false,
+        budget: { configured: false },
+      };
+    },
+  };
+  const reconciler = new CrabhelmReconciler(registry, provider, { inference });
+  const created = await registry.create(
+    {
+      name: "Routed",
+      owner: { subject: "email:routed@example.test", label: "Routed", source: "email" },
+    },
+    "test-admin",
+  );
+
+  const direct = await reconciler.reconcileOne(created.id);
+  assert.equal(direct.observed.phase, "attention");
+  assert.equal(direct.observed.inference?.routeVerified, false);
+  assert.match(direct.observed.message, /live routed inference proof is missing/u);
+
+  forceDirectProof = false;
+  const routed = await reconciler.reconcileOne(created.id);
+  assert.equal(routed.observed.phase, "ready");
+  assert.equal(routed.observed.inference?.routeVerified, true);
+  assert.equal(routed.observed.probes?.model.resolvedModel, "clawrouter/openai/gpt-5.5");
 });
 
 test("enabled claws replace an expired provider resource", async () => {

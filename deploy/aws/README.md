@@ -6,6 +6,8 @@ The template supports the standard AWS commercial partition and AWS GovCloud (US
 
 The stack intentionally starts one task. Its deployment policy is `MaximumPercent=100` and `MinimumHealthyPercent=0`, so an update stops the old actor before starting the replacement. The runtime bridge reconnects after the connection closes. Do not raise the desired count until cross-task coordinator ownership and signaling are implemented.
 
+ClawRouter is a separate installation boundary. This stack may call its OpenAI-compatible inference and administrative APIs, but it does not deploy ClawRouter, own its upstream provider credentials, or share database, buckets, queues, signing material, or control-plane state with it. Deploy and validate ClawRouter independently before enabling `ClawRouterMode`.
+
 ## Resources and cost
 
 [`template.yaml`](template.yaml) creates:
@@ -32,6 +34,8 @@ The stack does not create DNS records. It outputs the ALB DNS name for externall
 - A same-account, same-Region Secrets Manager JSON secret.
 - Reviewed appliance and runtime digests.
 
+The commands below assume an authenticated human AWS CLI session, typically an approved IAM Identity Center permission set or equivalent operator role. This repository does not yet provide a GitHub Actions deploy workflow/OIDC trust, a dedicated CloudFormation service role, budget resources, or permissions-boundary parameters on the ECS task roles. Automated deployment is therefore not yet least-privilege-ready; add those controls in the AWS foundation layer before granting a CI principal stack mutation access.
+
 The OIDC issuer and endpoints must use publicly trusted certificates and publicly resolvable DNS. The ALB must be able to reach the token and user-info endpoints over IPv4 HTTPS; an IPv6-only or otherwise unreachable endpoint will make console authentication fail even if stack creation succeeds. A publicly resolvable name may resolve to private IPv4 addresses when VPC routing and security controls allow the ALB to reach them.
 
 The OIDC client must allow the scopes configured in `OidcScopes`, which defaults to `openid email profile`, and the identity provider must restrict access to the intended organization. Add the provider-specific group scope when `AdminGroups` is used. The resulting signed ALB assertion must contain an email claim and may contain a `groups` array.
@@ -51,14 +55,30 @@ Create the JSON secret outside CloudFormation so secret values never enter stack
   "INVOCATION_SIGNING_SECRET": "replace-with-at-least-32-bytes",
   "RUNTIME_SIGNING_SECRET": "replace-with-at-least-32-bytes",
   "VAULT_MASTER_KEY": "replace-with-a-base64url-encoded-32-byte-key",
-  "OPENAI_API_KEY": "replace",
   "SLACK_BOT_TOKEN": "replace",
   "SLACK_SIGNING_SECRET": "replace",
   "GITHUB_OAUTH_CLIENT_SECRET": "replace"
 }
 ```
 
-Also add `MODEL_SIGNING_SECRET` with at least 32 bytes when `ModelProxyMode=on`. Never commit the populated JSON. Local `deploy/aws/*.local.json` and `deploy/aws/*secret*.json` files are excluded from the Docker build context, but still keep them outside source control.
+For direct inference (`ClawRouterMode=off`), add:
+
+```json
+{
+  "OPENAI_API_KEY": "replace"
+}
+```
+
+For ClawRouter inference (`ClawRouterMode=on`), omit `OPENAI_API_KEY` and add:
+
+```json
+{
+  "CLAWROUTER_ADMIN_TOKEN": "replace",
+  "CLAWROUTER_CREDENTIAL_SECRET": "replace-with-at-least-32-bytes"
+}
+```
+
+When the separate ClawRouter admin API is protected by Cloudflare Access, also add `CLAWROUTER_ACCESS_CLIENT_ID` and `CLAWROUTER_ACCESS_CLIENT_SECRET`, then set `ClawRouterAccessServiceToken=on`. For authenticated Prometheus export, add `METRICS_BEARER_TOKEN` with at least 32 bytes and set `PrometheusMode=on`. Never place upstream provider credentials in the Crabhelm application secret for routed mode; those remain only in ClawRouter. Never commit the populated JSON. Local `deploy/aws/*.local.json` and `deploy/aws/*secret*.json` files are excluded from the Docker build context, but still keep them outside source control.
 
 Secrets encrypted with the account's default Secrets Manager key need no extra parameter. For a customer-managed key, pass `ApplicationSecretKmsKeyArn`; the CloudFormation deployment principal also needs permission to decrypt it because the ALB OIDC action resolves the client secret during deployment.
 
@@ -87,6 +107,8 @@ CloudFormation cannot push the first image into a repository it is creating. Use
 
 The repository uses immutable tags. Use a new commit-derived `ImageTag` for every deployment.
 
+**Cost warning:** `ProvisionService=false` suppresses only the ECS service. The first update still creates the VPC/NAT gateway, ALB, RDS database, and other billable resources. For disposable FakeCo environments, precreate one immutable ECR repository through the account foundation or approved CLI workflow, push the image, and perform one stack deployment with `CreateEcrRepository=false` plus the immutable `ImageUri`. Do not treat the two-update stack-owned-ECR flow as a free repository bootstrap.
+
 ## Deploy
 
 The abbreviated command below shows required inputs. Keep deployment-specific values in an approved local parameter workflow rather than committing them.
@@ -114,6 +136,27 @@ aws cloudformation deploy \
     ApplianceArchiveSha256="$APPLIANCE_ARCHIVE_SHA256" \
     ApplianceManifestSha256="$APPLIANCE_MANIFEST_SHA256"
 ```
+
+### Disposable FakeCo profile
+
+For a disposable FakeCo installation, keep the singleton coordinator and separate-installation boundaries intact. Use a unique stack name, hosts, application secret, ClawRouter tenant, and Crabbox target; do not reuse any Cloudflare or production fleet state. The relevant overrides are:
+
+```text
+ClawRouterMode=on
+ClawRouterBaseUrl=https://<separate-clawrouter-host>
+ClawRouterTenantId=fakeco
+ClawRouterAllowedProviders=openai
+ClawRouterModelProviderMap=clawrouter/openai/gpt-5.5=openai
+ClawRouterDefaultModel=clawrouter/openai/gpt-5.5
+DatabaseMultiAz=false
+DatabaseDeletionProtection=false
+LoadBalancerDeletionProtection=false
+PrometheusMode=on
+```
+
+`ClawRouterBaseUrl` has no usable routed default: the template placeholder is rejected when `ClawRouterMode=on`, so FakeCo cannot silently route to production. `DatabaseMultiAz=false` and disabled deletion protection are disposable-environment choices, not production defaults. `PrometheusMode=on` requires the secret described above. If ClawRouter uses Cloudflare Access, also set `ClawRouterAccessServiceToken=on`. This profile does not change `DesiredCount=1`; scaling the ECS service remains unsupported.
+
+Before live FakeCo validation, build and upload an appliance from the landed OpenClaw provider-overlay commit and pin its manifest, archive, and Node digests in this stack. The repository's current `2026.6.11` appliance pin predates that overlay fix and is direct-provider reference evidence only; it is not ClawRouter-compatible. Do not change or claim a release version in this integration PR.
 
 For group-based administrator grants, keep at least one bootstrap address in `AdminEmails`, pass `AdminGroups`, and set `OidcScopes="openid email profile <provider-group-scope>"`. Group scope and claim names are provider-specific; confirm the signed ALB assertion contains a `groups` array before depending on group grants. Supply the fixed target parameters when their defaults are not the intended production policy.
 
@@ -155,6 +198,18 @@ aws ecs wait services-stable \
 curl --fail --silent --show-error "https://$RUNTIME_HOSTNAME/healthz"
 ```
 
+For a ClawRouter installation, create or reconcile a test claw and require the console/API to show matching desired and observed router origin, model, providers, policy/credential ids, and credential epoch plus `routerHealthy`, `catalogReady`, and `routeVerified`. Gateway `/readyz`, a successful `openclaw models status --probe --probe-provider clawrouter --probe-max-tokens 8 --json`, and a fresh exact-model `CLAWROUTER_CANARY_OK` marker must also be present; router configuration alone is not readiness. Use `/healthz` for ongoing Gateway liveness. Budget and usage views contain only bounded counters. **View diagnostics** (or authenticated `GET /api/claws/<id>/runtime-diagnostics` on the console host) returns allowlisted process state and redacted log summaries, never raw model or tool content.
+
+When `PrometheusMode=on`, verify the metadata-only endpoint with its dedicated machine credential:
+
+```bash
+curl --fail --silent --show-error \
+  --header "Authorization: Bearer ${METRICS_BEARER_TOKEN:?set the metrics bearer token}" \
+  "https://$RUNTIME_HOSTNAME/metrics"
+```
+
+The response is aggregate and intentionally has no per-claw labels, prompts, completions, messages, tool output, diagnostics text, or credentials. Keep the metrics token out of shell history and logs through the installation's approved secret-injection workflow.
+
 The ALB idle timeout is 1,200 seconds. Runtime bridges send a heartbeat every 45 seconds, keeping their WebSockets active. ECS allows 120 seconds for graceful shutdown, and the target group uses the same deregistration delay.
 
 ### Audit dead-letter queue runbook
@@ -191,7 +246,7 @@ aws ecs update-service \
   --force-new-deployment
 ```
 
-After rotating `OPENAI_API_KEY`, also bump every affected claw's credential epoch through the normal **Rotate credentials** operation; restarting ECS alone does not replace a key already delivered to a child. Signing-key rotations need a staged token/session migration plan. Do not rotate `VAULT_MASTER_KEY` by restart: existing OAuth vault objects are encrypted under that key and require a reviewed re-encryption migration.
+After rotating `OPENAI_API_KEY`, also bump every affected direct-mode claw's credential epoch through the normal **Rotate credentials** operation; restarting ECS alone does not replace a key already delivered to a child. In ClawRouter mode, that operation derives the next per-claw token from `CLAWROUTER_CREDENTIAL_SECRET`, registers only its hash with ClawRouter, redelivers it, and requires fresh route proof. Use credential epochs for routine child-token rotation. Do not rotate the fleet `CLAWROUTER_CREDENTIAL_SECRET` by restart: changing the derivation seed requires a reviewed staged migration that this slice does not automate. Coordinate `CLAWROUTER_ADMIN_TOKEN` and Access service-token rotations with the separate ClawRouter installation, then restart Crabhelm. Upstream provider-key rotation is solely a ClawRouter operation and does not require child delivery. Signing-key rotations need a staged token/session migration plan. Do not rotate `VAULT_MASTER_KEY` by restart: existing OAuth vault objects are encrypted under that key and require a reviewed re-encryption migration.
 
 `OIDC_CLIENT_SECRET` is different: the ALB, not the ECS task, consumes it. After rotating that key, increment `OidcClientSecretVersion` and update the CloudFormation stack. This changes the ALB session-cookie name, invalidates existing console sessions, and forces CloudFormation to resolve the new client secret into the listener rule. An ECS-only forced deployment does not rotate the ALB copy.
 
