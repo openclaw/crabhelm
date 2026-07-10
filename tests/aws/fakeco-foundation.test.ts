@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -26,6 +27,10 @@ test("FakeCo profile locks target identity and exact GitHub OIDC subjects", () =
     teardown: "repo:openclaw/crabhelm:environment:fakeco-teardown",
     imagePublish: "repo:openclaw/crabhelm:environment:fakeco-image-publish",
   });
+  const profile = JSON.parse(readFileSync(profilePath, "utf8")) as {
+    lockedParameters: Record<string, string>;
+  };
+  assert.equal(profile.lockedParameters.SlackMode, "off");
 });
 
 test("FakeCo render emits digest-only external-ECR parameters without secret values", async (t) => {
@@ -54,6 +59,7 @@ test("FakeCo render emits digest-only external-ECR parameters without secret val
   );
   assert.equal(parameters.get("CreateEcrRepository"), "false");
   assert.equal(parameters.get("ProvisionService"), "true");
+  assert.equal(parameters.get("SlackMode"), "off");
   assert.equal(parameters.get("DatabaseStorageAutoscaling"), "false");
   assert.equal(parameters.get("DatabaseMaxAllocatedStorage"), "20");
   assert.equal(parameters.get("DatabaseBackupRetentionDays"), "1");
@@ -66,6 +72,8 @@ test("FakeCo render emits digest-only external-ECR parameters without secret val
     "CLAWROUTER_CREDENTIAL_SECRET",
     "OIDC_CLIENT_SECRET",
     "DATABASE_PASSWORD",
+    "SLACK_BOT_TOKEN",
+    "SLACK_SIGNING_SECRET",
   ]) {
     assert.equal(parameters.has(forbidden), false);
   }
@@ -630,6 +638,7 @@ test("FakeCo workflows are manual, protected-main, isolated, pinned, and secret-
     }
   }
   assert.match(deploy, /environment: fakeco/u);
+  assert.match(deploy, /Slack ingress disabled for the initial canary/u);
   assert.match(deploy, /--parameter-overrides "\$\{parameter_overrides\[@\]\}"/u);
   assert.match(deploy, /parameter-overrides[\s\S]*>"\$parameters_file"/u);
   assert.match(deploy, /mapfile -t parameter_overrides <"\$parameters_file"/u);
@@ -667,6 +676,14 @@ test("FakeCo workflows are manual, protected-main, isolated, pinned, and secret-
   assert.match(teardown, /--live-template-response/u);
   assert.doesNotMatch(teardown, /upload-artifact|retention-days/u);
   assert.doesNotMatch(teardown, /FORCE_DELETE_STACK|--retain-resources/u);
+
+  const guide = await readFile(
+    path.join(repositoryRoot, "deploy/aws/fakeco/README.md"),
+    "utf8",
+  );
+  assert.match(guide, /initial `SlackMode=off` secret omits `SLACK_BOT_TOKEN` and `SLACK_SIGNING_SECRET`/u);
+  assert.match(guide, /Never use inert credentials/u);
+  assert.match(guide, /later Slack canary[\s\S]*real sandbox/u);
 });
 
 test("AWS template enforces boundary, scoped IAM, digest XOR, and bounded FakeCo storage", async () => {
@@ -693,6 +710,31 @@ test("AWS template enforces boundary, scoped IAM, digest XOR, and bounded FakeCo
     /RuntimePlatform:\n\s+CpuArchitecture: X86_64\n\s+OperatingSystemFamily: LINUX/u,
   );
   assert.match(guide, /--platform linux\/amd64/u);
+  assert.match(template, /SlackMode:[\s\S]*AllowedValues: \["on", "off"\]/u);
+  assert.match(template, /UseSlack: !Equals \[!Ref SlackMode, "on"\]/u);
+  assert.match(template, /DisableSlack: !Equals \[!Ref SlackMode, "off"\]/u);
+  assert.match(template, /Name: CRABHELM_SLACK\n\s+Value: !Ref SlackMode/u);
+  assert.match(
+    template,
+    /- !If\n\s+- UseSlack\n\s+- Name: SLACK_BOT_TOKEN[\s\S]*- !If\n\s+- UseSlack\n\s+- Name: SLACK_SIGNING_SECRET/u,
+  );
+  assert.match(
+    template,
+    /SlackDisabledRuntimeRule:[\s\S]*Condition: DisableSlack[\s\S]*\/slack\/events[\s\S]*\/slack\/interactions/u,
+  );
+  assert.match(
+    template,
+    /ConsoleLogoutRule:[\s\S]*\/logout[\s\S]*\/signed-out[\s\S]*Priority: 1/u,
+  );
+  const logoutRule = template.slice(
+    template.indexOf("  ConsoleLogoutRule:"),
+    template.indexOf("  SlackDisabledRuntimeRule:"),
+  );
+  assert.doesNotMatch(logoutRule, /authenticate-oidc/u);
+  assert.equal(
+    (template.match(/!Sub AWSELBAuthSessionCookie-\$\{OidcClientSecretVersion\}/gu) ?? []).length,
+    2,
+  );
 
   const taskRole = template.slice(template.indexOf("  TaskRole:"), template.indexOf("  TaskDefinition:"));
   for (const action of [

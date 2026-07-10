@@ -229,5 +229,6 @@ jobs:
             '- protected main source' \
             '- digest-pinned external ECR image' \
             '- locked stack parameters and tags' \
+            '- Slack ingress disabled for the initial canary' \
             '- singleton ECS service stable' \
             '- runtime /healthz healthy' >>"$GITHUB_STEP_SUMMARY"

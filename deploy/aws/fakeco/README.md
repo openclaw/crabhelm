@@ -20,6 +20,7 @@ Nothing in this directory creates an AWS account, organization unit, IAM Identit
 - workload roles under `/openclaw/fakeco/crabhelm/`, both using the required account-owned permissions boundary;
 - one ECS task, one NAT gateway, single-AZ RDS, 20 GiB RDS with storage autoscaling disabled, one-day automated backups, RDS log export disabled, and seven-day ECS log retention;
 - metadata-only Prometheus enabled, ClawRouter enabled with retention controlled by the application contract, and no direct provider credential;
+- Slack disabled for the first canary, with no Slack secret injection and both Slack ingress paths closed;
 - stack tags `Project=crabhelm`, `Environment=fakeco`, and `ManagedBy=github-actions`.
 
 The S3 gateway endpoint keeps application S3 traffic and regional ECR image-layer downloads off the NAT gateway at no endpoint-hour charge. Its least-privilege policy includes the AWS-owned `prod-<region>-starport-layer-bucket` required for private ECR pulls. Other external HTTPS traffic still uses the single NAT gateway in public subnet A. This is explicitly non-HA: an Availability Zone or NAT failure can interrupt task egress even though the ALB spans two public subnets.
@@ -38,7 +39,7 @@ Create and review these outside this repository before enabling any workflow:
 5. `arn:aws:iam::<account>:policy/openclaw/fakeco/crabhelm-workload-boundary`, which permits only the reviewed ECS workload role envelope.
 6. Private, encrypted, versioned S3 bucket `openclaw-fakeco-cfn-<account>-<region>` for non-secret CloudFormation templates. The deploy role needs access only to `crabhelm/fakeco/cloudformation/*`.
 7. Immutable ECR repository `openclaw/fakeco/crabhelm` covered by BASIC scan-on-push or ENHANCED scan-on-push/continuous scanning. It starts empty; the repository-owned manual publisher produces the reviewed Linux/AMD64 image before deployment.
-8. The application secret encrypted by the named customer-managed KMS key. The workflow receives only their ARNs, resolves the secret's KMS identifier to its canonical ARN with `DescribeSecret`/`DescribeKey`, and never reads a secret value.
+8. The application secret encrypted by the named customer-managed KMS key. The initial `SlackMode=off` secret omits `SLACK_BOT_TOKEN` and `SLACK_SIGNING_SECRET`; do not create placeholder values. The workflow receives only the secret and key ARNs, resolves the secret's KMS identifier to its canonical ARN with `DescribeSecret`/`DescribeKey`, and never reads a secret value.
 9. ACM certificate, external DNS, ALB OIDC client, Crabbox target, ClawRouter installation, an existing audit-alert SNS topic, and a digest-pinned post-overlay OpenClaw appliance.
 
 ### Image-publisher OIDC trust
@@ -175,6 +176,10 @@ Artifact ownership is intentionally disjoint:
 - no stack-owned ECR or `ProvisionService=false` stage.
 
 After deployment it verifies observed parameters, tags, service role, outputs, exactly one desired/running ECS task with no pending task or second deployment, and runtime `/healthz`. It does not create DNS, upload an appliance, seed secrets, or prove routed inference; those remain explicit installation steps.
+
+### Enabling Slack after the first canary
+
+Keep Slack off until console authentication, logout, ClawRouter inference, lifecycle, diagnostics, and metadata-only usage are live-proven. A later Slack canary requires a separate reviewed profile change from locked `SlackMode=off` to `on`, real sandbox `SLACK_BOT_TOKEN` and `SLACK_SIGNING_SECRET` values in the existing application secret, and the two runtime-host Slack callback URLs configured in that sandbox app. Redeploy the stack and require `/api/state` to report Slack configured before sending a signed test event. Never use inert credentials merely to satisfy deployment configuration.
 
 ## Manual teardown
 

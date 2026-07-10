@@ -1,6 +1,7 @@
 import type { ConfirmationRecord, TurnClaims } from "../src/governance-types.js";
 import { slackIdentity, type SlackUserProfile } from "../src/slack-identity.js";
 import { verifySlackRequest } from "./slack-signature.js";
+import { slackIngressEnabled } from "./slack-config.js";
 
 const maxSlackBodyBytes = 128 * 1024;
 
@@ -10,9 +11,13 @@ export async function handleSlackRequest(
   ctx: Pick<ExecutionContext, "waitUntil">,
 ): Promise<Response> {
   if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
+  const signingSecret = env.SLACK_SIGNING_SECRET?.trim();
+  if (!slackIngressEnabled(env) || !signingSecret || !env.SLACK_BOT_TOKEN?.trim()) {
+    return new Response("not found", { status: 404 });
+  }
   const raw = await readBoundedSlackBody(request.body, request.headers);
   if (!raw) return new Response("payload too large", { status: 413 });
-  if (!await verifySlackRequest(request.headers, raw, env.SLACK_SIGNING_SECRET)) return new Response("unauthorized", { status: 401 });
+  if (!await verifySlackRequest(request.headers, raw, signingSecret)) return new Response("unauthorized", { status: 401 });
   const body = new TextDecoder().decode(raw);
   if (new URL(request.url).pathname === "/slack/interactions") {
     const payload = new URLSearchParams(body).get("payload");
@@ -35,7 +40,7 @@ export async function handleSlackRequest(
 }
 
 export async function postSlackConfirmation(env: Env, claims: TurnClaims, confirmation: ConfirmationRecord): Promise<void> {
-  if (claims.surface !== "slack" || !claims.channelId || !claims.threadTs) return;
+  if (!slackIngressEnabled(env) || claims.surface !== "slack" || !claims.channelId || !claims.threadTs) return;
   await slackApi(env, "chat.postMessage", {
     channel: claims.channelId,
     thread_ts: claims.threadTs,

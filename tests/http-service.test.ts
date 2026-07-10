@@ -95,7 +95,11 @@ test("Slack ingress cancels an oversized chunked body before authentication", as
 
   const response = await handleCrabhelmRequest(
     request,
-    { RUNTIME_URL: RUNTIME, SLACK_SIGNING_SECRET: "unused" } as Env,
+    {
+      RUNTIME_URL: RUNTIME,
+      SLACK_SIGNING_SECRET: "unused",
+      SLACK_BOT_TOKEN: "unused",
+    } as Env,
     background,
     { runtimeLabel: "portable-test" },
   );
@@ -104,6 +108,63 @@ test("Slack ingress cancels an oversized chunked body before authentication", as
   assert.equal(await response.text(), "payload too large");
   assert.equal(cancelled, true);
   assert.ok(chunks >= 3 && chunks < 10);
+});
+
+test("Slack-off mode closes ingress before authentication or body parsing", async () => {
+  let cancelled = false;
+  let pulled = false;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulled = true;
+      controller.enqueue(new TextEncoder().encode("must-not-be-read"));
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const response = await handleCrabhelmRequest(
+    new Request(`${RUNTIME}/slack/events`, {
+      method: "POST",
+      body,
+      duplex: "half",
+    } as RequestInit & { duplex: "half" }),
+    {
+      RUNTIME_URL: RUNTIME,
+      CRABHELM_SLACK: "off",
+      SLACK_SIGNING_SECRET: "stale",
+      SLACK_BOT_TOKEN: "stale",
+    } as Env,
+    background,
+    { runtimeLabel: "portable-test" },
+  );
+
+  assert.equal(response.status, 404);
+  assert.equal(await response.text(), "not found");
+  assert.equal(pulled, false);
+  assert.equal(cancelled, true);
+});
+
+test("Slack-off mode reports the integration as not configured", async () => {
+  let service: CrabhelmControlPlaneService;
+  const env = fakeEnv(() => service);
+  env.CRABHELM_SLACK = "off";
+  env.SLACK_SIGNING_SECRET = "stale";
+  env.SLACK_BOT_TOKEN = "stale";
+  service = new CrabhelmControlPlaneService(memoryStateDatabase(), env, {
+    async schedule() {},
+    restart(): never { throw new Error("unused"); },
+  });
+  const token = await signClaims<SessionClaims>(SIGNING_SECRET, {
+    typ: "session",
+    aud: "crabhelm-control-plane",
+    principalId: "principal:portable-admin",
+    roles: ["administrator"],
+  }, 300);
+
+  const response = await routedRequest(env, token, "/api/state");
+  assert.equal(response.status, 200);
+  const state = await response.json() as { integrations: { slack: boolean } };
+  assert.equal(state.integrations.slack, false);
 });
 
 test("portable HTTP and control-plane services persist policy state across reconstruction", async () => {

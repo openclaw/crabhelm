@@ -58,6 +58,58 @@ test("ALB identity verifier checks the signer, signature, client, issuer, and ro
   assert.equal(fetches, 1, "public key should be cached by kid");
 });
 
+test("ALB identity verifier accepts only an explicit single verified-email value", async () => {
+  const { privateKey, publicKey } = await generateKeyPair("ES256");
+  const pem = await exportSPKI(publicKey);
+  const now = 1_800_000_000_000;
+  const verifier = createAlbIdentityVerifier({
+    region,
+    loadBalancerArn: signer,
+    oidcIssuer: issuer,
+    oidcClientId: client,
+    adminEmails: [],
+    adminGroups: [],
+    now: () => now,
+    fetch: async () => new Response(pem, { status: 200 }),
+  });
+  const missing = Symbol("missing");
+  const cases: Array<[string, unknown | typeof missing, boolean]> = [
+    ["boolean true", true, true],
+    ["Cognito UserInfo string true", "true", true],
+    ["boolean false", false, false],
+    ["Cognito UserInfo string false", "false", false],
+    ["missing claim", missing, false],
+    ["invalid case", "TRUE", false],
+    ["invalid number", 1, false],
+    ["duplicate true values", ["true", "true"], false],
+    ["conflicting values", ["true", "false"], false],
+  ];
+
+  for (const [label, value, accepted] of cases) {
+    const claims: Record<string, unknown> = {
+      sub: `subject-${label.replaceAll(" ", "-")}`,
+      email: "member@example.com",
+      ...(value === missing ? {} : { email_verified: value }),
+    };
+    const token = await new SignJWT(claims).setProtectedHeader({
+      alg: "ES256",
+      kid,
+      signer,
+      client,
+      iss: issuer,
+      exp: Math.floor(now / 1000) + 300,
+    }).sign(privateKey);
+    const request = new Request("https://crabhelm.example.com", {
+      headers: { "x-amzn-oidc-data": token },
+    });
+    if (accepted) {
+      assert.equal((await verifier(request))?.email, "member@example.com", label);
+    } else {
+      await assert.rejects(verifier(request), /ALB identity email is unverified/u, label);
+    }
+  }
+});
+
 test("ALB identity verifier rejects a mismatched signer before fetching a key", async () => {
   const { privateKey } = await generateKeyPair("ES256");
   let fetched = false;

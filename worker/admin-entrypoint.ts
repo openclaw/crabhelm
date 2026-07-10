@@ -1,5 +1,6 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { SYSTEM_OPERATOR_PRINCIPAL_ID } from "../src/governance.js";
+import { slackIntegrationConfigured } from "./slack-config.js";
 
 type AdminResponse = { status: number; body: unknown };
 type SlackProbe = { marker: string; jobId: string; clawId: string; threadTs: string };
@@ -39,6 +40,7 @@ export class CrabhelmAdmin extends WorkerEntrypoint<Env> {
   }
 
   async startSlackProbe(workspaceId: string, channelId: string): Promise<SlackProbe> {
+    if (!slackIntegrationConfigured(this.env)) throw new Error("Slack ingress is not configured");
     const workspace = slackId(workspaceId, "workspace");
     const channel = slackId(channelId, "channel");
     const probeEmail = this.env.CRABHELM_PROBE_EMAIL?.trim();

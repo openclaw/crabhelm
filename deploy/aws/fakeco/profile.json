@@ -48,6 +48,7 @@
     "AdminGroups": "",
     "ProbeEmail": "",
     "EgressLockdown": "required",
+    "SlackMode": "off",
     "ClawRouterMode": "on",
     "ClawRouterTenantId": "fakeco",
     "ClawRouterAllowedProviders": "openai",

@@ -20,6 +20,7 @@ import {
   handleCrabhelmRequest,
 } from "../worker/http-service.js";
 import { createAlbIdentityVerifier } from "./alb-identity.js";
+import { albLogoutResponse } from "./alb-logout.js";
 import { AuditQueuePoller } from "./audit-poller.js";
 import { loadAwsConfig, type AwsConfig } from "./config.js";
 import { LocalAssetsFetcher } from "./local-assets.js";
@@ -319,6 +320,14 @@ async function serveHttpRequest(
     const request = fetchRequest(incoming, context.config, controller.signal);
     if (!request) {
       await sendNodeResponse(outgoing, new Response("not found", { status: 404 }), incoming.method);
+      return;
+    }
+    const logout = albLogoutResponse(request, {
+      consoleOrigin: context.config.controlPlane.PUBLIC_URL,
+      sessionCookieName: context.config.access.sessionCookieName,
+    });
+    if (logout) {
+      await sendNodeResponse(outgoing, logout, incoming.method);
       return;
     }
     const response = await handleCrabhelmRequest(

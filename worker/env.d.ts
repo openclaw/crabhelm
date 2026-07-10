@@ -6,9 +6,10 @@ interface Env {
   RUNTIME_SIGNING_SECRET: string;
   VAULT_MASTER_KEY: string;
   OPENAI_API_KEY?: string;
+  CRABHELM_SLACK?: "on" | "off";
   SLACK_BOT_TOKEN?: string;
   SLACK_APP_TOKEN?: string;
-  SLACK_SIGNING_SECRET: string;
+  SLACK_SIGNING_SECRET?: string;
   GITHUB_OAUTH_CLIENT_ID: string;
   GITHUB_OAUTH_CLIENT_SECRET: string;
   CF_ACCESS_TEAM_DOMAIN: string;
@@ -40,8 +41,10 @@ declare namespace Cloudflare {
     RUNTIME_SIGNING_SECRET: string;
     VAULT_MASTER_KEY: string;
     OPENAI_API_KEY?: string;
+    CRABHELM_SLACK?: "on" | "off";
     SLACK_BOT_TOKEN?: string;
     SLACK_APP_TOKEN?: string;
+    SLACK_SIGNING_SECRET?: string;
     CF_ACCESS_TEAM_DOMAIN: string;
     CF_ACCESS_AUD: string;
     CF_ACCESS_ADMIN_EMAILS: string;

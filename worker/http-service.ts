@@ -3,6 +3,7 @@ import { signClaims, verifyClaims } from "./security.js";
 import type { GovernanceAuditEvent, RuntimeClaims, RuntimeTicketClaims, SessionClaims } from "../src/governance-types.js";
 import { verifyAccessIdentity, type AccessIdentity } from "./access.js";
 import { handleSlackRequest } from "./slack.js";
+import { slackIntegrationConfigured } from "./slack-config.js";
 import { standaloneBootstrapHashFor } from "../src/domain.js";
 import type { InferenceRouter, ObservabilityPolicy } from "../src/types.js";
 
@@ -55,6 +56,10 @@ export async function handleCrabhelmRequest(
     }
     if (url.pathname === "/slack/events" || url.pathname === "/slack/interactions") {
       if (!isRuntimeHost(url, env)) return new Response("not found", { status: 404 });
+      if (!slackIntegrationConfigured(env)) {
+        try { await request.body?.cancel("Slack ingress is not configured"); } catch { /* Best effort. */ }
+        return new Response("not found", { status: 404 });
+      }
       return handleSlackRequest(request, env, ctx);
     }
     if (url.pathname === "/api/runtime/connect") {
