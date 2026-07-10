@@ -234,7 +234,10 @@ export class ClawRouterControl {
       policyActive: active,
       credentialActive: active,
       routerHealthy: asRecord(health).ok === true,
-      catalogReady: catalogContains(catalog, claw.desired.inference.model),
+      catalogReady: [
+        claw.desired.inference.model,
+        ...claw.desired.inference.fallbackModels,
+      ].every((model) => catalogContains(catalog, model)),
       routeVerified: false,
       budget: budgetObservation(usageRecord.budget, monthlyBudgetMicros),
       ...(usageRecord.usage ? { usage: usageSummary(usageRecord.usage) } : {}),

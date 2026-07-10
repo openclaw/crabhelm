@@ -60,6 +60,7 @@ test("ClawRouter fleet configuration is explicit and fail-closed", () => {
 test("ClawRouter control registers scoped metadata, rotates credentials, and projects bounded usage", async () => {
   const calls: Array<{ path: string; method: string; headers: Headers; body?: Record<string, unknown> }> = [];
   let expectedCredential = "";
+  let includeFallback = false;
   const claw = routedClaw();
   const expectedRouter = claw.desired.inference.router;
   assert.equal(expectedRouter.kind, "clawrouter");
@@ -97,7 +98,12 @@ test("ClawRouter control registers scoped metadata, rotates credentials, and pro
       if (url.pathname === "/v1/catalog") {
         return Response.json({
           version: "clawrouter.client-catalog.v1",
-          providers: [{ id: "openai", executable: true, models: [{ id: "gpt-5.5" }] }],
+          providers: [
+            { id: "openai", executable: true, models: [{ id: "gpt-5.5" }] },
+            ...(includeFallback
+              ? [{ id: "anthropic", executable: true, models: [{ id: "claude-sonnet-4.6" }] }]
+              : []),
+          ],
         });
       }
       if (url.pathname === "/v1/usage") {
@@ -128,6 +134,8 @@ test("ClawRouter control registers scoped metadata, rotates credentials, and pro
   assert.equal(firstCredentials.CRABHELM_ROUTER_BASE_URL, config.baseUrl);
   assert.equal(firstCredentials.OPENAI_API_KEY, undefined);
 
+  await assert.rejects(control.reconcile(claw), /health or model catalog is not ready/u);
+  includeFallback = true;
   const observation = await control.reconcile(claw);
   assert.equal(observation.routerHealthy, true);
   assert.equal(observation.catalogReady, true);

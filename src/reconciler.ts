@@ -77,7 +77,16 @@ export class CrabhelmReconciler {
     let claw = await this.#registry.get(id);
     try {
       if (claw.observed.phase === "deleted") return claw;
-      const inference = await this.#inference?.reconcile(claw);
+      let inference: InferenceObservation | undefined;
+      if (claw.desired.inference.router.kind === "clawrouter") {
+        if (!this.#inference) {
+          throw new CrabhelmOperationalError(
+            "CLAWROUTER_UNCONFIGURED",
+            "ClawRouter desired state has no configured inference control",
+          );
+        }
+        inference = await this.#inference.reconcile(claw);
+      }
       if (inference) {
         claw = { ...claw, observed: { ...claw.observed, inference } };
       }

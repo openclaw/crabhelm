@@ -4,6 +4,7 @@ import {
   childPolicyHash,
   clawCredentialsGeneration,
   createClawRecord,
+  normalizeManagedPolicySpec,
   rotateClawCredentials,
   updateClawRecord,
 } from "../src/domain.js";
@@ -192,6 +193,14 @@ test("rejects non provider/model inference identifiers", () => {
       }),
     /provider\/model/,
   );
+  assert.throws(
+    () => createClawRecord({
+      name: "Too many direct segments",
+      owner: { subject: "manual:segments", label: "Segments", source: "manual" },
+      inference: { model: "openai/gpt-5.5/extra" },
+    }),
+    /provider\/model/u,
+  );
 });
 
 test("creates per-claw ClawRouter desired state from fleet policy", () => {
@@ -240,4 +249,13 @@ test("creates per-claw ClawRouter desired state from fleet policy", () => {
     }),
     /require clawrouter\/provider\/model/u,
   );
+  assert.equal(normalizeManagedPolicySpec({
+    inference: {
+      model: "clawrouter/openai/gpt-5.5",
+      fallbackModels: ["clawrouter/anthropic/claude-sonnet-4.6"],
+    },
+    slackEnabled: false,
+    access: { dmPolicy: "pairing", groupPolicy: "allowlist" },
+    observability: { logLevel: "info" },
+  }).inference.model, "clawrouter/openai/gpt-5.5");
 });

@@ -18,7 +18,8 @@ import type {
 
 const subjectPattern = /^[a-zA-Z0-9][a-zA-Z0-9_.:@/+\-]{0,199}$/;
 const slugPattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
-const modelPattern = /^[a-z0-9][a-z0-9_.-]*(?:\/[a-zA-Z0-9][a-zA-Z0-9_.:\-]{0,199})+$/;
+const directModelPattern = /^[a-z0-9][a-z0-9_.-]*\/[a-zA-Z0-9][a-zA-Z0-9_.:\-]{0,199}$/;
+const clawRouterModelPattern = /^clawrouter\/[a-z0-9][a-z0-9-]{0,63}\/[a-zA-Z0-9][a-zA-Z0-9_.:\-]{0,199}(?:\/[a-zA-Z0-9][a-zA-Z0-9_.:\-]{0,199})*$/;
 const sha256Pattern = /^[0-9a-f]{64}$/;
 
 export type CreateClawRecordOptions = {
@@ -67,6 +68,7 @@ function normalizeModels(
   input: CreateClawInput["inference"] | undefined,
   clawId: string,
   clawRouter?: ClawRouterFleetPolicy,
+  allowClawRouterTemplate = false,
 ): InferencePolicy {
   const model = requireText(
     input?.model ?? clawRouter?.defaultModel ?? "openai/gpt-5.5",
@@ -74,9 +76,12 @@ function normalizeModels(
     220,
   );
   const fallbackModels = [...new Set(input?.fallbackModels ?? [])];
+  const routedSyntax = Boolean(clawRouter) || (allowClawRouterTemplate && model.startsWith("clawrouter/"));
   for (const value of [model, ...fallbackModels]) {
-    if (!modelPattern.test(value)) {
-      throw new Error(`model must use provider/model form: ${value}`);
+    if (routedSyntax ? !clawRouterModelPattern.test(value) : !directModelPattern.test(value)) {
+      throw new Error(routedSyntax
+        ? `ClawRouter fleets require clawrouter/provider/model form: ${value}`
+        : `model must use provider/model form: ${value}`);
     }
   }
   const modelProvider = model.slice(0, model.indexOf("/"));
@@ -250,7 +255,12 @@ function normalizeAppliance(input: CreateClawInput["deployment"]): DeploymentSpe
 }
 
 export function normalizeManagedPolicySpec(input: ManagedPolicySpec): ManagedPolicySpec {
-  const inference = normalizeModels(input?.inference, "00000000-0000-4000-8000-000000000000");
+  const inference = normalizeModels(
+    input?.inference,
+    "00000000-0000-4000-8000-000000000000",
+    undefined,
+    true,
+  );
   return {
     inference: {
       model: inference.model,

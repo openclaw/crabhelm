@@ -38,6 +38,69 @@ test("provisions one child Gateway and pairs the parent control identity", async
   assert.equal((await registry.snapshot()).summary.ready, 1);
 });
 
+test("direct claws do not invoke a configured ClawRouter control", async () => {
+  const registry = new CrabhelmRegistry(
+    createMemoryStateStore<ClawRecord>(),
+    createMemoryStateStore<AuditEvent>(),
+  );
+  let calls = 0;
+  const reconciler = new CrabhelmReconciler(registry, new SimulatorChildCoreProvider(), {
+    inference: {
+      async reconcile(): Promise<InferenceObservation> {
+        calls += 1;
+        throw new Error("direct claws must not reach ClawRouter control");
+      },
+    },
+  });
+  const created = await registry.create(
+    { name: "Direct", owner: { subject: "email:direct@example.test", label: "Direct", source: "email" } },
+    "test-admin",
+  );
+
+  const ready = await reconciler.reconcileOne(created.id);
+  assert.equal(ready.observed.phase, "ready");
+  assert.equal(calls, 0);
+});
+
+test("routed claws fail closed before provisioning without ClawRouter control", async () => {
+  const registry = new CrabhelmRegistry(
+    createMemoryStateStore<ClawRecord>(),
+    createMemoryStateStore<AuditEvent>(),
+    {
+      clawRouter: {
+        baseUrl: "https://clawrouter.example.test",
+        tenantId: "fakeco",
+        allowedProviders: ["openai"],
+        defaultModel: "clawrouter/openai/gpt-5.5",
+      },
+    },
+  );
+  const simulator = new SimulatorChildCoreProvider();
+  let provisionCalls = 0;
+  const provider: ChildCoreProvider = {
+    async provision(claw) {
+      provisionCalls += 1;
+      return simulator.provision(claw);
+    },
+    inspect: (claw) => simulator.inspect(claw),
+    disable: (claw) => simulator.disable(claw),
+    drain: (claw) => simulator.drain(claw),
+    remove: (claw) => simulator.remove(claw),
+    revokeControl: (claw) => simulator.revokeControl(claw),
+  };
+  const reconciler = new CrabhelmReconciler(registry, provider);
+  const created = await registry.create(
+    { name: "Unwired route", owner: { subject: "email:route@example.test", label: "Route", source: "email" } },
+    "test-admin",
+  );
+
+  const result = await reconciler.reconcileOne(created.id);
+  assert.equal(result.observed.phase, "attention");
+  assert.equal(result.observed.lifecycle, undefined);
+  assert.match(result.observed.message, /CLAWROUTER_UNCONFIGURED/u);
+  assert.equal(provisionCalls, 0);
+});
+
 test("ClawRouter readiness requires exact routed live inference proof", async () => {
   const simulator = new SimulatorChildCoreProvider();
   let forceDirectProof = true;
