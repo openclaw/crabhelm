@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Harden AWS FakeCo admission with explicit verified-email handling for Cognito UserInfo, a locked Slack-off first-canary path without placeholder secrets or ingress, and ALB cookie-shard logout to an unauthenticated landing page.
 - Add a protected-main FakeCo Crabhelm control-plane image publisher with a dedicated OIDC identity, landed-source fencing, native Linux/AMD64 BuildKit SBOM/provenance output, exact immutable ECR binding, canonical digest/platform proof, fail-closed vulnerability threshold, and non-secret handoff artifact.
 - Add a locked disposable FakeCo AWS foundation with exact GitHub OIDC deploy/teardown identities, external digest-pinned ECR and Linux/AMD64 manifest proof, bounded workload and CloudFormation roles, capped retention/cost settings, offline render/verify/teardown planning, and manual standard-only workflows that never read secret values.
 - Add AWS as an alternative per-installation control-plane backend with a singleton ECS/Fargate service, ALB OIDC and WebSockets, PostgreSQL RDS, private S3 stores, and SQS audit delivery; Cloudflare remains the reference backend, and active-active shared-fleet operation is unsupported.

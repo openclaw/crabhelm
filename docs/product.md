@@ -100,7 +100,7 @@ Typed-name confirmation starts a staged removal. Crabhelm disables ingress, veri
 - Real Crabbox allocation and deletion.
 - Pinned OpenClaw `2026.6.11` direct-reference install with exact-model live inference proof; routed FakeCo requires a separately digest-pinned appliance from the landed ClawRouter provider-overlay commit.
 - Optional first-class ClawRouter policies, epoch-scoped child credentials, desired/observed route health, bounded usage metadata, and exact-route live inference proof; deployment-specific live proof is still required.
-- Signed central Slack ingress with DM/app-mention events, persona bindings, threaded delivery, and one-click confirmations.
+- Optional signed central Slack ingress with DM/app-mention events, persona bindings, threaded delivery, and one-click confirmations; locked Slack-off installations expose no Slack route or credential requirement.
 - GitHub organization import remains disabled in the Cloudflare runtime.
 - Backend-native operator authentication through verified Cloudflare Access JWTs or signed ALB OIDC assertions, with signed principal sessions retained for operations.
 - GitHub OAuth authorization-code connection, repository/issue reads, and confirmed issue comments through the controlled wrapper.

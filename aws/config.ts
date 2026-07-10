@@ -20,6 +20,7 @@ export type AwsControlPlaneVariables = {
   CRABBOX_TTL_SECONDS: string;
   CRABBOX_IDLE_TIMEOUT_SECONDS: string;
   CRABHELM_EGRESS_LOCKDOWN: "required" | "off";
+  CRABHELM_SLACK: "on" | "off";
   CRABHELM_CLAWROUTER: "on" | "off";
   CLAWROUTER_BASE_URL?: string;
   CLAWROUTER_TENANT_ID?: string;
@@ -37,8 +38,8 @@ export type AwsControlPlaneVariables = {
   RUNTIME_SIGNING_SECRET: string;
   VAULT_MASTER_KEY: string;
   OPENAI_API_KEY?: string;
-  SLACK_SIGNING_SECRET: string;
-  SLACK_BOT_TOKEN: string;
+  SLACK_SIGNING_SECRET?: string;
+  SLACK_BOT_TOKEN?: string;
   GITHUB_OAUTH_CLIENT_SECRET: string;
   CLAWROUTER_ADMIN_TOKEN?: string;
   CLAWROUTER_CREDENTIAL_SECRET?: string;
@@ -66,6 +67,7 @@ export type AwsConfig = {
     loadBalancerArn: string;
     oidcIssuer: string;
     oidcClientId: string;
+    sessionCookieName: string;
     adminEmails: string[];
     adminGroups: string[];
   };
@@ -133,6 +135,12 @@ export function loadAwsConfig(environment: Environment = process.env): AwsConfig
     ["required", "off"] as const,
     "required",
   );
+  const slackMode = choice(
+    environment,
+    "CRABHELM_SLACK",
+    ["on", "off"] as const,
+    "on",
+  );
   const clawRouterMode = choice(
     environment,
     "CRABHELM_CLAWROUTER",
@@ -172,13 +180,22 @@ export function loadAwsConfig(environment: Environment = process.env): AwsConfig
   }
   const oidcIssuer = oidcIssuerUrl(environment);
   const oidcClientId = boundedText(environment, "OIDC_CLIENT_ID", 512);
+  const sessionCookieName = albSessionCookieName(environment);
   const loadBalancerArn = albArn(environment, awsRegion);
 
   const nodeSha256 = digest(environment, "NODE_RUNTIME_SHA256");
   const archiveSha256 = digest(environment, "APPLIANCE_ARCHIVE_SHA256");
   const manifestSha256 = digest(environment, "APPLIANCE_MANIFEST_SHA256");
   const probeEmail = optionalEmail(environment, "CRABHELM_PROBE_EMAIL");
-  const slackAppToken = optionalSecret(environment, "SLACK_APP_TOKEN");
+  const slackBotToken = slackMode === "on"
+    ? requiredSecret(environment, "SLACK_BOT_TOKEN")
+    : undefined;
+  const slackSigningSecret = slackMode === "on"
+    ? requiredSecret(environment, "SLACK_SIGNING_SECRET")
+    : undefined;
+  const slackAppToken = slackMode === "on"
+    ? optionalSecret(environment, "SLACK_APP_TOKEN")
+    : undefined;
 
   const controlPlane: AwsControlPlaneVariables = {
     PUBLIC_URL: publicUrl,
@@ -197,6 +214,7 @@ export function loadAwsConfig(environment: Environment = process.env): AwsConfig
     CRABBOX_TTL_SECONDS: String(ttlSeconds),
     CRABBOX_IDLE_TIMEOUT_SECONDS: String(idleTimeoutSeconds),
     CRABHELM_EGRESS_LOCKDOWN: egressLockdown,
+    CRABHELM_SLACK: slackMode,
     CRABHELM_CLAWROUTER: clawRouterMode,
     CRABHELM_PROMETHEUS: prometheusMode,
     ...(clawRouter
@@ -229,8 +247,12 @@ export function loadAwsConfig(environment: Environment = process.env): AwsConfig
     VAULT_MASTER_KEY: vaultMasterKey(environment),
     ...(openAiApiKey ? { OPENAI_API_KEY: openAiApiKey } : {}),
     ...(metricsToken ? { METRICS_BEARER_TOKEN: metricsToken } : {}),
-    SLACK_SIGNING_SECRET: requiredSecret(environment, "SLACK_SIGNING_SECRET"),
-    SLACK_BOT_TOKEN: requiredSecret(environment, "SLACK_BOT_TOKEN"),
+    ...(slackSigningSecret && slackBotToken
+      ? {
+          SLACK_SIGNING_SECRET: slackSigningSecret,
+          SLACK_BOT_TOKEN: slackBotToken,
+        }
+      : {}),
     GITHUB_OAUTH_CLIENT_SECRET: requiredSecret(environment, "GITHUB_OAUTH_CLIENT_SECRET"),
     ...(slackAppToken ? { SLACK_APP_TOKEN: slackAppToken } : {}),
   };
@@ -249,7 +271,14 @@ export function loadAwsConfig(environment: Environment = process.env): AwsConfig
       auditArchiveBucket,
       auditQueueUrl,
     },
-    access: { loadBalancerArn, oidcIssuer, oidcClientId, adminEmails, adminGroups },
+    access: {
+      loadBalancerArn,
+      oidcIssuer,
+      oidcClientId,
+      sessionCookieName,
+      adminEmails,
+      adminGroups,
+    },
     target: {
       id: targetId,
       label: targetLabel,
@@ -427,6 +456,14 @@ function albArn(environment: Environment, region: string): string {
     "u",
   );
   if (!pattern.test(value)) throw new Error("AWS_LOAD_BALANCER_ARN is invalid");
+  return value;
+}
+
+function albSessionCookieName(environment: Environment): string {
+  const value = required(environment, "ALB_SESSION_COOKIE_NAME");
+  if (!/^AWSELBAuthSessionCookie-[A-Za-z0-9]{1,16}$/u.test(value)) {
+    throw new Error("ALB_SESSION_COOKIE_NAME is invalid");
+  }
   return value;
 }
 

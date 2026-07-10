@@ -57,7 +57,9 @@ export function createAlbIdentityVerifier(options: AlbIdentityVerifierOptions) {
     if (!subject || subject.length > 200 || !validEmail(email)) {
       throw new Error("ALB identity is incomplete");
     }
-    if (payload.email_verified === false) throw new Error("ALB identity email is unverified");
+    if (!verifiedEmailClaim(payload.email_verified)) {
+      throw new Error("ALB identity email is unverified");
+    }
     const forwardedSubject = request.headers.get("x-amzn-oidc-identity")?.trim();
     if (forwardedSubject && forwardedSubject !== subject) {
       throw new Error("ALB identity subject mismatch");
@@ -157,6 +159,12 @@ function textHeader(value: unknown, label: string): string {
 
 function validEmail(value: string): boolean {
   return value.length <= 320 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(value);
+}
+
+function verifiedEmailClaim(value: unknown): boolean {
+  // Cognito UserInfo emits verification flags as strings. Multi-valued claims
+  // are ambiguous and must not be collapsed to one apparently true value.
+  return value === true || value === "true";
 }
 
 function escapeRegex(value: string): string {

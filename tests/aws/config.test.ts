@@ -27,6 +27,7 @@ function validEnvironment(): Record<string, string> {
     RUNTIME_URL: "https://crabhelm-runtime.example.com/",
     OIDC_ISSUER: "https://identity.example.com/oauth2/default",
     OIDC_CLIENT_ID: "access-client-id",
+    ALB_SESSION_COOKIE_NAME: "AWSELBAuthSessionCookie-1",
     ACCESS_ADMIN_EMAILS: " ADMIN@example.com,admin@example.com ",
     ACCESS_ADMIN_GROUPS: "platform, operators,platform",
     CRABHELM_PROBE_EMAIL: "Probe@example.com",
@@ -41,6 +42,7 @@ function validEnvironment(): Record<string, string> {
     CRABBOX_TTL_SECONDS: "14400",
     CRABBOX_IDLE_TIMEOUT_SECONDS: "7200",
     CRABHELM_EGRESS_LOCKDOWN: "required",
+    CRABHELM_SLACK: "on",
     CRABHELM_CLAWROUTER: "off",
     CRABHELM_PROMETHEUS: "off",
     NODE_RUNTIME_SHA256: digestA,
@@ -90,12 +92,38 @@ test("AWS config validates and normalizes the complete production environment", 
     loadBalancerArn: "arn:aws:elasticloadbalancing:us-west-2:123456789012:loadbalancer/app/crabhelm/abc123",
     oidcIssuer: "https://identity.example.com/oauth2/default",
     oidcClientId: "access-client-id",
+    sessionCookieName: "AWSELBAuthSessionCookie-1",
     adminEmails: ["admin@example.com"],
     adminGroups: ["platform", "operators"],
   });
   assert.equal(config.controlPlane.CRABHELM_PROBE_EMAIL, "probe@example.com");
+  assert.equal(config.controlPlane.CRABHELM_SLACK, "on");
+  assert.equal(config.controlPlane.SLACK_BOT_TOKEN, "slack-bot-token");
+  assert.equal(config.controlPlane.SLACK_SIGNING_SECRET, "slack-signing-secret");
   assert.equal(config.controlPlane.CRABHELM_CLAWROUTER, "off");
   assert.equal(config.controlPlane.CLAWROUTER_ADMIN_TOKEN, undefined);
+});
+
+test("AWS config has a true Slack-off mode without placeholder credentials", () => {
+  const disabled = validEnvironment();
+  disabled.CRABHELM_SLACK = "off";
+  delete disabled.SLACK_BOT_TOKEN;
+  delete disabled.SLACK_SIGNING_SECRET;
+  const controlPlane = loadAwsConfig(disabled).controlPlane;
+  assert.equal(controlPlane.CRABHELM_SLACK, "off");
+  assert.equal(controlPlane.SLACK_BOT_TOKEN, undefined);
+  assert.equal(controlPlane.SLACK_SIGNING_SECRET, undefined);
+  assert.equal(controlPlane.SLACK_APP_TOKEN, undefined);
+
+  for (const name of ["SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET"]) {
+    const missing = validEnvironment();
+    delete missing[name];
+    assert.throws(() => loadAwsConfig(missing), new RegExp(`${name} is required`));
+  }
+
+  const invalid = validEnvironment();
+  invalid.CRABHELM_SLACK = "disabled";
+  assert.throws(() => loadAwsConfig(invalid), /CRABHELM_SLACK must be one of on, off/u);
 });
 
 test("AWS config rejects missing required values without exposing other secrets", () => {
@@ -131,6 +159,10 @@ test("AWS config enforces HTTPS host separation and OIDC identity", () => {
   noAdministrator.ACCESS_ADMIN_EMAILS = "";
   noAdministrator.ACCESS_ADMIN_GROUPS = "";
   assert.throws(() => loadAwsConfig(noAdministrator), /at least one access administrator/u);
+
+  const invalidCookieName = validEnvironment();
+  invalidCookieName.ALB_SESSION_COOKIE_NAME = "AWSELBAuthSessionCookie-1; Path=/";
+  assert.throws(() => loadAwsConfig(invalidCookieName), /ALB_SESSION_COOKIE_NAME is invalid/u);
 });
 
 test("AWS config validates secrets, vault material, and ClawRouter admission", () => {

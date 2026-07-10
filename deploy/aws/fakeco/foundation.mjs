@@ -14,6 +14,7 @@ const requiredLockedParameters = Object.freeze({
   ProvisionService: "true",
   WorkloadRolePath: "/openclaw/fakeco/crabhelm/",
   LoadBalancerDeletionProtection: "false",
+  SlackMode: "off",
   ClawRouterMode: "on",
   ClawRouterTenantId: "fakeco",
   DatabaseAllocatedStorage: "20",

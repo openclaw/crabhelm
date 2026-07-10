@@ -36,6 +36,7 @@ import {
 import type { StateStore, StateTransaction } from "../src/state.js";
 import { GovernanceController } from "./governance-controller.js";
 import { signClaims } from "./security.js";
+import { slackIngressEnabled, slackIntegrationConfigured } from "./slack-config.js";
 
 const maxBodyBytes = 64 * 1024;
 
@@ -304,6 +305,7 @@ export class CrabhelmControlPlaneService {
     email?: string;
     label: string;
   }): Promise<{ clawId: string; requesterId: string; personaId: string; turnToken: string }> {
+    if (!slackIngressEnabled(this.#env)) throw new Error("Slack ingress is not configured");
     const subject = input.email?.trim()
       ? `email:${input.email.trim().toLowerCase()}`
       : `slack:${input.workspaceId}:${input.userId}`;
@@ -333,6 +335,7 @@ export class CrabhelmControlPlaneService {
   }
 
   async decideSlackConfirmation(input: { workspaceId: string; userId: string; email?: string; confirmationId: string; approve: boolean }): Promise<{ status: string; summary: string }> {
+    if (!slackIngressEnabled(this.#env)) throw new Error("Slack ingress is not configured");
     const subject = input.email?.trim()
       ? `email:${input.email.trim().toLowerCase()}`
       : `slack:${input.workspaceId}:${input.userId}`;
@@ -362,7 +365,7 @@ export class CrabhelmControlPlaneService {
             this.#env.CF_ACCESS_AUD !== "configure-after-access-app-creation"
           ),
           cloudflareAccess: Boolean(this.#env.CF_ACCESS_AUD?.trim() && this.#env.CF_ACCESS_AUD !== "configure-after-access-app-creation"),
-          slack: Boolean(this.#env.SLACK_SIGNING_SECRET?.trim() && this.#env.SLACK_BOT_TOKEN?.trim()),
+          slack: slackIntegrationConfigured(this.#env),
           githubOAuth: Boolean(this.#env.GITHUB_OAUTH_CLIENT_ID?.trim() && this.#env.GITHUB_OAUTH_CLIENT_SECRET?.trim()),
           runtimeBridge: fleet.claws.some((claw) => (runtimeStatuses[claw.id]?.connected ?? 0) > 0),
         },

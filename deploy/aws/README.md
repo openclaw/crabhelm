@@ -40,7 +40,7 @@ The locked disposable profile has separate manual deploy/teardown workflows and 
 
 The OIDC issuer and endpoints must use publicly trusted certificates and publicly resolvable DNS. The ALB must be able to reach the token and user-info endpoints over IPv4 HTTPS; an IPv6-only or otherwise unreachable endpoint will make console authentication fail even if stack creation succeeds. A publicly resolvable name may resolve to private IPv4 addresses when VPC routing and security controls allow the ALB to reach them.
 
-The OIDC client must allow the scopes configured in `OidcScopes`, which defaults to `openid email profile`, and the identity provider must restrict access to the intended organization. Add the provider-specific group scope when `AdminGroups` is used. The resulting signed ALB assertion must contain an email claim and may contain a `groups` array.
+The OIDC client must allow the scopes configured in `OidcScopes`, which defaults to `openid email profile`, and the identity provider must restrict access to the intended organization. Add the provider-specific group scope when `AdminGroups` is used. The resulting signed ALB assertion must contain an email claim, one explicit verified-email value, and may contain a `groups` array. Crabhelm accepts only boolean `true` or the exact string `"true"` used by Cognito UserInfo; false, missing, invalid, or multi-valued/conflicting verification claims fail closed.
 
 Every successfully authenticated identity receives the member role. `AdminEmails` is required and must contain at least one known bootstrap administrator; this prevents a missing or mis-scoped group claim from leaving the deployment with no administrator. `AdminGroups` may grant the administrator role to additional identities.
 
@@ -57,11 +57,20 @@ Create the JSON secret outside CloudFormation so secret values never enter stack
   "INVOCATION_SIGNING_SECRET": "replace-with-at-least-32-bytes",
   "RUNTIME_SIGNING_SECRET": "replace-with-at-least-32-bytes",
   "VAULT_MASTER_KEY": "replace-with-a-base64url-encoded-32-byte-key",
-  "SLACK_BOT_TOKEN": "replace",
-  "SLACK_SIGNING_SECRET": "replace",
   "GITHUB_OAUTH_CLIENT_SECRET": "replace"
 }
 ```
+
+`SlackMode=on` is the default and preserves the existing central Slack integration. For that mode, add real credentials from the intended Slack workspace:
+
+```json
+{
+  "SLACK_BOT_TOKEN": "replace",
+  "SLACK_SIGNING_SECRET": "replace"
+}
+```
+
+With `SlackMode=off`, omit both keys entirely. The task definition does not inject them, Slack event and interaction paths return 404 at the ALB and application boundaries, pending Slack deliveries terminate without an outbound request even if stale credentials remain, and `/api/state` reports Slack as not configured. Do not create inert or placeholder Slack credentials.
 
 For direct inference (`ClawRouterMode=off`), add:
 
@@ -152,7 +161,7 @@ aws cloudformation deploy \
 
 Use the committed [locked profile, offline renderer, image-platform verifier, live-stack verifier, and retained-resource teardown planner](fakeco/README.md), not hand-written overrides. It enforces external precreated ECR, a digest-only Linux/AMD64 image, `ProvisionService=true`, the target account/Region and fixed IAM paths, one-day backups, 20 GiB without RDS storage autoscaling, disabled RDS log export, seven-day ECS logs, single-AZ RDS, and one task. It rejects the production ClawRouter origin and cannot silently route a disposable stack there.
 
-The profile preserves one NAT gateway in public subnet A. The S3 gateway endpoint removes application S3 and regional ECR image-layer data from that path, with the AWS-owned regional ECR layer bucket explicitly allowed; all other task egress remains single-NAT and non-HA. The deploy and teardown workflows are manual, protected-main-only, share one concurrency group, use separate exact OIDC subjects, and read no secret values.
+The profile preserves one NAT gateway in public subnet A. The S3 gateway endpoint removes application S3 and regional ECR image-layer data from that path, with the AWS-owned regional ECR layer bucket explicitly allowed; all other task egress remains single-NAT and non-HA. The initial FakeCo canary locks `SlackMode=off`; its application secret must omit Slack keys. The deploy and teardown workflows are manual, protected-main-only, share one concurrency group, use separate exact OIDC subjects, and read no secret values.
 
 Before live FakeCo validation, build and upload an appliance from the landed OpenClaw provider-overlay commit and pin its manifest, archive, and Node digests in this stack. The repository's current `2026.6.11` appliance pin predates that overlay fix and is direct-provider reference evidence only; it is not ClawRouter-compatible. Do not change or claim a release version in this integration PR.
 
@@ -174,8 +183,8 @@ Configure integrations after DNS and TLS resolve:
 
 - OIDC callback: `https://<console-host>/oauth2/idpresponse`
 - GitHub OAuth callback: `https://<console-host>/api/oauth/github/callback`
-- Slack events: `https://<runtime-host>/slack/events`
-- Slack interactions: `https://<runtime-host>/slack/interactions`
+- Slack events when `SlackMode=on`: `https://<runtime-host>/slack/events`
+- Slack interactions when `SlackMode=on`: `https://<runtime-host>/slack/interactions`
 
 Upload the reviewed appliance to `s3://<AppliancesBucketName>/releases/<ApplianceArchiveSha256>.tgz`. The task role can read that prefix but cannot upload or replace appliances.
 
@@ -184,6 +193,8 @@ Upload the reviewed appliance to `s3://<AppliancesBucketName>/releases/<Applianc
 The ALB terminates public TLS and forwards health checks and application traffic to port 8080 over private HTTP. The task has no public IP, its security group accepts port 8080 only from the ALB security group, and the ALB security group limits application egress to that task security group. This security-group boundary limits network reachability, but it does not encrypt the ALB-to-task hop.
 
 For console requests, the ALB places selected OIDC user-info claims—including email and, when supplied, groups—in the signed `x-amzn-oidc-data` assertion. The task validates the AWS signature, ALB signer ARN, issuer, client ID, and expiration. The assertion and request remain readable on the private HTTP hop; this deployment accepts the resulting claim and request disclosure risk within the VPC and security-group boundary. Deployments whose compliance policy requires encryption on every hop must add task-side TLS and an HTTPS target group, or another approved backend-TLS design; this template does not provide backend TLS.
+
+`GET https://<console-host>/logout` expires the configured ALB session cookie and all four possible shards, then redirects to the unauthenticated, no-store `/signed-out` landing page. Both paths use a higher-priority console rule without `authenticate-oidc`; all other console paths remain authenticated. This secure default ends the ALB session but cannot revoke an upstream IdP session. If the provider supports global or front-channel logout, complete that provider-specific logout separately before returning to `/signed-out`; revisiting the console can otherwise sign in again through an active IdP session.
 
 ## Verify and operate
 
@@ -235,7 +246,7 @@ aws sqs list-message-move-tasks \
 
 Watch the ECS consumer logs, source queue, and DLQ until the move finishes and the visible-message alarm clears. If messages return to the DLQ, stop redriving and continue incident diagnosis.
 
-For an external image update, change the digest-pinned `ImageUri`; stack-owned ECR installations change `ImageTag`. Rotations are credential-specific. For a server credential that is safe to refresh by restart—such as the Crabbox token, Slack credentials, or GitHub OAuth client secret—force a deployment:
+For an external image update, change the digest-pinned `ImageUri`; stack-owned ECR installations change `ImageTag`. Rotations are credential-specific. For a server credential that is safe to refresh by restart—such as the Crabbox token, Slack credentials when `SlackMode=on`, or GitHub OAuth client secret—force a deployment:
 
 ```bash
 aws ecs update-service \
