@@ -499,10 +499,16 @@ function normalizeRecord(record: ClawRecord): ClawRecord {
     };
   };
   const observability = legacyDesired.observability;
+  const router = legacyDesired.inference.router;
+  const missingRouterProject = router?.kind === "clawrouter" &&
+    typeof (router as { projectId?: unknown }).projectId !== "string";
+  const normalizedRouter = router?.kind === "clawrouter" && missingRouterProject
+    ? { ...router, projectId: record.id }
+    : router ?? { kind: "direct" as const };
   const revision = Number.isSafeInteger(record.revision) && record.revision >= 0
     ? record.revision
     : 0;
-  if (observability?.otel && legacyDesired.inference.router && revision === record.revision) return record;
+  if (observability?.otel && router && !missingRouterProject && revision === record.revision) return record;
   return {
     ...record,
     revision,
@@ -510,7 +516,7 @@ function normalizeRecord(record: ClawRecord): ClawRecord {
       ...record.desired,
       inference: {
         ...record.desired.inference,
-        router: legacyDesired.inference.router ?? { kind: "direct" },
+        router: normalizedRouter,
       },
       observability: {
         logLevel: observability?.logLevel ?? "info",
