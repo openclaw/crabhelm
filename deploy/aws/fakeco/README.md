@@ -14,7 +14,7 @@ Nothing in this directory creates an AWS account, organization unit, IAM Identit
 - one shared concurrency group, `crabhelm-fakeco`, with in-progress runs never cancelled;
 - protected `main` as the only accepted workflow ref;
 - external ECR only, using `openclaw/fakeco/crabhelm@sha256:<digest>` from the target account and Region;
-- Linux/AMD64 image compatibility before stack mutation: a single manifest must declare `os=linux` and `architecture=amd64`, while an image index must contain exactly one Linux/AMD64 child;
+- Linux/AMD64 image compatibility before stack mutation: a single manifest must declare `os=linux` and `architecture=amd64`, while an image index must contain exactly one Linux/AMD64 descriptor whose resolved child config proves the same platform;
 - `CreateEcrRepository=false` and `ProvisionService=true`; the billable `ProvisionService=false` bootstrap is invalid for FakeCo;
 - workload roles under `/openclaw/fakeco/crabhelm/`, both using the required account-owned permissions boundary;
 - one ECS task, one NAT gateway, single-AZ RDS, 20 GiB RDS with storage autoscaling disabled, one-day automated backups, RDS log export disabled, and seven-day ECS log retention;
@@ -109,7 +109,7 @@ Rendered files are mode `0600` and ignored by Git. They contain application-secr
 
 ## Manual deployment
 
-[`deploy-fakeco.yml`](../../../.github/workflows/deploy-fakeco.yml) is `workflow_dispatch` only. It refuses non-protected or non-`main` refs, renders before requesting AWS credentials, and checks the caller account and exact prerequisite identities, including the alert topic and the application secret's canonical KMS-key binding. Before CloudFormation, it reads the selected ECR manifest. For a single image it downloads only the referenced, digest-verified config blob and accepts exact `linux`/`amd64`; for an OCI or Docker index it requires exactly one Linux/AMD64 child. The presigned config URL and config document are temporary, never uploaded or printed, and no image layer is pulled. It then performs one CloudFormation deployment with:
+[`deploy-fakeco.yml`](../../../.github/workflows/deploy-fakeco.yml) is `workflow_dispatch` only. It refuses non-protected or non-`main` refs, renders before requesting AWS credentials, and checks the caller account and exact prerequisite identities, including the alert topic and the application secret's canonical KMS-key binding. Before CloudFormation, it reads the selected ECR manifest. For a single image it downloads only the referenced, digest-verified config blob and accepts exact `linux`/`amd64`; for an OCI or Docker index it requires exactly one Linux/AMD64 descriptor, fetches that digest-bound child manifest, and verifies the child's digest-bound config reports the same platform. The presigned config URL and config document are temporary, never uploaded or printed, and no image layer is pulled. It then performs one CloudFormation deployment with:
 
 - `CAPABILITY_IAM`;
 - the exact CloudFormation service-role ARN;
@@ -117,11 +117,11 @@ Rendered files are mode `0600` and ignored by Git. They contain application-secr
 - the locked parameters and tags;
 - no stack-owned ECR or `ProvisionService=false` stage.
 
-After deployment it verifies observed parameters, tags, service role, outputs, singleton ECS stability, and runtime `/healthz`. It does not create DNS, upload an appliance, seed secrets, or prove routed inference; those remain explicit installation steps.
+After deployment it verifies observed parameters, tags, service role, outputs, exactly one desired/running ECS task with no pending task or second deployment, and runtime `/healthz`. It does not create DNS, upload an appliance, seed secrets, or prove routed inference; those remain explicit installation steps.
 
 ## Manual teardown
 
-[`teardown-fakeco.yml`](../../../.github/workflows/teardown-fakeco.yml) requires the literal stack name `crabhelm-fakeco`, the separately protected `fakeco-teardown` Environment, and the same concurrency lock as deployment. Immediately before deletion it verifies the live stack against the locked profile, fetches the live original template, and cryptographically compares every retained resource block with the reviewed template and [`retained-resources.json`](retained-resources.json). A retention-policy or retained-resource drift stops deletion. If a reviewed template changes a retained block, deploy that template successfully before teardown.
+[`teardown-fakeco.yml`](../../../.github/workflows/teardown-fakeco.yml) requires the literal stack name `crabhelm-fakeco`, the separately protected `fakeco-teardown` Environment, and the same concurrency lock as deployment. Immediately before deletion it verifies the live stack against the locked profile, fetches the live original template, and cryptographically compares every retained resource block with the reviewed template and [`retained-resources.json`](retained-resources.json). The instantiated live template's retained-resource logical IDs must exactly match that manifest; conditional retained resources that were never created are ignored. A retention-policy or retained-resource drift stops deletion. If a reviewed template changes a retained block, deploy that template successfully before teardown.
 
 Deletion uses only:
 
@@ -130,7 +130,7 @@ cloudformation:DeleteStack
 deletion mode STANDARD
 ```
 
-There is no force-delete fallback and no `--retain-resources` override. If deletion protection or profile drift is observed, the workflow stops; restore the reviewed locked profile before retrying.
+There is no force-delete fallback and no `--retain-resources` override. A stack in `DELETE_FAILED` can retry the same standard deletion after the external cause is corrected; deploy verification remains stricter. If deletion protection or profile drift is observed, the workflow stops; restore the reviewed locked profile before retrying.
 
 Standard stack deletion deliberately leaves or creates:
 

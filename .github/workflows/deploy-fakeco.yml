@@ -58,6 +58,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          umask 077
           [[ "$GITHUB_REF" == "refs/heads/main" ]]
           [[ "$GITHUB_REF_PROTECTED" == "true" ]]
           node deploy/aws/fakeco/foundation.mjs validate-profile
@@ -100,32 +101,44 @@ jobs:
             --repository-name openclaw/fakeco/crabhelm \
             --image-ids "imageDigest=${FAKECO_IMAGE_URI##*@}" \
             --output json >"$RUNNER_TEMP/fakeco-ecr-manifest.json"
-          config_digest="$(node deploy/aws/fakeco/foundation.mjs image-config-digest \
-            --rendered "$RUNNER_TEMP/fakeco-rendered.json" \
-            --ecr-response "$RUNNER_TEMP/fakeco-ecr-manifest.json")"
-          if [[ -n "$config_digest" ]]; then
-            config_url="$(aws ecr get-download-url-for-layer \
+          manifest_args=(
+            --rendered "$RUNNER_TEMP/fakeco-rendered.json"
+            --ecr-response "$RUNNER_TEMP/fakeco-ecr-manifest.json"
+          )
+          image_kind="$(node deploy/aws/fakeco/foundation.mjs image-manifest-kind \
+            "${manifest_args[@]}")"
+          [[ "$image_kind" == "single" || "$image_kind" == "index" ]]
+          if [[ "$image_kind" == "index" ]]; then
+            selected_digest="$(node deploy/aws/fakeco/foundation.mjs image-selected-digest \
+              "${manifest_args[@]}")"
+            aws ecr batch-get-image \
               --registry-id "$FAKECO_AWS_ACCOUNT_ID" \
               --repository-name openclaw/fakeco/crabhelm \
-              --layer-digest "$config_digest" \
-              --query downloadUrl \
-              --output text)"
-            curl --fail --silent --show-error \
-              --max-filesize 10485760 \
-              --proto '=https' \
-              --tlsv1.2 \
-              --output "$RUNNER_TEMP/fakeco-image-config.json" \
-              "$config_url"
-            unset config_url
-            node deploy/aws/fakeco/foundation.mjs verify-image-manifest \
-              --rendered "$RUNNER_TEMP/fakeco-rendered.json" \
-              --ecr-response "$RUNNER_TEMP/fakeco-ecr-manifest.json" \
-              --config "$RUNNER_TEMP/fakeco-image-config.json"
-          else
-            node deploy/aws/fakeco/foundation.mjs verify-image-manifest \
-              --rendered "$RUNNER_TEMP/fakeco-rendered.json" \
-              --ecr-response "$RUNNER_TEMP/fakeco-ecr-manifest.json"
+              --image-ids "imageDigest=$selected_digest" \
+              --output json >"$RUNNER_TEMP/fakeco-ecr-child-manifest.json"
+            manifest_args+=(
+              --child-ecr-response "$RUNNER_TEMP/fakeco-ecr-child-manifest.json"
+            )
           fi
+          config_digest="$(node deploy/aws/fakeco/foundation.mjs image-config-digest \
+            "${manifest_args[@]}")"
+          [[ -n "$config_digest" ]]
+          config_url="$(aws ecr get-download-url-for-layer \
+            --registry-id "$FAKECO_AWS_ACCOUNT_ID" \
+            --repository-name openclaw/fakeco/crabhelm \
+            --layer-digest "$config_digest" \
+            --query downloadUrl \
+            --output text)"
+          curl --fail --silent --show-error \
+            --max-filesize 10485760 \
+            --proto '=https' \
+            --tlsv1.2 \
+            --output "$RUNNER_TEMP/fakeco-image-config.json" \
+            "$config_url"
+          unset config_url
+          node deploy/aws/fakeco/foundation.mjs verify-image-manifest \
+            "${manifest_args[@]}" \
+            --config "$RUNNER_TEMP/fakeco-image-config.json"
           [[ "$(aws acm describe-certificate \
             --certificate-arn "$FAKECO_CERTIFICATE_ARN" \
             --query 'Certificate.CertificateArn' \
@@ -177,6 +190,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          umask 077
           aws cloudformation describe-stacks \
             --stack-name crabhelm-fakeco \
             --output json >"$RUNNER_TEMP/fakeco-stack.json"
@@ -196,6 +210,17 @@ jobs:
             --query "Stacks[0].Outputs[?OutputKey==\`AlbDnsName\`].OutputValue | [0]" \
             --output text)"
           aws ecs wait services-stable --cluster "$cluster" --services "$service"
+          service_state_file="$RUNNER_TEMP/fakeco-ecs-service-state.txt"
+          aws ecs describe-services \
+            --cluster "$cluster" \
+            --services "$service" \
+            --query 'services[0].[desiredCount,runningCount,pendingCount,length(deployments)]' \
+            --output text >"$service_state_file"
+          read -r desired_count running_count pending_count deployment_count <"$service_state_file"
+          [[ "$desired_count" == "1" ]]
+          [[ "$running_count" == "1" ]]
+          [[ "$pending_count" == "0" ]]
+          [[ "$deployment_count" == "1" ]]
           curl --fail --silent --show-error \
             --connect-to "${FAKECO_RUNTIME_HOSTNAME}:443:${alb_dns}:443" \
             "https://${FAKECO_RUNTIME_HOSTNAME}/healthz" >/dev/null

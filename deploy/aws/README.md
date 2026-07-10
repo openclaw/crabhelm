@@ -97,7 +97,7 @@ docker build \
 docker push "$IMAGE_URI"
 ```
 
-External images use ECR only. Pass both the exact `ExistingEcrRepositoryArn` and an `ImageUri` ending in `@sha256:<digest>`; the image URI's account, Region, and repository must match that ARN. The stack execution role scopes layer reads to that repository. The current task runtime is `LINUX`/`X86_64`; FakeCo verifies a single image's config or exactly one Linux/AMD64 index child before starting CloudFormation. ARM64 images and migration are out of scope. Non-ECR registry credentials are not configured by this template.
+External images use ECR only. Pass both the exact `ExistingEcrRepositoryArn` and an `ImageUri` ending in `@sha256:<digest>`; the image URI's account, Region, and repository must match that ARN. The stack execution role scopes layer reads to that repository. The current task runtime is `LINUX`/`X86_64`; FakeCo verifies a single image's config or exactly one Linux/AMD64 index descriptor plus that digest-bound child's config before starting CloudFormation. ARM64 images and migration are out of scope. Non-ECR registry credentials are not configured by this template.
 
 ### Stack-owned ECR
 

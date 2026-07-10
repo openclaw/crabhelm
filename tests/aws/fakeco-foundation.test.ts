@@ -135,6 +135,30 @@ test("FakeCo verify binds the observed stack to parameters, tags, and service ro
   const rejected = runFoundation(["verify", "--rendered", renderedPath, "--stack", stackPath]);
   assert.notEqual(rejected.status, 0);
   assert.match(rejected.stderr, /observed CloudFormation service role/u);
+  assert.doesNotMatch(rejected.stderr, /arn:aws:iam/u);
+
+  const parameterDrift = stackDescription(rendered);
+  const adminEmails = parameterDrift.Stacks[0]!.Parameters.find(
+    (entry) => entry.ParameterKey === "AdminEmails",
+  );
+  assert.ok(adminEmails);
+  adminEmails.ParameterValue = "drifted-private-user@fakeco.example";
+  await writeFile(stackPath, JSON.stringify(parameterDrift), "utf8");
+  const privateRejected = runFoundation([
+    "verify", "--rendered", renderedPath, "--stack", stackPath,
+  ]);
+  assert.notEqual(privateRejected.status, 0);
+  assert.match(privateRejected.stderr, /observed stack parameter AdminEmails/u);
+  assert.doesNotMatch(privateRejected.stderr, /@fakeco\.example/u);
+
+  const deleteFailed = stackDescription(rendered);
+  deleteFailed.Stacks[0]!.StackStatus = "DELETE_FAILED";
+  await writeFile(stackPath, JSON.stringify(deleteFailed), "utf8");
+  const deployRejected = runFoundation([
+    "verify", "--rendered", renderedPath, "--stack", stackPath,
+  ]);
+  assert.notEqual(deployRejected.status, 0);
+  assert.match(deployRejected.stderr, /DELETE_FAILED is not safe/u);
 });
 
 test("FakeCo image preflight accepts only unambiguous Linux AMD64 artifacts", async (t) => {
@@ -146,6 +170,7 @@ test("FakeCo image preflight accepts only unambiguous Linux AMD64 artifacts", as
   );
   assert.equal(render.status, 0, render.stderr);
   const responsePath = path.join(directory, "ecr-response.json");
+  const childResponsePath = path.join(directory, "ecr-child-response.json");
   const configPath = path.join(directory, "image-config.json");
   const topDigest = `sha256:${"a".repeat(64)}`;
   const configBytes = JSON.stringify({ os: "linux", architecture: "amd64" });
@@ -172,6 +197,13 @@ test("FakeCo image preflight accepts only unambiguous Linux AMD64 artifacts", as
   ]);
   assert.equal(digestResult.status, 0, digestResult.stderr);
   assert.equal(digestResult.stdout, configDigest);
+  const singleKind = runFoundation([
+    "image-manifest-kind",
+    "--rendered", renderedPath,
+    "--ecr-response", responsePath,
+  ]);
+  assert.equal(singleKind.status, 0, singleKind.stderr);
+  assert.equal(singleKind.stdout, "single");
   await writeFile(configPath, configBytes, "utf8");
   const singleVerified = runFoundation([
     "verify-image-manifest",
@@ -249,17 +281,50 @@ test("FakeCo image preflight accepts only unambiguous Linux AMD64 artifacts", as
     JSON.stringify(ecrResponse(topDigest, indexMediaType, validIndex)),
     "utf8",
   );
+  const indexKind = runFoundation([
+    "image-manifest-kind",
+    "--rendered", renderedPath,
+    "--ecr-response", responsePath,
+  ]);
+  assert.equal(indexKind.status, 0, indexKind.stderr);
+  assert.equal(indexKind.stdout, "index");
+  const selectedChild = runFoundation([
+    "image-selected-digest",
+    "--rendered", renderedPath,
+    "--ecr-response", responsePath,
+  ]);
+  assert.equal(selectedChild.status, 0, selectedChild.stderr);
+  assert.equal(selectedChild.stdout, childDigest);
+  const childManifest = {
+    schemaVersion: 2,
+    mediaType: childMediaType,
+    config: {
+      mediaType: "application/vnd.oci.image.config.v1+json",
+      digest: configDigest,
+      size: 200,
+    },
+    layers: [],
+  };
+  await writeFile(
+    childResponsePath,
+    JSON.stringify(ecrResponse(childDigest, childMediaType, childManifest)),
+    "utf8",
+  );
+  await writeFile(configPath, configBytes, "utf8");
   const indexDigest = runFoundation([
     "image-config-digest",
     "--rendered", renderedPath,
     "--ecr-response", responsePath,
+    "--child-ecr-response", childResponsePath,
   ]);
   assert.equal(indexDigest.status, 0, indexDigest.stderr);
-  assert.equal(indexDigest.stdout, "");
+  assert.equal(indexDigest.stdout, configDigest);
   const indexVerified = runFoundation([
     "verify-image-manifest",
     "--rendered", renderedPath,
     "--ecr-response", responsePath,
+    "--child-ecr-response", childResponsePath,
+    "--config", configPath,
   ]);
   assert.equal(indexVerified.status, 0, indexVerified.stderr);
   assert.deepEqual(JSON.parse(indexVerified.stdout), {
@@ -268,6 +333,49 @@ test("FakeCo image preflight accepts only unambiguous Linux AMD64 artifacts", as
     os: "linux",
     architecture: "amd64",
   });
+  const missingChild = runFoundation([
+    "verify-image-manifest",
+    "--rendered", renderedPath,
+    "--ecr-response", responsePath,
+    "--config", configPath,
+  ]);
+  assert.notEqual(missingChild.status, 0);
+  assert.match(missingChild.stderr, /--child-ecr-response is required/u);
+
+  const deceptiveChildManifest = {
+    ...childManifest,
+    config: { ...childManifest.config, digest: armConfigDigest },
+  };
+  await writeFile(
+    childResponsePath,
+    JSON.stringify(ecrResponse(childDigest, childMediaType, deceptiveChildManifest)),
+    "utf8",
+  );
+  await writeFile(configPath, armConfigBytes, "utf8");
+  const deceptiveChild = runFoundation([
+    "verify-image-manifest",
+    "--rendered", renderedPath,
+    "--ecr-response", responsePath,
+    "--child-ecr-response", childResponsePath,
+    "--config", configPath,
+  ]);
+  assert.notEqual(deceptiveChild.status, 0);
+  assert.match(deceptiveChild.stderr, /os=linux and architecture=amd64/u);
+
+  await writeFile(
+    childResponsePath,
+    JSON.stringify(ecrResponse(`sha256:${"8".repeat(64)}`, childMediaType, childManifest)),
+    "utf8",
+  );
+  const wrongChildDigest = runFoundation([
+    "image-config-digest",
+    "--rendered", renderedPath,
+    "--ecr-response", responsePath,
+    "--child-ecr-response", childResponsePath,
+  ]);
+  assert.notEqual(wrongChildDigest.status, 0);
+  assert.match(wrongChildDigest.stderr, /ECR child image manifest digest/u);
+  assert.doesNotMatch(wrongChildDigest.stderr, /sha256:/u);
 
   const dockerIndexMediaType = "application/vnd.docker.distribution.manifest.list.v2+json";
   const dockerChildMediaType = "application/vnd.docker.distribution.manifest.v2+json";
@@ -284,10 +392,28 @@ test("FakeCo image preflight accepts only unambiguous Linux AMD64 artifacts", as
     JSON.stringify(ecrResponse(topDigest, dockerIndexMediaType, dockerIndex)),
     "utf8",
   );
+  const dockerChildManifest = {
+    schemaVersion: 2,
+    mediaType: dockerChildMediaType,
+    config: {
+      mediaType: "application/vnd.docker.container.image.v1+json",
+      digest: configDigest,
+      size: 200,
+    },
+    layers: [],
+  };
+  await writeFile(
+    childResponsePath,
+    JSON.stringify(ecrResponse(childDigest, dockerChildMediaType, dockerChildManifest)),
+    "utf8",
+  );
+  await writeFile(configPath, configBytes, "utf8");
   const dockerIndexVerified = runFoundation([
     "verify-image-manifest",
     "--rendered", renderedPath,
     "--ecr-response", responsePath,
+    "--child-ecr-response", childResponsePath,
+    "--config", configPath,
   ]);
   assert.equal(dockerIndexVerified.status, 0, dockerIndexVerified.stderr);
   assert.deepEqual(JSON.parse(dockerIndexVerified.stdout), {
@@ -345,7 +471,7 @@ test("FakeCo image preflight accepts only unambiguous Linux AMD64 artifacts", as
     "--ecr-response", responsePath,
   ]);
   assert.notEqual(wrongDigest.status, 0);
-  assert.match(wrongDigest.stderr, /ECR image digest/u);
+  assert.match(wrongDigest.stderr, /ECR image manifest digest/u);
   assert.doesNotMatch(wrongDigest.stderr, /sha256:/u);
 });
 
@@ -366,13 +492,14 @@ test("FakeCo teardown plan is standard-only and inventories retained resources",
   const planPath = path.join(directory, "plan.json");
   const template = await readFile(path.join(repositoryRoot, "deploy/aws/template.yaml"), "utf8");
   await writeFile(stackPath, JSON.stringify(stackDescription(rendered)), "utf8");
-  await writeFile(resourcesPath, JSON.stringify({
+  const resourcesDocument = {
     StackResources: retention.resources.map((entry) => ({
       LogicalResourceId: entry.logicalId,
       PhysicalResourceId: `physical-${entry.logicalId}`,
       ResourceType: entry.type,
     })),
-  }), "utf8");
+  };
+  await writeFile(resourcesPath, JSON.stringify(resourcesDocument), "utf8");
   await writeFile(liveTemplatePath, JSON.stringify({ TemplateBody: template }), "utf8");
 
   const result = runFoundation([
@@ -402,6 +529,20 @@ test("FakeCo teardown plan is standard-only and inventories retained resources",
   assert.ok(plan.externalPrerequisites.some((entry) =>
     entry.kind === "ecr-repository" && entry.disposition === "account-foundation-owned"));
 
+  const retryStack = stackDescription(rendered);
+  retryStack.Stacks[0]!.StackStatus = "DELETE_FAILED";
+  await writeFile(stackPath, JSON.stringify(retryStack), "utf8");
+  const retry = runFoundation([
+    "teardown-plan",
+    "--rendered", renderedPath,
+    "--stack", stackPath,
+    "--resources", resourcesPath,
+    "--template", path.join(repositoryRoot, "deploy/aws/template.yaml"),
+    "--live-template-response", liveTemplatePath,
+    "--output", path.join(directory, "retry-plan.json"),
+  ]);
+  assert.equal(retry.status, 0, retry.stderr);
+
   const driftedTemplatePath = path.join(directory, "drifted-live-template.json");
   await writeFile(driftedTemplatePath, JSON.stringify({
     TemplateBody: template.replace(
@@ -420,6 +561,50 @@ test("FakeCo teardown plan is standard-only and inventories retained resources",
   ]);
   assert.notEqual(drifted.status, 0);
   assert.match(drifted.stderr, /live retention contract differs for Database/u);
+
+  const extraTemplate = template.replace(
+    "\nOutputs:",
+    [
+      "",
+      "  UndeclaredRetained:",
+      "    Type: AWS::S3::Bucket",
+      "    DeletionPolicy: Retain",
+      "    UpdateReplacePolicy: Retain",
+      "    Properties: {}",
+      "",
+      "Outputs:",
+    ].join("\n"),
+  );
+  const extraTemplatePath = path.join(directory, "extra-template.yaml");
+  const extraLiveTemplatePath = path.join(directory, "extra-live-template.json");
+  const extraResourcesPath = path.join(directory, "extra-resources.json");
+  await writeFile(extraTemplatePath, extraTemplate, "utf8");
+  await writeFile(
+    extraLiveTemplatePath,
+    JSON.stringify({ TemplateBody: extraTemplate }),
+    "utf8",
+  );
+  await writeFile(extraResourcesPath, JSON.stringify({
+    StackResources: [
+      ...resourcesDocument.StackResources,
+      {
+        LogicalResourceId: "UndeclaredRetained",
+        PhysicalResourceId: "private-unmanifested-bucket",
+        ResourceType: "AWS::S3::Bucket",
+      },
+    ],
+  }), "utf8");
+  const unmanifested = runFoundation([
+    "teardown-plan",
+    "--rendered", renderedPath,
+    "--stack", stackPath,
+    "--resources", extraResourcesPath,
+    "--template", extraTemplatePath,
+    "--live-template-response", extraLiveTemplatePath,
+    "--output", path.join(directory, "unmanifested-plan.json"),
+  ]);
+  assert.notEqual(unmanifested.status, 0);
+  assert.match(unmanifested.stderr, /UndeclaredRetained is not declared in the manifest/u);
 });
 
 test("FakeCo workflows are manual, protected-main, isolated, pinned, and secret-read free", async () => {
@@ -450,13 +635,29 @@ test("FakeCo workflows are manual, protected-main, isolated, pinned, and secret-
   assert.doesNotMatch(deploy, /mapfile[^\n]*< <\(/u);
   assert.match(deploy, /--tags Environment=fakeco ManagedBy=github-actions Project=crabhelm/u);
   assert.match(deploy, /ecr batch-get-image/u);
+  assert.ok((deploy.match(/ecr batch-get-image/gu) ?? []).length >= 2);
   assert.match(deploy, /ecr get-download-url-for-layer/u);
+  assert.match(deploy, /image-manifest-kind/u);
+  assert.match(deploy, /image-selected-digest/u);
+  assert.match(deploy, /--child-ecr-response/u);
   assert.match(deploy, /verify-image-manifest/u);
   assert.ok(deploy.indexOf("verify-image-manifest") < deploy.indexOf("cloudformation deploy"));
   assert.match(deploy, /secret_kms_key_id="\$\(aws secretsmanager describe-secret/u);
   assert.match(deploy, /kms describe-key[\s\S]*--key-id "\$secret_kms_key_id"/u);
   assert.match(deploy, /sns get-topic-attributes/u);
   assert.ok(deploy.indexOf("sns get-topic-attributes") < deploy.indexOf("cloudformation deploy"));
+  assert.match(
+    deploy,
+    /services\[0\]\.\[desiredCount,runningCount,pendingCount,length\(deployments\)\]/u,
+  );
+  for (const check of [
+    '[[ "$desired_count" == "1" ]]',
+    '[[ "$running_count" == "1" ]]',
+    '[[ "$pending_count" == "0" ]]',
+    '[[ "$deployment_count" == "1" ]]',
+  ]) {
+    assert.ok(deploy.includes(check));
+  }
   assert.match(teardown, /environment: fakeco-teardown/u);
   assert.match(teardown, /CONFIRM_STACK_NAME: \$\{\{ inputs\.confirm_stack_name \}\}/u);
   assert.doesNotMatch(teardown, /\[\[ "\$\{\{ inputs\./u);

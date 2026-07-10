@@ -31,6 +31,10 @@ const safeStackStatuses = new Set([
   "UPDATE_COMPLETE",
   "UPDATE_ROLLBACK_COMPLETE",
 ]);
+const safeTeardownStackStatuses = new Set([
+  ...safeStackStatuses,
+  "DELETE_FAILED",
+]);
 const singleImageMediaTypes = new Set([
   "application/vnd.docker.distribution.manifest.v2+json",
   "application/vnd.oci.image.manifest.v1+json",
@@ -42,6 +46,11 @@ const imageIndexMediaTypes = new Set([
 const imageConfigMediaTypes = new Set([
   "application/vnd.docker.container.image.v1+json",
   "application/vnd.oci.image.config.v1+json",
+]);
+const retainingDeletionPolicies = new Set([
+  "Retain",
+  "RetainExceptOnCreate",
+  "Snapshot",
 ]);
 
 async function main() {
@@ -90,6 +99,8 @@ async function main() {
       }
       return;
     }
+    case "image-manifest-kind":
+    case "image-selected-digest":
     case "image-config-digest": {
       const rendered = await readJson(
         requireOption(options, "rendered"),
@@ -101,7 +112,26 @@ async function main() {
         6 * 1024 * 1024,
       );
       const inspection = inspectEcrManifest(profile, rendered, response);
-      if (inspection.kind === "single") process.stdout.write(inspection.configDigest);
+      if (command === "image-manifest-kind") {
+        process.stdout.write(inspection.kind);
+        return;
+      }
+      if (command === "image-selected-digest") {
+        process.stdout.write(inspection.selectedDigest);
+        return;
+      }
+      const configInspection = inspection.kind === "single"
+        ? inspection
+        : inspectEcrIndexChild(
+            rendered,
+            inspection,
+            await readBoundedJson(
+              requireOption(options, "child-ecr-response"),
+              "ECR child image manifest response",
+              6 * 1024 * 1024,
+            ),
+          );
+      process.stdout.write(configInspection.configDigest);
       return;
     }
     case "verify-image-manifest": {
@@ -115,21 +145,26 @@ async function main() {
         6 * 1024 * 1024,
       );
       const inspection = inspectEcrManifest(profile, rendered, response);
-      const result = inspection.kind === "single"
-        ? verifySingleImageConfig(
+      const configInspection = inspection.kind === "single"
+        ? inspection
+        : inspectEcrIndexChild(
+            rendered,
             inspection,
-            await readBoundedJsonDocument(
-              requireOption(options, "config"),
-              "container image config",
-              10 * 1024 * 1024,
+            await readBoundedJson(
+              requireOption(options, "child-ecr-response"),
+              "ECR child image manifest response",
+              6 * 1024 * 1024,
             ),
-          )
-        : {
-            kind: inspection.kind,
-            os: "linux",
-            architecture: "amd64",
-            selectedDigest: inspection.selectedDigest,
-          };
+          );
+      const result = verifyImageConfig(
+        configInspection,
+        await readBoundedJsonDocument(
+          requireOption(options, "config"),
+          "container image config",
+          10 * 1024 * 1024,
+        ),
+        inspection.kind,
+      );
       printJson({
         ok: true,
         kind: result.kind,
@@ -169,6 +204,7 @@ async function main() {
         retention,
         template,
         liveTemplateResponse,
+        resources,
       );
       const plan = buildTeardownPlan(
         profile,
@@ -190,7 +226,7 @@ async function main() {
     }
     default:
       throw new Error(
-        "usage: foundation.mjs <validate-profile|render|verify|parameter-overrides|image-config-digest|verify-image-manifest|teardown-plan> [options]",
+        "usage: foundation.mjs <validate-profile|render|verify|parameter-overrides|image-manifest-kind|image-selected-digest|image-config-digest|verify-image-manifest|teardown-plan> [options]",
       );
   }
 }
@@ -396,7 +432,7 @@ function verifyRendered(profile, rendered, stackDocument) {
   for (const definition of profile.parameterInputs) {
     validateValue(definition.kind, actualParameters.get(definition.parameter), context);
   }
-  assertEqual(
+  assertOpaqueEqual(
     actualParameters.get("ExistingEcrRepositoryArn"),
     rendered.target.ecrRepositoryArn,
     "external ECR repository identity",
@@ -425,17 +461,20 @@ function verifyStack(rendered, expectedParameters, document) {
   }
   const stack = stacks[0];
   assertEqual(stack.StackName, rendered.stackName, "observed stack name");
-  assertEqual(
+  assertOpaqueEqual(
     stack.RoleARN,
     rendered.target.cloudFormationServiceRoleArn,
     "observed CloudFormation service role",
   );
-  if (!safeStackStatuses.has(stack.StackStatus)) {
+  const allowedStatuses = rendered.phase === "teardown"
+    ? safeTeardownStackStatuses
+    : safeStackStatuses;
+  if (!allowedStatuses.has(stack.StackStatus)) {
     throw new Error(`stack status ${String(stack.StackStatus)} is not safe for this operation`);
   }
   const observedParameters = parameterMap(stack.Parameters ?? []);
   for (const [key, value] of expectedParameters) {
-    assertEqual(observedParameters.get(key), value, `observed stack parameter ${key}`);
+    assertOpaqueEqual(observedParameters.get(key), value, `observed stack parameter ${key}`);
   }
   const expectedTags = new Map(rendered.tags.map((entry) => [entry.Key, entry.Value]));
   const observedTags = new Map((stack.Tags ?? []).map((entry) => [entry.Key, entry.Value]));
@@ -587,7 +626,12 @@ function validateRetentionManifest(retention) {
   return retention.resources;
 }
 
-function verifyRetentionContract(retention, reviewedTemplate, liveTemplateResponse) {
+function verifyRetentionContract(
+  retention,
+  reviewedTemplate,
+  liveTemplateResponse,
+  resourcesDocument,
+) {
   const retentionResources = validateRetentionManifest(retention);
   requireObject(liveTemplateResponse, "live CloudFormation template response");
   const liveTemplate = liveTemplateResponse.TemplateBody;
@@ -596,6 +640,36 @@ function verifyRetentionContract(retention, reviewedTemplate, liveTemplateRespon
   }
   const reviewedBlocks = extractResourceBlocks(reviewedTemplate, "reviewed template");
   const liveBlocks = extractResourceBlocks(liveTemplate, "live template");
+  const stackResources = resourcesDocument?.StackResources;
+  if (!Array.isArray(stackResources)) throw new Error("stack resources document is invalid");
+  const manifestedLogicalIds = new Set(
+    retentionResources.map((entry) => entry.logicalId),
+  );
+  const observedLogicalIds = new Set();
+  for (const resource of stackResources) {
+    requireObject(resource, "observed stack resource");
+    const logicalId = resource.LogicalResourceId;
+    if (!/^[A-Za-z][A-Za-z0-9]+$/u.test(logicalId ?? "")) {
+      throw new Error("observed stack resource logical id is invalid");
+    }
+    if (observedLogicalIds.has(logicalId)) {
+      throw new Error(`observed stack resource ${logicalId} is duplicated`);
+    }
+    observedLogicalIds.add(logicalId);
+    const liveBlock = liveBlocks.get(logicalId);
+    if (!liveBlock) throw new Error(`live template resource ${logicalId} is missing`);
+    const deletionPolicy = optionalTopLevelResourceField(
+      liveBlock,
+      "DeletionPolicy",
+      logicalId,
+    );
+    if (
+      retainingDeletionPolicies.has(deletionPolicy) &&
+      !manifestedLogicalIds.has(logicalId)
+    ) {
+      throw new Error(`retained live resource ${logicalId} is not declared in the manifest`);
+    }
+  }
   const contractHash = createHash("sha256");
   const sortedResources = [...retentionResources]
     .sort((left, right) => left.logicalId.localeCompare(right.logicalId));
@@ -628,6 +702,7 @@ function verifyRetentionContract(retention, reviewedTemplate, liveTemplateRespon
     );
     const reviewedDigest = createHash("sha256").update(reviewedBlock).digest("hex");
     const liveDigest = createHash("sha256").update(liveBlock).digest("hex");
+    // AWS CLI v2 uploads template_str verbatim; GetTemplate Original returns that submitted YAML.
     if (liveDigest !== reviewedDigest) {
       throw new Error(`live retention contract differs for ${entry.logicalId}`);
     }
@@ -678,76 +753,41 @@ function extractResourceBlocks(template, label) {
 }
 
 function topLevelResourceField(block, field, logicalId) {
-  const expression = new RegExp(`^    ${field}:\\s*([^#\\r\\n]+?)\\s*$`, "gmu");
-  const matches = [...block.matchAll(expression)];
-  if (matches.length !== 1) {
+  const value = optionalTopLevelResourceField(block, field, logicalId);
+  if (value === undefined) {
     throw new Error(`retention resource ${logicalId} must have one ${field}`);
   }
-  return matches[0][1].trim();
+  return value;
+}
+
+function optionalTopLevelResourceField(block, field, logicalId) {
+  const expression = new RegExp(`^    ${field}:\\s*([^#\\r\\n]+?)\\s*$`, "gmu");
+  const matches = [...block.matchAll(expression)];
+  if (matches.length > 1) {
+    throw new Error(`retention resource ${logicalId} must have one ${field}`);
+  }
+  return matches.length === 0 ? undefined : matches[0][1].trim();
 }
 
 function inspectEcrManifest(profile, rendered, response) {
   verifyRendered(profile, rendered);
-  requireObject(response, "ECR image manifest response");
-  if (!Array.isArray(response.failures) || response.failures.length !== 0) {
-    throw new Error("ECR image manifest lookup reported a failure");
-  }
-  if (!Array.isArray(response.images) || response.images.length !== 1) {
-    throw new Error("ECR image manifest lookup must return exactly one image");
-  }
-  const image = response.images[0];
-  requireObject(image, "ECR image");
-  requireObject(image.imageId, "ECR image id");
   const parameters = parameterMap(rendered.parameters);
   const imageUri = parameters.get("ImageUri");
   const expectedDigest = imageUri.slice(imageUri.lastIndexOf("@") + 1);
-  const expectedRepository = rendered.target.ecrRepositoryArn.split(":repository/")[1];
-  assertOpaqueEqual(image.registryId, rendered.target.accountId, "ECR image registry account");
-  assertOpaqueEqual(image.repositoryName, expectedRepository, "ECR image repository");
-  assertOpaqueEqual(image.imageId.imageDigest, expectedDigest, "ECR image digest");
-  if (typeof image.imageManifest !== "string" || image.imageManifest.length > 5 * 1024 * 1024) {
-    throw new Error("ECR image manifest must be bounded JSON text");
+  const parsed = parseBoundEcrManifest(
+    rendered,
+    response,
+    expectedDigest,
+    "ECR image manifest",
+  );
+  if (singleImageMediaTypes.has(parsed.mediaType)) {
+    return inspectSingleManifest(parsed, expectedDigest, "container image");
   }
-  let manifest;
-  try {
-    manifest = JSON.parse(image.imageManifest);
-  } catch {
-    throw new Error("ECR image manifest is not valid JSON");
-  }
-  requireObject(manifest, "ECR image manifest");
-  assertEqual(manifest.schemaVersion, 2, "ECR image manifest schemaVersion");
-  const responseMediaType = image.imageManifestMediaType;
-  const embeddedMediaType = manifest.mediaType;
-  if (responseMediaType !== undefined && typeof responseMediaType !== "string") {
-    throw new Error("ECR image manifest media type is invalid");
-  }
-  if (embeddedMediaType !== undefined && typeof embeddedMediaType !== "string") {
-    throw new Error("embedded image manifest media type is invalid");
-  }
-  if (responseMediaType && embeddedMediaType && responseMediaType !== embeddedMediaType) {
-    throw new Error("ECR response and embedded image manifest media types disagree");
-  }
-  const mediaType = responseMediaType || embeddedMediaType;
-  if (singleImageMediaTypes.has(mediaType)) {
-    requireObject(manifest.config, "container image config descriptor");
-    if (!imageConfigMediaTypes.has(manifest.config.mediaType)) {
-      throw new Error("container image config media type is unsupported");
-    }
-    const configDigest = requireSha256Digest(
-      manifest.config.digest,
-      "container image config digest",
-    );
-    return {
-      kind: "single",
-      selectedDigest: expectedDigest,
-      configDigest,
-    };
-  }
-  if (imageIndexMediaTypes.has(mediaType)) {
-    if (!Array.isArray(manifest.manifests) || manifest.manifests.length === 0) {
+  if (imageIndexMediaTypes.has(parsed.mediaType)) {
+    if (!Array.isArray(parsed.manifest.manifests) || parsed.manifest.manifests.length === 0) {
       throw new Error("container image index has no child manifests");
     }
-    const candidates = manifest.manifests.filter((descriptor) => {
+    const candidates = parsed.manifest.manifests.filter((descriptor) => {
       if (!descriptor || typeof descriptor !== "object" || Array.isArray(descriptor)) return false;
       return descriptor.platform?.os === "linux" && descriptor.platform?.architecture === "amd64";
     });
@@ -767,21 +807,106 @@ function inspectEcrManifest(profile, rendered, response) {
         candidate.digest,
         "Linux/AMD64 child manifest digest",
       ),
+      selectedMediaType: candidate.mediaType,
     };
   }
   throw new Error("container image manifest media type is unsupported");
 }
 
-function verifySingleImageConfig(inspection, document) {
+function inspectEcrIndexChild(rendered, indexInspection, response) {
+  if (indexInspection.kind !== "index") {
+    throw new Error("child image inspection requires an image index");
+  }
+  const parsed = parseBoundEcrManifest(
+    rendered,
+    response,
+    indexInspection.selectedDigest,
+    "ECR child image manifest",
+  );
+  if (!singleImageMediaTypes.has(parsed.mediaType)) {
+    throw new Error("Linux/AMD64 child did not resolve to a single image manifest");
+  }
+  assertOpaqueEqual(
+    parsed.mediaType,
+    indexInspection.selectedMediaType,
+    "Linux/AMD64 child manifest media type",
+  );
+  return inspectSingleManifest(
+    parsed,
+    indexInspection.selectedDigest,
+    "Linux/AMD64 child image",
+  );
+}
+
+function parseBoundEcrManifest(rendered, response, expectedDigest, label) {
+  requireObject(response, "ECR image manifest response");
+  if (!Array.isArray(response.failures) || response.failures.length !== 0) {
+    throw new Error(`${label} lookup reported a failure`);
+  }
+  if (!Array.isArray(response.images) || response.images.length !== 1) {
+    throw new Error(`${label} lookup must return exactly one image`);
+  }
+  const image = response.images[0];
+  requireObject(image, label);
+  requireObject(image.imageId, `${label} id`);
+  const expectedRepository = rendered.target.ecrRepositoryArn.split(":repository/")[1];
+  assertOpaqueEqual(image.registryId, rendered.target.accountId, `${label} registry account`);
+  assertOpaqueEqual(image.repositoryName, expectedRepository, `${label} repository`);
+  assertOpaqueEqual(image.imageId.imageDigest, expectedDigest, `${label} digest`);
+  if (typeof image.imageManifest !== "string" || image.imageManifest.length > 5 * 1024 * 1024) {
+    throw new Error(`${label} must be bounded JSON text`);
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(image.imageManifest);
+  } catch {
+    throw new Error(`${label} is not valid JSON`);
+  }
+  requireObject(manifest, label);
+  assertEqual(manifest.schemaVersion, 2, `${label} schemaVersion`);
+  const responseMediaType = image.imageManifestMediaType;
+  const embeddedMediaType = manifest.mediaType;
+  if (responseMediaType !== undefined && typeof responseMediaType !== "string") {
+    throw new Error(`${label} media type is invalid`);
+  }
+  if (embeddedMediaType !== undefined && typeof embeddedMediaType !== "string") {
+    throw new Error(`embedded ${label} media type is invalid`);
+  }
+  if (responseMediaType && embeddedMediaType && responseMediaType !== embeddedMediaType) {
+    throw new Error(`ECR response and embedded ${label} media types disagree`);
+  }
+  const mediaType = responseMediaType || embeddedMediaType;
+  if (!singleImageMediaTypes.has(mediaType) && !imageIndexMediaTypes.has(mediaType)) {
+    throw new Error(`${label} media type is unsupported`);
+  }
+  return { manifest, mediaType };
+}
+
+function inspectSingleManifest(parsed, selectedDigest, label) {
+  requireObject(parsed.manifest.config, `${label} config descriptor`);
+  if (!imageConfigMediaTypes.has(parsed.manifest.config.mediaType)) {
+    throw new Error(`${label} config media type is unsupported`);
+  }
+  return {
+    kind: "single",
+    selectedDigest,
+    configDigest: requireSha256Digest(
+      parsed.manifest.config.digest,
+      `${label} config digest`,
+    ),
+  };
+}
+
+function verifyImageConfig(inspection, document, outputKind) {
   const actualDigest = `sha256:${createHash("sha256").update(document.bytes).digest("hex")}`;
   assertOpaqueEqual(actualDigest, inspection.configDigest, "container image config digest");
   const config = document.value;
   requireObject(config, "container image config");
   if (config.os !== "linux" || config.architecture !== "amd64") {
-    throw new Error("single container image must declare os=linux and architecture=amd64");
+    throw new Error("container image config must declare os=linux and architecture=amd64");
   }
   return {
-    kind: inspection.kind,
+    kind: outputKind,
     os: config.os,
     architecture: config.architecture,
     selectedDigest: inspection.selectedDigest,
@@ -823,7 +948,7 @@ function validateValue(kind, value, context) {
       const expected = context.profile.cloudFormationArtifactBucketPattern
         .replace("{accountId}", context.accountId)
         .replace("{region}", context.region);
-      assertEqual(value, expected, "FakeCo CloudFormation artifact bucket");
+      assertOpaqueEqual(value, expected, "FakeCo CloudFormation artifact bucket");
       return value;
     }
     case "workloadPermissionsBoundaryArn":
@@ -835,7 +960,7 @@ function validateValue(kind, value, context) {
       );
     case "ecrRepositoryArn": {
       const expected = `arn:aws:ecr:${context.region}:${context.accountId}:repository/${context.profile.ecrRepositoryName}`;
-      assertEqual(value, expected, "FakeCo ECR repository ARN");
+      assertOpaqueEqual(value, expected, "FakeCo ECR repository ARN");
       return value;
     }
     case "certificateArn":
@@ -911,7 +1036,7 @@ function validateImageMatchesRepository(imageUri, repositoryArn, context) {
 
 function exactIamArn(value, context, resourceType, resourcePath) {
   const expected = `arn:aws:iam::${context.accountId}:${resourceType}/${resourcePath}`;
-  assertEqual(value, expected, `FakeCo ${resourceType} ARN`);
+  assertOpaqueEqual(value, expected, `FakeCo ${resourceType} ARN`);
   return value;
 }
 
@@ -1086,7 +1211,7 @@ function assertEqual(actual, expected, label) {
 
 function assertOpaqueEqual(actual, expected, label) {
   if (actual !== expected) {
-    throw new Error(`${label} does not match the rendered FakeCo selection`);
+    throw new Error(`${label} does not match the verified FakeCo selection`);
   }
 }
 
