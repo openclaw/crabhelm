@@ -41,7 +41,8 @@ function validEnvironment(): Record<string, string> {
     CRABBOX_TTL_SECONDS: "14400",
     CRABBOX_IDLE_TIMEOUT_SECONDS: "7200",
     CRABHELM_EGRESS_LOCKDOWN: "required",
-    CRABHELM_MODEL_PROXY: "off",
+    CRABHELM_CLAWROUTER: "off",
+    CRABHELM_PROMETHEUS: "off",
     NODE_RUNTIME_SHA256: digestA,
     APPLIANCE_ARCHIVE_SHA256: digestB,
     APPLIANCE_MANIFEST_SHA256: digestC,
@@ -93,8 +94,8 @@ test("AWS config validates and normalizes the complete production environment", 
     adminGroups: ["platform", "operators"],
   });
   assert.equal(config.controlPlane.CRABHELM_PROBE_EMAIL, "probe@example.com");
-  assert.equal(config.controlPlane.CRABHELM_MODEL_PROXY, "off");
-  assert.equal(config.controlPlane.MODEL_SIGNING_SECRET, undefined);
+  assert.equal(config.controlPlane.CRABHELM_CLAWROUTER, "off");
+  assert.equal(config.controlPlane.CLAWROUTER_ADMIN_TOKEN, undefined);
 });
 
 test("AWS config rejects missing required values without exposing other secrets", () => {
@@ -132,7 +133,7 @@ test("AWS config enforces HTTPS host separation and OIDC identity", () => {
   assert.throws(() => loadAwsConfig(noAdministrator), /at least one access administrator/u);
 });
 
-test("AWS config validates secrets, vault material, and model-proxy admission", () => {
+test("AWS config validates secrets, vault material, and ClawRouter admission", () => {
   const shortSigningSecret = validEnvironment();
   shortSigningSecret.RUNTIME_SIGNING_SECRET = "short";
   assert.throws(() => loadAwsConfig(shortSigningSecret), /RUNTIME_SIGNING_SECRET must contain at least 32 bytes/u);
@@ -141,14 +142,29 @@ test("AWS config validates secrets, vault material, and model-proxy admission", 
   badVaultKey.VAULT_MASTER_KEY = Buffer.alloc(31).toString("base64url");
   assert.throws(() => loadAwsConfig(badVaultKey), /VAULT_MASTER_KEY must encode exactly 32 bytes/u);
 
-  const missingModelSecret = validEnvironment();
-  missingModelSecret.CRABHELM_MODEL_PROXY = "on";
-  assert.throws(() => loadAwsConfig(missingModelSecret), /MODEL_SIGNING_SECRET is required/u);
+  const missingRouterSecret = validEnvironment();
+  missingRouterSecret.CRABHELM_CLAWROUTER = "on";
+  assert.throws(() => loadAwsConfig(missingRouterSecret), /CLAWROUTER_BASE_URL is required/u);
 
-  const enabledModelProxy = validEnvironment();
-  enabledModelProxy.CRABHELM_MODEL_PROXY = "on";
-  enabledModelProxy.MODEL_SIGNING_SECRET = "m".repeat(48);
-  assert.equal(loadAwsConfig(enabledModelProxy).controlPlane.MODEL_SIGNING_SECRET, "m".repeat(48));
+  const enabledClawRouter = validEnvironment();
+  enabledClawRouter.CRABHELM_CLAWROUTER = "on";
+  enabledClawRouter.CLAWROUTER_BASE_URL = "https://clawrouter.example.com";
+  enabledClawRouter.CLAWROUTER_TENANT_ID = "fakeco";
+  enabledClawRouter.CLAWROUTER_ALLOWED_PROVIDERS = "openai,anthropic";
+  enabledClawRouter.CLAWROUTER_DEFAULT_MODEL = "clawrouter/openai/gpt-5.5";
+  enabledClawRouter.CLAWROUTER_ADMIN_TOKEN = "router";
+  enabledClawRouter.CLAWROUTER_CREDENTIAL_SECRET = "r".repeat(48);
+  const routerConfig = loadAwsConfig(enabledClawRouter).controlPlane;
+  assert.equal(routerConfig.CLAWROUTER_BASE_URL, "https://clawrouter.example.com");
+  assert.equal(routerConfig.CLAWROUTER_ALLOWED_PROVIDERS, "anthropic,openai");
+  assert.equal(routerConfig.OPENAI_API_KEY, undefined);
+
+  const prometheus = validEnvironment();
+  prometheus.CRABHELM_PROMETHEUS = "on";
+  prometheus.METRICS_BEARER_TOKEN = "m".repeat(48);
+  assert.equal(loadAwsConfig(prometheus).controlPlane.METRICS_BEARER_TOKEN, "m".repeat(48));
+  prometheus.METRICS_BEARER_TOKEN = "short";
+  assert.throws(() => loadAwsConfig(prometheus), /METRICS_BEARER_TOKEN must contain at least 32 bytes/u);
 });
 
 test("AWS config validates resource identity and target policy", () => {

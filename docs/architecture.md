@@ -45,9 +45,17 @@ PostgreSQL on RDS stores organization state and per-claw coordinator records. Tr
 
 The ECS service intentionally has a desired count of one. Deployment stops the old task before starting its replacement, and runtime bridges reconnect after the socket closes. More than one task is unsupported until coordinator ownership, cross-task signaling, and socket routing are distributed. See the [AWS deployment guide](../deploy/aws/README.md).
 
+## ClawRouter inference boundary
+
+ClawRouter is a separate installation, not another Crabhelm backend or an embedded proxy. Crabhelm owns per-claw desired inference policy and lifecycle; ClawRouter owns upstream provider credentials, catalog/routing, budget enforcement, and inference execution. The two services must not share control-plane state, signing material, or upstream secrets.
+
+For each routed claw, Crabhelm deterministically derives a stable policy/credential id from the child UUID. Reconciliation uses ClawRouter's OpenAI-compatible administrative contract to upsert an enabled provider/tenant/budget policy with request-content retention disabled, then registers only the SHA-256 hash of an epoch-derived credential suffix. The complete `clawrouter-live-<credential-id>-<secret>` token is delivered only through that child's authenticated bootstrap path. Credential rotation advances the claw epoch, registers the replacement hash first, reinstalls the child credential, and invalidates prior readiness proof.
+
+Observed inference state is a bounded projection of ClawRouter health, credential scope, catalog availability, configured model, budget, and aggregate usage counters. Crabhelm does not retain ClawRouter event records or any prompt, completion, message, tool output, credential, or upstream body. A routed claw becomes ready only after the Gateway reports the exact `models.providers.clawrouter.baseUrl`, the exact `clawrouter/<provider>/<model>` desired model, and a live inference challenge succeeds through that configuration.
+
 ## Identity-aware ingress and invocation
 
-Browser ingress is protected by Cloudflare Access on Cloudflare or ALB OIDC on AWS. The control-plane service serves console APIs and assets only on the configured HTTPS console origin, rejects cross-site browser mutations before forwarding, and verifies the backend identity assertion before resolving a canonical email principal. Runtime APIs, Slack ingress, model proxy traffic, and private bootstrap delivery are accepted only on the separate configured HTTPS runtime origin. There is no shared operator bearer.
+Browser ingress is protected by Cloudflare Access on Cloudflare or ALB OIDC on AWS. The control-plane service serves console APIs and assets only on the configured HTTPS console origin, rejects cross-site browser mutations before forwarding, and verifies the backend identity assertion before resolving a canonical email principal. Runtime APIs, Slack ingress, private bootstrap delivery, and the optional authenticated Prometheus endpoint are accepted only on the separate configured HTTPS runtime origin. There is no shared operator bearer.
 
 Non-interactive fleet administration uses a named Cloudflare service-binding RPC entrypoint. It is reachable only by another Worker explicitly bound inside the Cloudflare account, exposes a narrow state/persona/runtime/removal surface, and injects the same administrator role and audit principal used by the control plane. It is not routed to a public hostname and does not accept a bearer token. Its production probe posts a labeled Slack parent, routes an encrypted turn through the bound persona and remote runtime, then reports metadata-only execution and delivery status.
 
@@ -95,8 +103,8 @@ The production adapter uses a deployment-specific Crabbox control URL and target
 1. Registry persists desired state and stable child UUID.
 2. Crabbox creates `crabhelm-<slug>` with an idempotency key equal to that workspace id.
 3. The workspace fetches a private installer from Crabhelm using its deterministic HMAC token.
-4. Installer verifies the manifest and every artifact, activates child-local model/runtime credentials, writes the exact desired model, starts a loopback-only OpenClaw Gateway, installs the runtime-bridge launcher, and writes a Gateway readiness marker.
-5. Reconciliation attaches through Crabbox, requires exact terminal sentinel lines, writes the exact desired model again, restarts the Gateway, and runs a real `openclaw agent` turn.
+4. Installer verifies the manifest and every artifact, activates child-local model/runtime credentials, writes the exact desired model and optional ClawRouter origin, starts a loopback-only OpenClaw Gateway, installs the runtime-bridge launcher, and writes a Gateway readiness marker.
+5. Reconciliation attaches through Crabbox, requires exact terminal sentinel lines, writes the exact desired model and router origin again, restarts the Gateway, and runs a real `openclaw agent` turn.
 6. Only the exact expected model response starts the runtime bridge and creates the inference marker. The bridge exchanges its ten-minute workload credential through the redacted authorization header for a 30-second, one-use connection ticket. Only that consumed ticket enters the WebSocket subprotocol; the workload credential rotates through a separate one-use mint fence with encrypted idempotent response replay.
 
 Allocation, echoed command text, HTTP success, and a process existing are not sufficient readiness evidence.
@@ -105,9 +113,9 @@ Allocation, echoed command text, HTTP success, and a process existing are not su
 
 One claw equals one provider resource, OpenClaw Gateway, state root, credential file, session store, memory, and OS identity. The control plane stores lifecycle identifiers, desired policy, bounded health evidence, and audit metadata. It does not store prompts, model replies, messages, tool output, child credentials, or opaque upstream bodies.
 
-Crabbox credentials, Slack credentials, GitHub OAuth client secret, bootstrap/session/invocation/runtime signing secrets, the OAuth vault master key, and model credentials are backend-managed secrets: Worker secrets on Cloudflare and Secrets Manager values injected into ECS on AWS. Control-plane users authenticate through Cloudflare Access or ALB OIDC; there is no shared operator-token bypass. Only model and audience-bound runtime credentials enter a child. Child credential delivery is scoped by the HMAC bootstrap token and occurs only during appliance installation. Admission closes unless all required signing and vault material passes local shape checks.
+Crabbox credentials, Slack credentials, GitHub OAuth client secret, bootstrap/session/invocation/runtime signing secrets, the OAuth vault master key, and inference-control credentials are backend-managed secrets: Worker secrets on Cloudflare and Secrets Manager values injected into ECS on AWS. Control-plane users authenticate through Cloudflare Access or ALB OIDC; there is no shared operator-token bypass. In direct mode the configured model credential enters the child. In ClawRouter mode only the child's scoped router credential enters it; the ClawRouter admin credential and upstream provider secrets do not. Child credential delivery is scoped by the HMAC bootstrap token and occurs only during appliance installation. Admission closes unless all required signing and vault material passes local shape checks.
 
-Model credentials still use the fixed bootstrap path because OpenClaw itself calls the model backend. Provider-tool OAuth credentials use the governed vault and never enter the claw. The current GitHub broker and wrapper share one control-plane trust boundary; splitting the broker into a separate workload-identity service is optional hardening for additional high-risk providers.
+Inference credentials still use the fixed bootstrap path because OpenClaw itself calls the configured inference boundary. Provider-tool OAuth credentials use the governed vault and never enter the claw. The current GitHub broker and wrapper share one control-plane trust boundary; splitting the broker into a separate workload-identity service is optional hardening for additional high-risk providers.
 
 ## Removal
 

@@ -47,7 +47,6 @@ Required Worker secrets:
 ```text
 BOOTSTRAP_SIGNING_SECRET
 CRABBOX_TOKEN
-OPENAI_API_KEY
 SESSION_SIGNING_SECRET
 INVOCATION_SIGNING_SECRET
 RUNTIME_SIGNING_SECRET
@@ -57,11 +56,11 @@ SLACK_BOT_TOKEN
 GITHUB_OAUTH_CLIENT_SECRET
 ```
 
-Signing secrets must contain at least 32 bytes. `VAULT_MASTER_KEY` is a base64url-encoded 32-byte AES key. `MODEL_SIGNING_SECRET` (≥32 bytes) is additionally required only when the edge model proxy is enabled (`CRABHELM_MODEL_PROXY=on`).
+Signing secrets must contain at least 32 bytes. `VAULT_MASTER_KEY` is a base64url-encoded 32-byte AES key. Direct inference (`CRABHELM_CLAWROUTER=off`) also requires `OPENAI_API_KEY`. A ClawRouter fleet (`CRABHELM_CLAWROUTER=on`) instead requires `CLAWROUTER_ADMIN_TOKEN` and a fleet-local `CLAWROUTER_CREDENTIAL_SECRET` of at least 32 bytes; add the `CLAWROUTER_ACCESS_CLIENT_ID` and `CLAWROUTER_ACCESS_CLIENT_SECRET` pair when the separate ClawRouter installation is protected by Cloudflare Access. `CRABHELM_PROMETHEUS=on` additionally requires `METRICS_BEARER_TOKEN` of at least 32 bytes.
 
 `GITHUB_OAUTH_CLIENT_ID`, `CRABHELM_PROBE_EMAIL`, and Cloudflare Access team/audience settings are non-secret production Worker variables. Slack sends signed events to `${RUNTIME_URL}/slack/events` and interactions to `${RUNTIME_URL}/slack/interactions`. The GitHub OAuth callback is `${PUBLIC_URL}/api/oauth/github/callback`. Use `wrangler secret put NAME --config wrangler.production.jsonc`; never place secret values in `wrangler.jsonc`, `.dev.vars`, logs, or registry state.
 
-After rotating a delivered secret (for example `OPENAI_API_KEY`), bump the affected claw's credential epoch with the **Rotate credentials** drawer button or `POST /api/claws/<id>/rotate-credentials`. The claw performs one release-pinned in-place reinstall that re-fetches `credentials.env`, then must pass the live inference probe again before it reports ready.
+After rotating a delivered secret, bump the affected claw's credential epoch with the **Rotate credentials** drawer button or `POST /api/claws/<id>/rotate-credentials`. The claw performs one release-pinned in-place reinstall that re-fetches the epoch-bound `credentials.env`, then must pass the live inference probe again before it reports ready. In ClawRouter mode the control plane registers the new credential hash before delivering the derived child token; upstream provider secrets remain exclusively in ClawRouter.
 
 Build and upload a reviewed appliance after guest-profile changes:
 
@@ -96,11 +95,15 @@ pnpm dev
 
 Open <http://127.0.0.1:4177>. Local development uses an explicitly labeled simulator. Production Cloudflare and AWS configurations always use the real Crabbox adapter.
 
-## Edge model proxy (experimental)
+## ClawRouter inference
 
-By default a claw is delivered the raw `OPENAI_API_KEY`. Setting `CRABHELM_MODEL_PROXY` to `on` (and configuring the `MODEL_SIGNING_SECRET` secret) instead delivers a per-claw, audience-bound model token plus an edge base URL, and reroutes the child's OpenClaw OpenAI provider through `${RUNTIME_URL}/model/v1`. The control plane verifies the token, strips the caller's authorization, injects the real provider key, and forwards to a single fixed upstream over an allowlisted set of endpoints. The raw provider key never reaches the agent VM, and each claw's access is independently scoped and bounded to its substrate lifetime rather than sharing one fleet-wide credential.
+Set `CRABHELM_CLAWROUTER=on` to make the separately installed ClawRouter service the canonical inference boundary. Configure its exact HTTPS origin, tenant, provider allowlist, and fleet default with `CLAWROUTER_BASE_URL`, `CLAWROUTER_TENANT_ID`, `CLAWROUTER_ALLOWED_PROVIDERS`, and `CLAWROUTER_DEFAULT_MODEL`. Models use the explicit `clawrouter/<provider>/<model>` form. Each claw receives immutable desired router metadata, a stable `crabhelm_<uuid>` policy/credential identity, its selected primary/fallback models, and optional monthly budget.
 
-This is experimental and default-off. First enablement requires an appliance built from this version; after that appliance is pinned, change modes by rotating each claw's credential epoch so the managed provider base URL and credential are reinstalled together. The proxy continues accepting previously issued model tokens while new issuance is off, allowing a rolling rollback; keep `MODEL_SIGNING_SECRET` configured through the longest previously issued token lifetime (four hours by default, at most 24 hours). Confirm the existing live inference probe on staging before enabling in production.
+During reconciliation Crabhelm upserts that claw's ClawRouter policy with content retention disabled, registers only the SHA-256 hash of an epoch-derived credential suffix, and delivers the complete scoped token only to the child. The ClawRouter admin credential and all upstream provider credentials never enter bootstrap output, registry state, logs, or the child. The control plane then verifies `/v1/health`, `/v1/key/inspect`, `/v1/catalog`, and bounded `/v1/usage` metadata. Readiness additionally requires the child to report the exact desired ClawRouter base URL and complete a live `openclaw agent` challenge using the exact `clawrouter/...` model; direct OpenAI completion cannot satisfy this proof.
+
+The console and API expose desired versus observed router/model/provider identities, credential epoch, router and catalog health, live-route verification, Gateway/runtime readiness, budget, and aggregate request/token/cost counters. The existing bounded runtime diagnostics endpoint exposes only redacted sentinel/log summaries. This integration does not add a Crabhelm-owned inference proxy: Crabhelm and ClawRouter remain separate installations with separate state and secrets.
+
+Treat the fleet router origin, tenant, provider allowlist, and credential-derivation secret as installation identity. Existing claws fail closed if their persisted desired router no longer matches those settings; move a disposable fleet or use a reviewed migration rather than changing them in place. Routine scoped-token rotation uses each claw's credential epoch and does not rotate the fleet derivation secret.
 
 ## Managed OpenTelemetry
 
@@ -124,6 +127,8 @@ Administrators can set per-claw trace and metric export through `PATCH /api/claw
 
 The current contract intentionally has no collector-auth header field; use an approved authenticated network endpoint or gateway rather than putting credentials in the URL. Enabling this for the first time requires an appliance containing the pinned offline `diagnostics-otel` plugin.
 
+For pull-based fleet health, set `CRABHELM_PROMETHEUS=on` and request `GET /metrics` on the runtime host with `Authorization: Bearer <METRICS_BEARER_TOKEN>`. The Prometheus-compatible response contains aggregate lifecycle phase, Gateway readiness, route-verification, request, token, and cost numbers only. It has no per-claw labels, prompts, completions, messages, tool output, diagnostic text, or credential material.
+
 ## Testing
 
 `pnpm check` runs build and type checks plus the Node, AWS adapter, and Worker test tiers. `pnpm test` runs the fast Node domain suite (`node:test`). Tests under `tests/aws/` cover AWS identity, configuration, storage, PostgreSQL state, and coordinator behavior. `pnpm test:workers` runs the Worker and both Durable Objects inside workerd via `@cloudflare/vitest-pool-workers` (`tests/workers/`), covering router host-splitting, the Access auth gate, SQLite-backed control-plane state, and the hibernatable runtime-bridge reconnect path against the real runtime.
@@ -139,7 +144,7 @@ The current contract intentionally has no collector-auth header field; use an ap
 - Runtime turns, credential rotation, health, and reconnect use one authenticated outbound WebSocket to a per-claw coordinator (a Durable Object on Cloudflare or transactionally persisted PostgreSQL state on AWS); reset generations abort active process groups, and persona-bound job payloads remain encrypted at rest.
 - The owner-only runtime workload credential is audience-bound, expires after ten minutes, rotates through a one-use mint fence with encrypted idempotent response replay, and is never inherited by model/tool processes; persistence permits bridge crash and host restart recovery.
 - The OpenClaw Gateway runs as a dedicated unprivileged service account. A root-owned nftables service restricts its workspace to loopback, DNS, NTP, DHCP, and TCP 443, blocks cloud instance metadata before credentials land, and must pass live-rule verification before readiness. Enforcement is fail-closed by default; `CRABHELM_EGRESS_LOCKDOWN=off` is an explicit operational escape hatch.
-- With the edge model proxy enabled the agent never holds the raw provider key: it presents a per-claw, audience-bound model token that the control-plane service exchanges for the real key against a single fixed, endpoint-allowlisted upstream.
+- With ClawRouter enabled the agent holds only its epoch-scoped ClawRouter token. Crabhelm registers only its hash, while the separate ClawRouter installation owns upstream provider credentials, routing, and inference enforcement.
 - Removal remains evidence-driven: disable ingress, drain active work, release the exact provider identity, confirm absence, then revoke the exact control link.
 
 See [architecture](docs/architecture.md), [product contract](docs/product.md), the [AWS deployment guide](deploy/aws/README.md), and the [Crabbox appliance profile](deploy/crabbox-profile/README.md) for implementation detail and the identity-aware execution contract.

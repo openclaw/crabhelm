@@ -48,9 +48,11 @@ Each meaningful decision records timestamp, requester, persona, selected actor, 
 
 ## Operator flow
 
-Authenticate through the configured operator identity layer (Cloudflare Access or ALB OIDC) → choose a fixed placement target → choose intended user metadata and inference policy → create → watch provider, Gateway, model-auth, and outbound runtime evidence converge → bind an approved Slack conversation to its persona.
+Authenticate through the configured operator identity layer (Cloudflare Access or ALB OIDC) → choose a fixed placement target → choose intended user metadata and inference policy → create → watch provider, Gateway, desired/observed router and model, model-auth, and outbound runtime evidence converge → bind an approved Slack conversation to its persona.
 
 The intended user is materialized as a principal and personal persona. Slack requester identities merge with console identities by canonical email. The organization Slack token remains in the control plane and never becomes a child credential or OAuth grant.
+
+For ClawRouter fleets, the drawer shows the desired origin, tenant-scoped policy and credential ids, allowed providers, model, and credential epoch beside observed router health, credential scope, catalog readiness, exact-model route proof, budget, and aggregate request/token/cost counters. Operators may fetch a bounded runtime diagnostic summary through the authenticated API; it is redacted before persistence and never includes prompts, completions, messages, tool output, or credentials.
 
 ## Readiness
 
@@ -60,6 +62,7 @@ The console separates provider allocation, control link, Gateway version, policy
 - child Gateway readiness marker exists;
 - desired model is written into child config;
 - a live `openclaw agent` turn returns the expected answer through that model;
+- when ClawRouter is configured, the child reports the exact desired ClawRouter base URL and `clawrouter/<provider>/<model>` identity, ClawRouter reports matching credential scope/catalog health, and the live turn succeeds through that route;
 - desired and observed policy generations agree;
 - any enabled channel has live evidence from an adapter capable of supplying it.
 
@@ -79,7 +82,11 @@ Policies are immutable versions of managed fields: primary/fallback inference mo
 
 Credentials, OAuth state, pairing, sessions, memory, and agent directories are outside managed policy.
 
+In a ClawRouter fleet every claw has first-class desired router state derived from the fleet origin, tenant, and provider allowlist plus the claw's models and optional budget. Crabhelm owns the per-claw policy/credential lifecycle and credential epoch; the separate ClawRouter installation owns upstream provider secrets and inference. Rotating an epoch derives a replacement scoped child credential, registers only its hash, and requires a fresh routed-inference proof.
+
 Per-claw observability may export traces and metrics to one administrator-managed HTTPS OTLP base endpoint through the pinned `diagnostics-otel` plugin; Crabhelm appends the standard `/v1/traces` and `/v1/metrics` signal paths. Endpoint, service name, signals, sample rate, and flush interval are versioned desired state. OTLP log export remains disabled under the metadata-only contract.
+
+An installation may also expose authenticated Prometheus-compatible fleet metrics on the runtime host. Those metrics are aggregate and metadata-only: lifecycle phase counts, Gateway readiness, routed-inference proof count, and ClawRouter request/token/cost counters, without per-claw labels or content.
 
 ## Removal
 
@@ -90,12 +97,14 @@ Typed-name confirmation starts a staged removal. Crabhelm disables ingress, veri
 - Alternative control-plane deployments: the reference Cloudflare Worker, Durable Object, R2, Queue, and Access stack; or a separate singleton ECS/Fargate, ALB, PostgreSQL RDS, S3, SQS, and ALB OIDC stack on AWS.
 - Real Crabbox allocation and deletion.
 - Pinned OpenClaw `2026.6.11` install with exact-model live inference proof.
+- Optional first-class ClawRouter policies, epoch-scoped child credentials, desired/observed route health, bounded usage metadata, and exact-route live inference proof; deployment-specific live proof is still required.
 - Signed central Slack ingress with DM/app-mention events, persona bindings, threaded delivery, and one-click confirmations.
 - GitHub organization import remains disabled in the Cloudflare runtime.
 - Backend-native operator authentication through verified Cloudflare Access JWTs or signed ALB OIDC assertions, with signed principal sessions retained for operations.
 - GitHub OAuth authorization-code connection, repository/issue reads, and confirmed issue comments through the controlled wrapper.
 - Per-claw encrypted turn queues, short-lived credential rotation, health, and reconnect over one authenticated outbound WebSocket; no tunnel or inbound child service.
 - AES-GCM OAuth vault, per-claw one-use grant coordination, backend-queue audit archive, and read-only managed runtime specification.
+- Metadata-only OTLP trace/metric configuration and an optional authenticated Prometheus-compatible fleet endpoint.
 
 ## Remaining production expansion
 

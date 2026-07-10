@@ -1,6 +1,6 @@
 # `openclaw-core` appliance contract
 
-The appliance creates one isolated OpenClaw core inside a deployment-adapter workspace. Cloudflare hosts Crabhelm; the child has no inbound control-plane tunnel and exposes no public Gateway port.
+The appliance creates one isolated OpenClaw core inside a deployment-adapter workspace. The selected Cloudflare or AWS backend hosts Crabhelm; the child has no inbound control-plane tunnel and exposes no public Gateway port.
 
 ## Fixed inputs
 
@@ -11,7 +11,7 @@ The installer receives:
 - the reviewed manifest and archive SHA-256 release identity plus the manifest's bootstrap-Node SHA-256;
 - child UUID;
 - exact desired inference model;
-- an owner-only credential file with `OPENAI_API_KEY`, child id, control URL, and audience-bound runtime token;
+- an owner-only credential file with exactly one inference credential (`OPENAI_API_KEY` in direct mode or `CLAWROUTER_API_KEY` plus `CRABHELM_ROUTER_BASE_URL` in routed mode), child id, control URL, and audience-bound runtime token;
 - verified OpenClaw, Crabhelm, Slack, `diagnostics-otel`, bootstrap, and installer artifacts.
 
 ## Installation
@@ -20,11 +20,11 @@ Before any credential is fetched, the control-plane installer applies an outboun
 
 `guest-install.sh` verifies the manifest contract and every artifact digest before installing anything. Privileged npm runs through an empty environment. The installer activates credentials only after packages and plugins are installed, then delegates to `bootstrap-child.sh`.
 
-`bootstrap-child.sh` writes the exact model, plugin allowlist, child UUID, loopback Gateway mode, auth mode, and optional metadata-only OTLP policy. In Cloudflare standalone mode it starts the local Gateway and installs a private idempotent runtime-bridge launcher, then writes the complete manifest/archive/Node release identity plus managed bootstrap-policy hash to `~/.openclaw/crabhelm-ready` after `/readyz` succeeds. Legacy outbound node enrollment remains available only when standalone mode is off.
+`bootstrap-child.sh` writes the exact model, plugin allowlist, child UUID, loopback Gateway mode, auth mode, optional ClawRouter provider origin, and optional metadata-only OTLP policy. In standalone mode it starts the local Gateway and installs a private idempotent runtime-bridge launcher, then writes the complete manifest/archive/Node release identity plus managed bootstrap-policy hash to `~/.openclaw/crabhelm-ready` after `/readyz` succeeds. Legacy outbound node enrollment remains available only when standalone mode is off.
 
 ## Live proof
 
-The Cloudflare adapter attaches through Crabbox's authenticated server-to-server terminal and accepts only exact sentinel lines. After the Gateway marker appears, it runs from the selected digest-specific Node runtime, writes the exact desired model, restarts the Gateway, runs a bounded `openclaw agent` turn, requires the expected response, starts the outbound runtime bridge, then writes the complete release identity and model to `~/.openclaw/crabhelm-inference-ready`.
+The control-plane adapter attaches through Crabbox's authenticated server-to-server terminal and accepts only exact sentinel lines. After the Gateway marker appears, it runs from the selected digest-specific Node runtime, writes the exact desired model and optional ClawRouter origin, restarts the Gateway, runs a bounded `openclaw agent` turn, requires the expected response, starts the outbound runtime bridge, then writes the complete release identity, model, managed policy, and credential epoch to `~/.openclaw/crabhelm-inference-ready`. Routed mode verifies `models.providers.clawrouter.baseUrl` before the live turn, so a direct provider call cannot satisfy readiness.
 
 Provider allocation, echoed shell source, or a process existing is insufficient.
 
@@ -36,6 +36,7 @@ Provider allocation, echoed shell source, or a process existing is insufficient.
 - Child Gateway binds loopback only.
 - Raw probe output stays in the workspace and is never projected into Crabhelm state.
 - The owner-only runtime workload credential enters the bridge through an inherited file descriptor, expires after ten minutes, and rotates through a one-use refresh fence. Owner-only persistence permits restart recovery; turn processes use the loopback Gateway and receive neither workload nor model-provider credentials.
-- Model access: by default the child receives the raw `OPENAI_API_KEY`. With the edge model proxy enabled (`CRABHELM_MODEL_PROXY=on`), the child instead receives a per-claw model token as `OPENAI_API_KEY` plus `CRABHELM_MODEL_BASE_URL`, and `bootstrap-child.sh` sets `models.providers.openai.baseUrl` so the built-in `openai/*` provider is rerouted through the Worker; the raw provider key never enters the child.
+- Inference access: direct mode gives the child `OPENAI_API_KEY`. ClawRouter mode instead gives it one epoch-scoped `CLAWROUTER_API_KEY` plus the exact separately installed router origin, enables the bundled `clawrouter` provider, and requires `clawrouter/<provider>/<model>` references. Crabhelm's router admin credential and every upstream provider secret remain outside the child.
+- OTLP logs and capture of prompts, completions, messages, tool output, and system prompts remain disabled. Runtime diagnostic summaries are bounded and redacted before they reach control-plane state.
 - Slack and provider OAuth credentials never enter the child.
 - Changed desired model invalidates the inference marker and forces another live probe.
