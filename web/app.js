@@ -1112,8 +1112,12 @@ function modelOptions(current) {
   const defaults = configured?.kind === "clawrouter"
     ? [configured.defaultModel]
     : ["openai/gpt-5.5", "openai/gpt-5.4-mini"];
-  return [...new Set([current, ...defaults].filter(Boolean))]
-    .map((model) => `<option value="${escapeAttr(model)}" ${model === current ? "selected" : ""}>${escapeHtml(label(model))}</option>`)
+  const compatibleCurrent = configured?.kind === "clawrouter"
+    ? /^clawrouter\/[^/]+\/[^/]+(?:\/[^/]+)*$/u.test(current || "")
+    : Boolean(current) && !String(current).startsWith("clawrouter/");
+  const selected = compatibleCurrent ? current : defaults[0];
+  return [...new Set([selected, ...defaults].filter(Boolean))]
+    .map((model) => `<option value="${escapeAttr(model)}" ${model === selected ? "selected" : ""}>${escapeHtml(label(model))}</option>`)
     .join("");
 }
 

@@ -62,7 +62,7 @@ The console separates provider allocation, control link, Gateway version, policy
 - child Gateway readiness marker exists;
 - desired model is written into child config;
 - a live `openclaw agent` turn returns the expected answer through that model;
-- when ClawRouter is configured, the child reports the exact desired ClawRouter base URL and `clawrouter/<provider>/<model>` identity, ClawRouter reports matching credential scope/catalog health, and the live turn succeeds through that route;
+- when ClawRouter is configured, the child reports the exact desired ClawRouter base URL, env-backed `CLAWROUTER_API_KEY` reference, and `clawrouter/<provider>/<model>` identity; ClawRouter reports matching credential scope/catalog health; `models status --probe --probe-provider clawrouter --probe-max-tokens 8 --json` succeeds; and the exact-model canary returns `CLAWROUTER_CANARY_OK` through that route;
 - desired and observed policy generations agree;
 - any enabled channel has live evidence from an adapter capable of supplying it.
 

@@ -46,6 +46,7 @@ type WorkspaceTerminalState =
   | "config-failed"
   | "restart-failed"
   | "gateway-failed"
+  | "model-probe-failed"
   | "turn-failed"
   | "output-failed"
   | "output-schema-failed"
@@ -587,6 +588,7 @@ function terminalInferenceFailure(
     [`${probeLabel}_CONFIG_FAILED`, "config-failed"],
     [`${probeLabel}_RESTART_FAILED`, "restart-failed"],
     [`${probeLabel}_GATEWAY_FAILED`, "gateway-failed"],
+    [`${probeLabel}_MODEL_PROBE_FAILED`, "model-probe-failed"],
     [`${probeLabel}_TURN_FAILED`, "turn-failed"],
     [`${probeLabel}_OUTPUT_FAILED`, "output-failed"],
     [`${probeLabel}_OUTPUT_SCHEMA_FAILED`, "output-schema-failed"],
@@ -776,6 +778,8 @@ export function inferenceProbeCommand(
       : `v3:${releaseId}:${model}`;
   const output = "/tmp/crabhelm-inference-probe.json";
   const error = "/tmp/crabhelm-inference-probe.err";
+  const modelProbeOutput = "/tmp/crabhelm-model-probe.json";
+  const modelProbeError = "/tmp/crabhelm-model-probe.err";
   const runtimeLauncher = `${home}/.local/share/crabhelm/runtime/start-runtime-bridge.sh`;
   const openclawCli = `${home}/.local/share/crabhelm/openclaw-2026.6.11/bin/openclaw`;
   const nodeBinary = `${home}/.local/share/crabhelm/node-v22.23.1-${nodeId}-linux-x64/bin/node`;
@@ -786,6 +790,7 @@ export function inferenceProbeCommand(
   const restartCommand = systemManaged
     ? "sudo -n /usr/bin/systemctl restart crabhelm-agent.service"
     : '"$openclaw_cli" gateway restart';
+  const expectedResponse = routerBaseUrl ? "CLAWROUTER_CANARY_OK" : "671789";
   const validateResponse = [
     "const fs = require('node:fs');",
     "const raw = fs.readFileSync(process.argv[1], 'utf8').trim();",
@@ -805,8 +810,17 @@ export function inferenceProbeCommand(
     "if (!value || !Array.isArray(value.payloads)) process.exit(3);",
     "const texts = value.payloads.map((payload) => payload?.text).filter((text) => typeof text === 'string' && text.trim()).map((text) => text.trim());",
     "if (texts.length !== 1) process.exit(4);",
-    "if (texts[0] !== '671789') process.exit(5);",
+    `if (texts[0] !== ${JSON.stringify(expectedResponse)}) process.exit(5);`,
   ].join(" ");
+  const validateModelProbe = [
+    "const fs = require('node:fs');",
+    "const value = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));",
+    "const results = value?.auth?.probes?.results;",
+    `if (!Array.isArray(results) || !results.some((result) => result?.provider === 'clawrouter' && result?.model === ${JSON.stringify(model)} && result?.status === 'ok')) process.exit(3);`,
+  ].join(" ");
+  const turnCommand = routerBaseUrl
+    ? `timeout -k 10 180 "\${agent_command[@]}" "$openclaw_cli" agent --agent main --model ${shellQuote(model)} --message ${shellQuote("Reply exactly: CLAWROUTER_CANARY_OK")} --json >${output} 2>${error}`
+    : `timeout -k 10 180 "\${agent_command[@]}" "$openclaw_cli" agent --agent main --session-id "$probe_session" --message ${shellQuote("Calculate 731 multiplied by 919. Reply with only the decimal integer, without formatting or punctuation.")} --thinking off --json >${output} 2>${error}`;
   return [
     `probe_label=${shellQuote(probeLabel)}`,
     "probe_session=\"crabhelm-healthcheck-$(date +%s)-$$\"",
@@ -834,10 +848,18 @@ export function inferenceProbeCommand(
     "    probe_result=RESTART_FAILED",
     "  elif ! timeout 90 bash -c 'until curl --fail --silent --max-time 2 http://127.0.0.1:18789/readyz >/dev/null; do sleep 2; done'; then",
     "    probe_result=GATEWAY_FAILED",
-    `  elif ! timeout -k 10 180 "\${agent_command[@]}" "$openclaw_cli" agent --agent main --session-id "$probe_session" --message ${shellQuote("Calculate 731 multiplied by 919. Reply with only the decimal integer, without formatting or punctuation.")} --thinking off --json >${output} 2>${error}; then`,
+    ...(routerBaseUrl
+      ? [
+          `  elif ! timeout -k 10 90 "\${agent_command[@]}" "$openclaw_cli" models status --probe --probe-provider clawrouter --probe-max-tokens 8 --json >${modelProbeOutput} 2>${modelProbeError}; then`,
+          "    probe_result=MODEL_PROBE_FAILED",
+          `  elif ! chmod 0644 ${modelProbeOutput} ${modelProbeError} || ! "\${agent_command[@]}" "$node_binary" --input-type=commonjs -e ${shellQuote(validateModelProbe)} ${modelProbeOutput}; then`,
+          "    probe_result=MODEL_PROBE_FAILED",
+        ]
+      : []),
+    `  elif ! ${turnCommand}; then`,
     "    probe_result=TURN_FAILED",
     "  else",
-    `    chmod 0644 ${output}`,
+    `    chmod 0644 ${output} ${error}`,
     "    response_status=0",
     `    "\${agent_command[@]}" "$node_binary" --input-type=commonjs -e ${shellQuote(validateResponse)} ${output} || response_status=$?`,
     "    case \"$response_status\" in",

@@ -43,6 +43,9 @@ test("child bootstrap verifies artifacts, allowlists Crabhelm, and strips ambien
 printf 'auth=%s/%s argv=' "\${OPENCLAW_GATEWAY_TOKEN+present}" "\${OPENCLAW_GATEWAY_PASSWORD+present}" >>"$CRABHELM_TEST_LOG"
 printf '%q ' "$@" >>"$CRABHELM_TEST_LOG"
 printf '\n' >>"$CRABHELM_TEST_LOG"
+if [[ "$1" = config && "$2" = get && "$3" = plugins.allow ]]; then
+  printf '["browser","crabhelm"]\n'
+fi
 `);
   await executable(path.join(bin, "curl"), "#!/usr/bin/env bash\nexit 0\n");
   const digest = createHash("sha256").update(await readFile(plugin)).digest("hex");
@@ -78,6 +81,7 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
   const calls = await readFile(log, "utf8");
   assert.doesNotMatch(calls, /auth=present/);
   assert.match(calls, /config set plugins\.allow/);
+  assert.match(calls, /plugins\.allow .*browser/);
   assert.match(calls, /plugins\.allow .*crabhelm.*slack/);
   assert.match(calls, /plugins\.allow .*diagnostics-otel/);
   assert.match(calls, /plugins\.allow .*clawrouter/);
@@ -91,6 +95,8 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
   assert.match(calls, /channels\.slack\.mode socket/);
   assert.match(calls, /agents\.defaults\.model\.primary clawrouter\/openai\/gpt-5\.5/);
   assert.match(calls, /config set models\.providers\.clawrouter\.baseUrl https:\/\/clawrouter\.example\.test/);
+  assert.match(calls, /config set models\.providers\.clawrouter\.apiKey .*default.*env.*CLAWROUTER_API_KEY/);
+  assert.doesNotMatch(calls, /models\.providers\.clawrouter\.models/u);
   assert.match(calls, /config unset models\.providers\.openai\.baseUrl/);
   assert.match(calls, /agents\.defaults\.workspace .*\/state\/workspace/);
   assert.match(calls, /channels\.slack\.enabled true/);

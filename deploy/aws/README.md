@@ -191,7 +191,7 @@ aws ecs wait services-stable \
 curl --fail --silent --show-error "https://$RUNTIME_HOSTNAME/healthz"
 ```
 
-For a ClawRouter installation, create or reconcile a test claw and require the console/API to show matching desired and observed router origin, model, providers, policy/credential ids, and credential epoch plus `routerHealthy`, `catalogReady`, and `routeVerified`. Gateway readiness and a fresh live-inference marker must also be present; router configuration alone is not readiness. Budget and usage views contain only bounded counters. **View diagnostics** (or authenticated `GET /api/claws/<id>/runtime-diagnostics` on the console host) returns allowlisted process state and redacted log summaries, never raw model or tool content.
+For a ClawRouter installation, create or reconcile a test claw and require the console/API to show matching desired and observed router origin, model, providers, policy/credential ids, and credential epoch plus `routerHealthy`, `catalogReady`, and `routeVerified`. Gateway `/readyz`, a successful `openclaw models status --probe --probe-provider clawrouter --probe-max-tokens 8 --json`, and a fresh exact-model `CLAWROUTER_CANARY_OK` marker must also be present; router configuration alone is not readiness. Use `/healthz` for ongoing Gateway liveness. Budget and usage views contain only bounded counters. **View diagnostics** (or authenticated `GET /api/claws/<id>/runtime-diagnostics` on the console host) returns allowlisted process state and redacted log summaries, never raw model or tool content.
 
 When `PrometheusMode=on`, verify the metadata-only endpoint with its dedicated machine credential:
 

@@ -127,17 +127,24 @@ NODE
   IFS=$'\t' read -r log_level otel_state <<<"$observability_state"
 fi
 
-plugin_allow='["crabhelm","slack"]'
-if [[ -n "$router_base_url" ]]; then
-  plugin_allow='["crabhelm","slack","clawrouter"]'
-fi
-if [[ "$otel_state" != disabled ]]; then
-  if [[ -n "$router_base_url" ]]; then
-    plugin_allow='["crabhelm","slack","clawrouter","diagnostics-otel"]'
-  else
-    plugin_allow='["crabhelm","slack","diagnostics-otel"]'
-  fi
-fi
+existing_plugin_allow="$("$openclaw_binary" config get plugins.allow --json 2>/dev/null || true)"
+plugin_allow="$("$node_binary" - "$existing_plugin_allow" "$router_base_url" "$otel_state" <<'NODE'
+let existing;
+try {
+  existing = JSON.parse(process.argv[2]);
+} catch {
+  existing = [];
+}
+if (!Array.isArray(existing)) existing = [];
+const managed = new Set(["crabhelm", "slack", "clawrouter", "diagnostics-otel"]);
+const next = existing.filter((id, index) =>
+  typeof id === "string" && !managed.has(id) && existing.indexOf(id) === index);
+next.push("crabhelm", "slack");
+if (process.argv[3]) next.push("clawrouter");
+if (process.argv[4] !== "disabled") next.push("diagnostics-otel");
+process.stdout.write(JSON.stringify(next));
+NODE
+)" || die "managed plugin allowlist is invalid"
 "$openclaw_binary" config set plugins.allow "$plugin_allow" --strict-json --replace
 "$openclaw_binary" config set plugins.entries.crabhelm.enabled true --strict-json
 "$openclaw_binary" config set plugins.entries.crabhelm.config.mode child
@@ -159,10 +166,14 @@ fi
 if [[ -n "$router_base_url" ]]; then
   "$openclaw_binary" config set plugins.entries.clawrouter.enabled true --strict-json
   "$openclaw_binary" config set models.providers.clawrouter.baseUrl "$router_base_url"
+  "$openclaw_binary" config set models.providers.clawrouter.apiKey --ref-provider default --ref-source env --ref-id CLAWROUTER_API_KEY
 else
   "$openclaw_binary" config set plugins.entries.clawrouter.enabled false --strict-json
   if "$openclaw_binary" config get models.providers.clawrouter.baseUrl >/dev/null 2>&1; then
     "$openclaw_binary" config unset models.providers.clawrouter.baseUrl
+  fi
+  if "$openclaw_binary" config get models.providers.clawrouter.apiKey >/dev/null 2>&1; then
+    "$openclaw_binary" config unset models.providers.clawrouter.apiKey
   fi
 fi
 # Remove the retired Crabhelm-owned OpenAI proxy override from managed guests.

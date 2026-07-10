@@ -783,12 +783,14 @@ async function probeLocalGateway(config: Record<string, unknown>): Promise<boole
   const gateway = asRecord(config.gateway);
   const port = typeof gateway.port === "number" && Number.isInteger(gateway.port) ? gateway.port : 18_789;
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/readyz`, {
-      method: "GET",
-      redirect: "manual",
-      signal: AbortSignal.timeout(2_000),
-    });
-    return response.ok;
+    const [health, readiness] = await Promise.all(
+      ["healthz", "readyz"].map((endpoint) => fetch(`http://127.0.0.1:${port}/${endpoint}`, {
+        method: "GET",
+        redirect: "manual",
+        signal: AbortSignal.timeout(2_000),
+      })),
+    );
+    return health.ok && readiness.ok;
   } catch {
     return false;
   }
@@ -910,6 +912,8 @@ function readManagedState(config: Record<string, unknown>): ManagedDesired {
   const providers = asRecord(asRecord(config.models).providers);
   const openAiBaseUrl = asRecord(providers.openai).baseUrl;
   const clawRouterEntry = asRecord(asRecord(plugins.entries).clawrouter);
+  const clawRouterProvider = asRecord(providers.clawrouter);
+  const clawRouterApiKey = asRecord(clawRouterProvider.apiKey);
   const clawRouterAllowed = Array.isArray(plugins.allow) && plugins.allow.includes("clawrouter");
   const diagnosticsEntry = asRecord(asRecord(plugins.entries)["diagnostics-otel"]);
   const diagnosticsAllowed = Array.isArray(plugins.allow) && plugins.allow.includes("diagnostics-otel");
@@ -918,8 +922,13 @@ function readManagedState(config: Record<string, unknown>): ManagedDesired {
     fallbackModels: Array.isArray(fallbacks)
       ? fallbacks.filter((item): item is string => typeof item === "string")
       : [],
-    ...(clawRouterAllowed && clawRouterEntry.enabled === true && typeof asRecord(providers.clawrouter).baseUrl === "string"
-      ? { routerBaseUrl: String(asRecord(providers.clawrouter).baseUrl) }
+    ...(clawRouterAllowed &&
+      clawRouterEntry.enabled === true &&
+      typeof clawRouterProvider.baseUrl === "string" &&
+      clawRouterApiKey.source === "env" &&
+      clawRouterApiKey.provider === "default" &&
+      clawRouterApiKey.id === "CLAWROUTER_API_KEY"
+      ? { routerBaseUrl: String(clawRouterProvider.baseUrl) }
       : {}),
     ...(typeof openAiBaseUrl === "string" ? { legacyOpenAiBaseUrl: openAiBaseUrl } : {}),
     slackEnabled: hasSlack && slack.enabled !== false,
@@ -963,7 +972,14 @@ function applyManagedDesired(config: Record<string, unknown>, desired: ManagedDe
   slack.groupPolicy = desired.groupPolicy;
   ensureRecord(config, "logging").level = desired.logLevel;
   const plugins = ensureRecord(config, "plugins");
+  const existingAllow = Array.isArray(plugins.allow)
+    ? plugins.allow.filter((id): id is string => typeof id === "string")
+    : [];
+  const managedAllow = new Set(["crabhelm", "slack", "clawrouter", "diagnostics-otel"]);
   plugins.allow = [
+    ...existingAllow.filter(
+      (id, index) => !managedAllow.has(id) && existingAllow.indexOf(id) === index,
+    ),
     "crabhelm",
     "slack",
     ...(desired.routerBaseUrl ? ["clawrouter"] : []),
@@ -973,7 +989,13 @@ function applyManagedDesired(config: Record<string, unknown>, desired: ManagedDe
   clawRouterEntry.enabled = Boolean(desired.routerBaseUrl);
   const modelProviders = ensureRecord(ensureRecord(config, "models"), "providers");
   if (desired.routerBaseUrl) {
-    ensureRecord(modelProviders, "clawrouter").baseUrl = desired.routerBaseUrl;
+    const clawRouterProvider = ensureRecord(modelProviders, "clawrouter");
+    clawRouterProvider.baseUrl = desired.routerBaseUrl;
+    clawRouterProvider.apiKey = {
+      source: "env",
+      provider: "default",
+      id: "CLAWROUTER_API_KEY",
+    };
   } else {
     delete modelProviders.clawrouter;
   }
