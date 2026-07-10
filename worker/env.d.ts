@@ -21,6 +21,7 @@ interface Env {
   CLAWROUTER_BASE_URL?: string;
   CLAWROUTER_TENANT_ID?: string;
   CLAWROUTER_ALLOWED_PROVIDERS?: string;
+  CLAWROUTER_MODEL_PROVIDER_MAP?: string;
   CLAWROUTER_DEFAULT_MODEL?: string;
   CLAWROUTER_ADMIN_TOKEN?: string;
   CLAWROUTER_CREDENTIAL_SECRET?: string;
@@ -50,6 +51,7 @@ declare namespace Cloudflare {
     CLAWROUTER_BASE_URL?: string;
     CLAWROUTER_TENANT_ID?: string;
     CLAWROUTER_ALLOWED_PROVIDERS?: string;
+    CLAWROUTER_MODEL_PROVIDER_MAP?: string;
     CLAWROUTER_DEFAULT_MODEL?: string;
     CRABHELM_PROMETHEUS?: "on" | "off";
   }

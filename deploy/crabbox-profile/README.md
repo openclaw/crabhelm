@@ -13,7 +13,7 @@ deploy/crabbox-profile/build-bundle.sh \
   --output /absolute/empty/output
 ```
 
-The builder pins the Linux x64 Node.js `22.23.1` runtime plus OpenClaw, Slack, and `diagnostics-otel` `2026.6.11`, packs the current Crabhelm source, verifies all artifacts, and emits `manifest.json`. The installer always runs the reviewed Node artifact from a digest-specific path. Plugin inputs must contain their production dependencies under `package/node_modules`; lifecycle scripts and dependency declarations are removed from the reviewed appliance copy. Archive the output under a top-level `bundle/` directory because the Cloudflare installer executes `bundle/guest-install.sh`:
+The builder pins the Linux x64 Node.js `22.23.1` runtime plus OpenClaw, Slack, and `diagnostics-otel` `2026.6.11`, packs the current Crabhelm source, verifies all artifacts, and emits `manifest.json`. This existing version pin is the live direct-provider reference only and predates the ClawRouter provider-overlay fix. Before a live FakeCo routed deployment, prepare a separately reviewed appliance from the landed overlay commit and pin its exact manifest/archive/Node digests; this integration does not bump or release OpenClaw. The installer always runs the reviewed Node artifact from a digest-specific path. Plugin inputs must contain their production dependencies under `package/node_modules`; lifecycle scripts and dependency declarations are removed from the reviewed appliance copy. Archive the output under a top-level `bundle/` directory because the Cloudflare installer executes `bundle/guest-install.sh`:
 
 ```bash
 tar -C /path/to/parent -s '|^output|bundle|' -czf /tmp/crabhelm-bundle.tgz output

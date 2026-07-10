@@ -224,6 +224,10 @@ test("creates per-claw ClawRouter desired state from fleet policy", () => {
       baseUrl: "https://clawrouter.example.test",
       tenantId: "fakeco",
       allowedProviders: ["anthropic", "openai"],
+      modelProviders: {
+        "clawrouter/anthropic/claude-sonnet-4.6": "anthropic",
+        "clawrouter/openai/gpt-5.5": "openai",
+      },
       defaultModel: "clawrouter/openai/gpt-5.5",
     },
   });
@@ -236,11 +240,15 @@ test("creates per-claw ClawRouter desired state from fleet policy", () => {
     policyId: `crabhelm_${claw.id.replaceAll("-", "")}`,
     credentialId: `crabhelm_${claw.id.replaceAll("-", "")}`,
     allowedProviders: ["anthropic", "openai"],
+    modelProviders: {
+      "clawrouter/anthropic/claude-sonnet-4.6": "anthropic",
+      "clawrouter/openai/gpt-5.5": "openai",
+    },
     providers: ["anthropic", "openai"],
   });
   assert.throws(
     () => updateClawRecord(claw, { inference: { model: "clawrouter/google/gemini-2.5-pro" } }),
-    /outside the fleet ClawRouter allowlist/u,
+    /explicit fleet model-to-provider mapping/u,
   );
   assert.throws(
     () => createClawRecord({
@@ -252,6 +260,7 @@ test("creates per-claw ClawRouter desired state from fleet policy", () => {
         baseUrl: "https://clawrouter.example.test",
         tenantId: "fakeco",
         allowedProviders: ["openai"],
+        modelProviders: { "clawrouter/openai/gpt-5.5": "openai" },
         defaultModel: "clawrouter/openai/gpt-5.5",
       },
     }),

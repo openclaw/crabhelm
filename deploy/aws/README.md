@@ -34,6 +34,8 @@ The stack does not create DNS records. It outputs the ALB DNS name for externall
 - A same-account, same-Region Secrets Manager JSON secret.
 - Reviewed appliance and runtime digests.
 
+The commands below assume an authenticated human AWS CLI session, typically an approved IAM Identity Center permission set or equivalent operator role. This repository does not yet provide a GitHub Actions deploy workflow/OIDC trust, a dedicated CloudFormation service role, budget resources, or permissions-boundary parameters on the ECS task roles. Automated deployment is therefore not yet least-privilege-ready; add those controls in the AWS foundation layer before granting a CI principal stack mutation access.
+
 The OIDC issuer and endpoints must use publicly trusted certificates and publicly resolvable DNS. The ALB must be able to reach the token and user-info endpoints over IPv4 HTTPS; an IPv6-only or otherwise unreachable endpoint will make console authentication fail even if stack creation succeeds. A publicly resolvable name may resolve to private IPv4 addresses when VPC routing and security controls allow the ALB to reach them.
 
 The OIDC client must allow the scopes configured in `OidcScopes`, which defaults to `openid email profile`, and the identity provider must restrict access to the intended organization. Add the provider-specific group scope when `AdminGroups` is used. The resulting signed ALB assertion must contain an email claim and may contain a `groups` array.
@@ -105,6 +107,8 @@ CloudFormation cannot push the first image into a repository it is creating. Use
 
 The repository uses immutable tags. Use a new commit-derived `ImageTag` for every deployment.
 
+**Cost warning:** `ProvisionService=false` suppresses only the ECS service. The first update still creates the VPC/NAT gateway, ALB, RDS database, and other billable resources. For disposable FakeCo environments, precreate one immutable ECR repository through the account foundation or approved CLI workflow, push the image, and perform one stack deployment with `CreateEcrRepository=false` plus the immutable `ImageUri`. Do not treat the two-update stack-owned-ECR flow as a free repository bootstrap.
+
 ## Deploy
 
 The abbreviated command below shows required inputs. Keep deployment-specific values in an approved local parameter workflow rather than committing them.
@@ -142,6 +146,7 @@ ClawRouterMode=on
 ClawRouterBaseUrl=https://<separate-clawrouter-host>
 ClawRouterTenantId=fakeco
 ClawRouterAllowedProviders=openai
+ClawRouterModelProviderMap=clawrouter/openai/gpt-5.5=openai
 ClawRouterDefaultModel=clawrouter/openai/gpt-5.5
 DatabaseMultiAz=false
 DatabaseDeletionProtection=false
@@ -149,7 +154,9 @@ LoadBalancerDeletionProtection=false
 PrometheusMode=on
 ```
 
-`DatabaseMultiAz=false` and disabled deletion protection are disposable-environment choices, not production defaults. `PrometheusMode=on` requires the secret described above. If ClawRouter uses Cloudflare Access, also set `ClawRouterAccessServiceToken=on`. This profile does not change `DesiredCount=1`; scaling the ECS service remains unsupported.
+`ClawRouterBaseUrl` has no usable routed default: the template placeholder is rejected when `ClawRouterMode=on`, so FakeCo cannot silently route to production. `DatabaseMultiAz=false` and disabled deletion protection are disposable-environment choices, not production defaults. `PrometheusMode=on` requires the secret described above. If ClawRouter uses Cloudflare Access, also set `ClawRouterAccessServiceToken=on`. This profile does not change `DesiredCount=1`; scaling the ECS service remains unsupported.
+
+Before live FakeCo validation, build and upload an appliance from the landed OpenClaw provider-overlay commit and pin its manifest, archive, and Node digests in this stack. The repository's current `2026.6.11` appliance pin predates that overlay fix and is direct-provider reference evidence only; it is not ClawRouter-compatible. Do not change or claim a release version in this integration PR.
 
 For group-based administrator grants, keep at least one bootstrap address in `AdminEmails`, pass `AdminGroups`, and set `OidcScopes="openid email profile <provider-group-scope>"`. Group scope and claim names are provider-specific; confirm the signed ALB assertion contains a `groups` array before depending on group grants. Supply the fixed target parameters when their defaults are not the intended production policy.
 

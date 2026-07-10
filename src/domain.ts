@@ -109,7 +109,10 @@ function normalizeModels(
     if (models.some((value) => !value.startsWith("clawrouter/"))) {
       throw new Error("ClawRouter fleets require clawrouter/provider/model references");
     }
-    const providers = [...new Set(models.map((value) => value.split("/")[1] ?? ""))].sort();
+    const providers = [...new Set(models.map((value) => clawRouter.modelProviders[value] ?? ""))].sort();
+    if (providers.includes("")) {
+      throw new Error("every ClawRouter model requires an explicit fleet model-to-provider mapping");
+    }
     if (providers.some((provider) => !clawRouter.allowedProviders.includes(provider))) {
       throw new Error("inference model provider is outside the fleet ClawRouter allowlist");
     }
@@ -121,6 +124,9 @@ function normalizeModels(
       policyId: credentialId,
       credentialId,
       allowedProviders: [...clawRouter.allowedProviders],
+      modelProviders: Object.fromEntries(
+        Object.entries(clawRouter.modelProviders).sort(([first], [second]) => first.localeCompare(second)),
+      ),
       providers,
     };
     authRef = `clawrouter:${credentialId}`;
@@ -409,6 +415,7 @@ export function updateClawRecord(
               baseUrl: router.baseUrl,
               tenantId: router.tenantId,
               allowedProviders: router.allowedProviders,
+              modelProviders: router.modelProviders,
               defaultModel: record.desired.inference.model,
             },
           }

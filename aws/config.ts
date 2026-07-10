@@ -24,6 +24,7 @@ export type AwsControlPlaneVariables = {
   CLAWROUTER_BASE_URL?: string;
   CLAWROUTER_TENANT_ID?: string;
   CLAWROUTER_ALLOWED_PROVIDERS?: string;
+  CLAWROUTER_MODEL_PROVIDER_MAP?: string;
   CLAWROUTER_DEFAULT_MODEL?: string;
   CRABHELM_PROMETHEUS: "on" | "off";
   NODE_RUNTIME_SHA256: string;
@@ -203,6 +204,9 @@ export function loadAwsConfig(environment: Environment = process.env): AwsConfig
           CLAWROUTER_BASE_URL: clawRouter.baseUrl,
           CLAWROUTER_TENANT_ID: clawRouter.tenantId,
           CLAWROUTER_ALLOWED_PROVIDERS: clawRouter.allowedProviders.join(","),
+          CLAWROUTER_MODEL_PROVIDER_MAP: Object.entries(clawRouter.modelProviders)
+            .map(([model, provider]) => `${model}=${provider}`)
+            .join(","),
           CLAWROUTER_DEFAULT_MODEL: clawRouter.defaultModel,
           CLAWROUTER_ADMIN_TOKEN: routerAdmin,
           CLAWROUTER_CREDENTIAL_SECRET: routerSeed,

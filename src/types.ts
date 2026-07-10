@@ -49,6 +49,7 @@ export type InferenceRouter =
       policyId: string;
       credentialId: string;
       allowedProviders: string[];
+      modelProviders: Record<string, string>;
       providers: string[];
     };
 
@@ -56,6 +57,7 @@ export type ClawRouterFleetPolicy = {
   baseUrl: string;
   tenantId: string;
   allowedProviders: string[];
+  modelProviders: Record<string, string>;
   defaultModel: string;
 };
 

@@ -62,7 +62,7 @@ The console separates provider allocation, control link, Gateway version, policy
 - child Gateway readiness marker exists;
 - desired model is written into child config;
 - a live `openclaw agent` turn returns the expected answer through that model;
-- when ClawRouter is configured, the child reports the exact desired ClawRouter base URL, env-backed `CLAWROUTER_API_KEY` reference, and `clawrouter/<provider>/<model>` identity; ClawRouter reports matching credential scope/catalog health; `models status --probe --probe-provider clawrouter --probe-max-tokens 8 --json` succeeds; and the exact-model canary returns `CLAWROUTER_CANARY_OK` through that route;
+- when ClawRouter is configured, the child reports the exact desired ClawRouter base URL, env-backed `CLAWROUTER_API_KEY` reference, and `clawrouter/<catalog-model-id>` identity; ClawRouter reports matching explicit provider scope/catalog health; `models status --probe --probe-provider clawrouter --probe-max-tokens 8 --json` succeeds; and the exact-model canary returns `CLAWROUTER_CANARY_OK` through that route;
 - desired and observed policy generations agree;
 - any enabled channel has live evidence from an adapter capable of supplying it.
 
@@ -96,7 +96,7 @@ Typed-name confirmation starts a staged removal. Crabhelm disables ingress, veri
 
 - Alternative control-plane deployments: the reference Cloudflare Worker, Durable Object, R2, Queue, and Access stack; or a separate singleton ECS/Fargate, ALB, PostgreSQL RDS, S3, SQS, and ALB OIDC stack on AWS.
 - Real Crabbox allocation and deletion.
-- Pinned OpenClaw `2026.6.11` install with exact-model live inference proof.
+- Pinned OpenClaw `2026.6.11` direct-reference install with exact-model live inference proof; routed FakeCo requires a separately digest-pinned appliance from the landed ClawRouter provider-overlay commit.
 - Optional first-class ClawRouter policies, epoch-scoped child credentials, desired/observed route health, bounded usage metadata, and exact-route live inference proof; deployment-specific live proof is still required.
 - Signed central Slack ingress with DM/app-mention events, persona bindings, threaded delivery, and one-click confirmations.
 - GitHub organization import remains disabled in the Cloudflare runtime.

@@ -13,6 +13,10 @@ const config: ClawRouterConfig = {
   baseUrl: "https://clawrouter.example.test",
   tenantId: "fakeco",
   allowedProviders: ["anthropic", "openai"],
+  modelProviders: {
+    "clawrouter/anthropic/claude-sonnet-4.6": "anthropic",
+    "clawrouter/openai/gpt-5.5": "openai",
+  },
   defaultModel: "clawrouter/openai/gpt-5.5",
   adminToken: "admin-token",
   credentialSecret,
@@ -32,6 +36,57 @@ function routedClaw() {
   }, new Date("2026-07-09T00:00:00.000Z"), { clawRouter: config });
 }
 
+function catalogControl(
+  mappedConfig: ClawRouterConfig,
+  claw: ReturnType<typeof createClawRecord>,
+  providers: Array<Record<string, unknown>>,
+): ClawRouterControl {
+  const router = claw.desired.inference.router;
+  assert.equal(router.kind, "clawrouter");
+  if (router.kind !== "clawrouter") throw new Error("expected ClawRouter desired state");
+  return new ClawRouterControl(mappedConfig, {
+    fetch: async (input, init) => {
+      const url = new URL(String(input));
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.pathname.startsWith("/v1/admin/policies/")) {
+        return Response.json({ policyId: router.policyId, ...body });
+      }
+      if (url.pathname.startsWith("/v1/admin/credentials/")) {
+        return Response.json({
+          credentialId: router.credentialId,
+          policyId: body.policyId,
+          enabled: body.enabled,
+          policyEnabled: body.enabled,
+          generationMatches: true,
+          active: body.enabled,
+        });
+      }
+      if (url.pathname === "/v1/health") return Response.json({ ok: true });
+      if (url.pathname === "/v1/key/inspect") {
+        return Response.json({
+          kid: router.credentialId,
+          verified: true,
+          enabled: true,
+          providers: router.providers,
+        });
+      }
+      if (url.pathname === "/v1/catalog") return Response.json({ providers });
+      if (url.pathname === "/v1/usage") {
+        const limitMicros = claw.desired.inference.monthlyBudgetUsd === undefined
+          ? undefined
+          : Math.round(claw.desired.inference.monthlyBudgetUsd * 1_000_000);
+        return Response.json({
+          budget: limitMicros === undefined
+            ? { configured: false }
+            : { configured: true, limitMicros },
+          usage: { summary: {} },
+        });
+      }
+      return new Response("not found", { status: 404 });
+    },
+  });
+}
+
 test("ClawRouter fleet configuration is explicit and fail-closed", () => {
   assert.equal(resolveClawRouterConfig({ CRABHELM_CLAWROUTER: "off" }), undefined);
   assert.throws(
@@ -48,12 +103,108 @@ test("ClawRouter fleet configuration is explicit and fail-closed", () => {
       CLAWROUTER_BASE_URL: config.baseUrl,
       CLAWROUTER_TENANT_ID: config.tenantId,
       CLAWROUTER_ALLOWED_PROVIDERS: "openai",
+      CLAWROUTER_MODEL_PROVIDER_MAP: "clawrouter/openai/gpt-5.5=openai",
       CLAWROUTER_DEFAULT_MODEL: config.defaultModel,
       CLAWROUTER_ADMIN_TOKEN: config.adminToken,
       CLAWROUTER_CREDENTIAL_SECRET: credentialSecret,
       CLAWROUTER_ACCESS_CLIENT_ID: "only-one-half",
     }),
     /must be configured together/u,
+  );
+  const variantMap = [
+    "clawrouter/bedrock/amazon.nova-lite-v1:0=aws-bedrock",
+    "clawrouter/google/gemini-3.5-flash=google-gemini",
+    "clawrouter/local/default=local-openai",
+  ].join(",");
+  const variants = resolveClawRouterConfig({
+    CRABHELM_CLAWROUTER: "on",
+    CLAWROUTER_BASE_URL: config.baseUrl,
+    CLAWROUTER_TENANT_ID: config.tenantId,
+    CLAWROUTER_ALLOWED_PROVIDERS: "aws-bedrock,google-gemini,local-openai",
+    CLAWROUTER_MODEL_PROVIDER_MAP: variantMap,
+    CLAWROUTER_DEFAULT_MODEL: "clawrouter/google/gemini-3.5-flash",
+    CLAWROUTER_ADMIN_TOKEN: config.adminToken,
+    CLAWROUTER_CREDENTIAL_SECRET: credentialSecret,
+  });
+  assert.deepEqual(variants?.modelProviders, {
+    "clawrouter/bedrock/amazon.nova-lite-v1:0": "aws-bedrock",
+    "clawrouter/google/gemini-3.5-flash": "google-gemini",
+    "clawrouter/local/default": "local-openai",
+  });
+  assert.throws(
+    () => resolveClawRouterConfig({
+      CRABHELM_CLAWROUTER: "on",
+      CLAWROUTER_BASE_URL: config.baseUrl,
+      CLAWROUTER_TENANT_ID: config.tenantId,
+      CLAWROUTER_ALLOWED_PROVIDERS: "openai",
+      CLAWROUTER_MODEL_PROVIDER_MAP: "clawrouter/google/gemini-3.5-flash=google-gemini",
+      CLAWROUTER_DEFAULT_MODEL: "clawrouter/google/gemini-3.5-flash",
+      CLAWROUTER_ADMIN_TOKEN: config.adminToken,
+      CLAWROUTER_CREDENTIAL_SECRET: credentialSecret,
+    }),
+    /provider outside the fleet allowlist/u,
+  );
+  assert.throws(
+    () => resolveClawRouterConfig({
+      CRABHELM_CLAWROUTER: "on",
+      CLAWROUTER_BASE_URL: config.baseUrl,
+      CLAWROUTER_TENANT_ID: config.tenantId,
+      CLAWROUTER_ALLOWED_PROVIDERS: "openai",
+      CLAWROUTER_MODEL_PROVIDER_MAP: "clawrouter/openai/gpt-5.5=openai,clawrouter/openai/gpt-5.5=openai",
+      CLAWROUTER_DEFAULT_MODEL: config.defaultModel,
+      CLAWROUTER_ADMIN_TOKEN: config.adminToken,
+      CLAWROUTER_CREDENTIAL_SECRET: credentialSecret,
+    }),
+    /duplicate model/u,
+  );
+});
+
+for (const variant of [
+  {
+    providerId: "google-gemini",
+    model: "clawrouter/google/gemini-3.5-flash",
+    catalogModel: "google/gemini-3.5-flash",
+  },
+  {
+    providerId: "aws-bedrock",
+    model: "clawrouter/bedrock/amazon.nova-lite-v1:0",
+    catalogModel: "bedrock/amazon.nova-lite-v1:0",
+  },
+  {
+    providerId: "local-openai",
+    model: "clawrouter/local/default",
+    catalogModel: "local/default",
+  },
+] as const) {
+  test(`ClawRouter catalog maps ${variant.model} to provider ${variant.providerId}`, async () => {
+    const mappedConfig: ClawRouterConfig = {
+      ...config,
+      allowedProviders: [variant.providerId],
+      modelProviders: { [variant.model]: variant.providerId },
+      defaultModel: variant.model,
+    };
+    const claw = createClawRecord({
+      name: `Mapped ${variant.providerId}`,
+      owner: { subject: `manual:${variant.providerId}`, label: variant.providerId, source: "manual" },
+      inference: { model: variant.model },
+    }, new Date("2026-07-09T00:00:00.000Z"), { clawRouter: mappedConfig });
+    const observation = await catalogControl(mappedConfig, claw, [{
+      id: variant.providerId,
+      executable: true,
+      models: [{ id: variant.catalogModel }],
+    }]).reconcile(claw);
+    assert.equal(observation.catalogReady, true);
+    assert.deepEqual(observation.providers, [variant.providerId]);
+  });
+}
+
+test("ClawRouter catalog fails closed on absent or ambiguous mapped models", async () => {
+  const claw = routedClaw();
+  await assert.rejects(catalogControl(config, claw, []).reconcile(claw), /catalog is not ready/u);
+  const duplicate = { id: "openai", executable: true, models: [{ id: "openai/gpt-5.5" }] };
+  await assert.rejects(
+    catalogControl(config, claw, [duplicate, duplicate]).reconcile(claw),
+    /catalog is not ready/u,
   );
 });
 
@@ -99,9 +250,9 @@ test("ClawRouter control registers scoped metadata, rotates credentials, and pro
         return Response.json({
           version: "clawrouter.client-catalog.v1",
           providers: [
-            { id: "openai", executable: true, models: [{ id: "gpt-5.5" }] },
+            { id: "openai", executable: true, models: [{ id: "openai/gpt-5.5" }] },
             ...(includeFallback
-              ? [{ id: "anthropic", executable: true, models: [{ id: "claude-sonnet-4.6" }] }]
+              ? [{ id: "anthropic", executable: true, models: [{ id: "anthropic/claude-sonnet-4.6" }] }]
               : []),
           ],
         });

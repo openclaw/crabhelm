@@ -36,7 +36,7 @@ Provider allocation, echoed shell source, or a process existing is insufficient.
 - Child Gateway binds loopback only.
 - Raw probe output stays in the workspace and is never projected into Crabhelm state.
 - The owner-only runtime workload credential enters the bridge through an inherited file descriptor, expires after ten minutes, and rotates through a one-use refresh fence. Owner-only persistence permits restart recovery; turn processes use the loopback Gateway and receive neither workload nor model-provider credentials.
-- Inference access: direct mode gives the child `OPENAI_API_KEY`. ClawRouter mode instead gives it one epoch-scoped `CLAWROUTER_API_KEY` plus the exact separately installed router origin, enables the bundled `clawrouter` provider, and requires `clawrouter/<provider>/<model>` references. Crabhelm's router admin credential and every upstream provider secret remain outside the child.
+- Inference access: direct mode gives the child `OPENAI_API_KEY`. ClawRouter mode instead gives it one epoch-scoped `CLAWROUTER_API_KEY` plus the exact separately installed router origin, enables the bundled `clawrouter` provider, and requires full `clawrouter/<catalog-model-id>` references with explicit canonical catalog-provider mappings. Crabhelm's router admin credential and every upstream provider secret remain outside the child.
 - OTLP logs and capture of prompts, completions, messages, tool output, and system prompts remain disabled. Runtime diagnostic summaries are bounded and redacted before they reach control-plane state.
 - Slack and provider OAuth credentials never enter the child.
 - Changed desired model invalidates the inference marker and forces another live probe.

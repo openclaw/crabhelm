@@ -176,6 +176,7 @@ export class CrabhelmControlPlaneService {
             baseUrl: clawRouter.fleetPolicy().baseUrl,
             tenantId: clawRouter.fleetPolicy().tenantId,
             allowedProviders: clawRouter.fleetPolicy().allowedProviders,
+            modelProviders: clawRouter.fleetPolicy().modelProviders,
             metadataOnly: true,
           }
         : routedInference

@@ -29,6 +29,7 @@ export type CrabhelmRuntime = {
     baseUrl?: string;
     tenantId?: string;
     allowedProviders?: string[];
+    modelProviders?: Record<string, string>;
   };
 };
 

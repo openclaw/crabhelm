@@ -17,6 +17,7 @@ export type ClawRouterEnvironment = {
   CLAWROUTER_BASE_URL?: string;
   CLAWROUTER_TENANT_ID?: string;
   CLAWROUTER_ALLOWED_PROVIDERS?: string;
+  CLAWROUTER_MODEL_PROVIDER_MAP?: string;
   CLAWROUTER_DEFAULT_MODEL?: string;
   CLAWROUTER_ADMIN_TOKEN?: string;
   CLAWROUTER_CREDENTIAL_SECRET?: string;
@@ -65,13 +66,16 @@ export function resolveClawRouterConfig(env: ClawRouterEnvironment): ClawRouterC
   ) {
     throw new Error("CLAWROUTER_ALLOWED_PROVIDERS must contain 1 to 32 provider ids");
   }
+  const modelProviders = parseModelProviderMap(
+    env.CLAWROUTER_MODEL_PROVIDER_MAP,
+    allowedProviders,
+  );
   const defaultModel = required(env.CLAWROUTER_DEFAULT_MODEL, "CLAWROUTER_DEFAULT_MODEL");
-  const defaultProvider = defaultModel.split("/")[1];
   if (
     !/^clawrouter\/[a-z0-9][a-z0-9-]{0,63}\/[A-Za-z0-9][A-Za-z0-9_.:\-/]{0,199}$/u.test(defaultModel) ||
-    !defaultProvider || !allowedProviders.includes(defaultProvider)
+    !modelProviders[defaultModel]
   ) {
-    throw new Error("CLAWROUTER_DEFAULT_MODEL must name an allowed clawrouter/provider/model");
+    throw new Error("CLAWROUTER_DEFAULT_MODEL must have an explicit model-to-provider mapping");
   }
   const credentialSecret = required(env.CLAWROUTER_CREDENTIAL_SECRET, "CLAWROUTER_CREDENTIAL_SECRET");
   if (encoder.encode(credentialSecret).byteLength < 32) {
@@ -86,6 +90,7 @@ export function resolveClawRouterConfig(env: ClawRouterEnvironment): ClawRouterC
     baseUrl: url.origin,
     tenantId,
     allowedProviders,
+    modelProviders,
     defaultModel,
     adminToken: required(env.CLAWROUTER_ADMIN_TOKEN, "CLAWROUTER_ADMIN_TOKEN"),
     credentialSecret,
@@ -104,8 +109,14 @@ export class ClawRouterControl {
   }
 
   fleetPolicy(): ClawRouterFleetPolicy {
-    const { baseUrl, tenantId, allowedProviders, defaultModel } = this.#config;
-    return { baseUrl, tenantId, allowedProviders: [...allowedProviders], defaultModel };
+    const { baseUrl, tenantId, allowedProviders, modelProviders, defaultModel } = this.#config;
+    return {
+      baseUrl,
+      tenantId,
+      allowedProviders: [...allowedProviders],
+      modelProviders: { ...modelProviders },
+      defaultModel,
+    };
   }
 
   async credentials(claw: ClawRecord, expectedGeneration: number): Promise<Array<[string, string]>> {
@@ -237,7 +248,10 @@ export class ClawRouterControl {
       catalogReady: [
         claw.desired.inference.model,
         ...claw.desired.inference.fallbackModels,
-      ].every((model) => catalogContains(catalog, model)),
+      ].every((model) => {
+        const providerId = router.modelProviders[model];
+        return Boolean(providerId) && catalogContains(catalog, model, providerId);
+      }),
       routeVerified: false,
       budget: budgetObservation(usageRecord.budget, monthlyBudgetMicros),
       ...(usageRecord.usage ? { usage: usageSummary(usageRecord.usage) } : {}),
@@ -351,16 +365,19 @@ async function readBoundedJson(response: Response): Promise<unknown> {
   }
 }
 
-function catalogContains(value: unknown, model: string): boolean {
-  const [, providerId, ...modelParts] = model.split("/");
-  const expectedModel = modelParts.join("/");
+function catalogContains(value: unknown, model: string, providerId: string): boolean {
+  const expectedModel = model.startsWith("clawrouter/")
+    ? model.slice("clawrouter/".length)
+    : "";
   const providers = asRecord(value).providers;
-  if (!providerId || !expectedModel || !Array.isArray(providers)) return false;
-  return providers.some((provider) => {
+  if (!expectedModel || !Array.isArray(providers)) return false;
+  let matches = 0;
+  for (const provider of providers) {
     const row = asRecord(provider);
-    if (row.id !== providerId || row.executable !== true || !Array.isArray(row.models)) return false;
-    return row.models.some((candidate) => asRecord(candidate).id === expectedModel);
-  });
+    if (row.id !== providerId || row.executable !== true || !Array.isArray(row.models)) continue;
+    matches += row.models.filter((candidate) => asRecord(candidate).id === expectedModel).length;
+  }
+  return matches === 1;
 }
 
 function budgetFrom(limit: number | null): InferenceObservation["budget"] {
@@ -410,22 +427,71 @@ function sameStrings(a: string[], b: string[]): boolean {
   return a.length === expected.length && a.every((value, index) => value === expected[index]);
 }
 
+function sameStringRecord(a: Record<string, string>, b: Record<string, string>): boolean {
+  const left = Object.entries(asRecord(a));
+  if (left.some(([, value]) => typeof value !== "string")) return false;
+  const sortedLeft = left.sort(([first], [second]) => first.localeCompare(second));
+  const right = Object.entries(b).sort(([first], [second]) => first.localeCompare(second));
+  return JSON.stringify(sortedLeft) === JSON.stringify(right);
+}
+
 function assertDesiredRouter(
   config: ClawRouterConfig,
   claw: ClawRecord,
   router: Extract<ClawRecord["desired"]["inference"]["router"], { kind: "clawrouter" }>,
 ): void {
   const expectedId = `crabhelm_${claw.id.replaceAll("-", "").toLowerCase()}`;
+  const expectedProviders = [
+    claw.desired.inference.model,
+    ...claw.desired.inference.fallbackModels,
+  ].map((model) => config.modelProviders[model]);
   if (
     router.baseUrl !== config.baseUrl ||
     router.tenantId !== config.tenantId ||
     router.policyId !== expectedId ||
     router.credentialId !== expectedId ||
     !sameStrings(router.allowedProviders, config.allowedProviders) ||
-    router.providers.some((provider) => !config.allowedProviders.includes(provider))
+    !sameStringRecord(router.modelProviders, config.modelProviders) ||
+    expectedProviders.some((provider) => !provider) ||
+    !sameStrings(
+      router.providers,
+      expectedProviders.filter(
+        (provider, index, providers): provider is string =>
+          Boolean(provider) && providers.indexOf(provider) === index,
+      ),
+    )
   ) {
     throw operationalError("CLAWROUTER_STATUS_INVALID", "ClawRouter desired state does not match fleet configuration");
   }
+}
+
+function parseModelProviderMap(
+  value: string | undefined,
+  allowedProviders: string[],
+): Record<string, string> {
+  const entries = required(value, "CLAWROUTER_MODEL_PROVIDER_MAP")
+    .split(",")
+    .map((entry) => entry.trim());
+  if (entries.length < 1 || entries.length > 128 || entries.some((entry) => !entry)) {
+    throw new Error("CLAWROUTER_MODEL_PROVIDER_MAP must contain 1 to 128 mappings");
+  }
+  const result: Record<string, string> = {};
+  for (const entry of entries) {
+    const separator = entry.lastIndexOf("=");
+    const model = separator > 0 ? entry.slice(0, separator).trim() : "";
+    const provider = separator > 0 ? entry.slice(separator + 1).trim() : "";
+    if (!/^clawrouter\/[a-z0-9][a-z0-9-]{0,63}\/[A-Za-z0-9][A-Za-z0-9_.:\-/]{0,199}$/u.test(model)) {
+      throw new Error("CLAWROUTER_MODEL_PROVIDER_MAP contains an invalid ClawRouter model");
+    }
+    if (!allowedProviders.includes(provider)) {
+      throw new Error("CLAWROUTER_MODEL_PROVIDER_MAP contains a provider outside the fleet allowlist");
+    }
+    if (Object.hasOwn(result, model)) {
+      throw new Error("CLAWROUTER_MODEL_PROVIDER_MAP contains a duplicate model");
+    }
+    result[model] = provider;
+  }
+  return Object.fromEntries(Object.entries(result).sort(([first], [second]) => first.localeCompare(second)));
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

@@ -9,9 +9,9 @@ Live evidence is separate from unit and simulator evidence. Detailed production 
 | Identity-aware console | Cloudflare Access JWT issuer, audience, signature, and expiry verified before principal resolution; AWS verifies the ALB assertion signature, signer ARN, OIDC client, issuer, and expiry, then maps configured emails and groups to the administrator role | Cloudflare live; AWS automated |
 | Private appliance | Digest-pinned archive under top-level `bundle/` in private R2 or S3; archive and manifest digests enforced before bootstrap | Cloudflare live; AWS automated |
 | Real placement | Crabbox-created workspace with provider resource evidence; no simulator selected in production | Live |
-| OpenClaw child | Gateway `2026.6.11`, loopback readiness, exact model `openai/gpt-5.5`, managed persona, read-only instructions and skills | Live |
+| OpenClaw direct-reference child | Gateway `2026.6.11`, loopback readiness, exact model `openai/gpt-5.5`, managed persona, read-only instructions and skills | Live; direct mode only |
 | Actual inference | Bounded `openclaw agent` challenge returned the exact expected marker; `authReady: true`; `liveInferenceProbe: true` | Live |
-| ClawRouter integration | Per-claw policy and epoch credential registration, hash-only control-plane secret handling, exact base URL/env SecretRef/plugin config, health/catalog/usage projection, credential rotation, `models status --probe`, and exact-model `CLAWROUTER_CANARY_OK` route proof | Implemented + automated; disposable FakeCo live proof required |
+| ClawRouter integration | Explicit full-model-to-canonical-provider mapping, per-claw policy and epoch credential registration, hash-only control-plane secret handling, exact base URL/env SecretRef/plugin config, health/catalog/usage projection, credential rotation, `models status --probe`, and exact-model `CLAWROUTER_CANARY_OK` route proof | Implemented + automated; post-overlay appliance and disposable FakeCo live proof required |
 | Slack end to end | Production DM route completed and Slack delivered exact probe replies through the remote OpenClaw runtime, including after forced reconnect | Live |
 | Runtime reliability | Single-process appliance lock, authenticated outbound WebSocket dispatch and credential rotation, bounded process-group execution, delivery retry, reset-generation cancellation, and release-pinned in-place appliance rollout | Live + automated |
 | Runtime authentication | Owner-only ten-minute workload credential, one-use refresh rotation, one-use connection tickets, and no credential inheritance by turn processes | Live + automated |
@@ -26,7 +26,7 @@ Live evidence is separate from unit and simulator evidence. Detailed production 
 
 ```bash
 pnpm check
-pnpm exec wrangler deploy --dry-run --config wrangler.production.jsonc
+pnpm exec wrangler deploy --dry-run
 curl --fail "${CRABHELM_RUNTIME_URL:?set the production runtime URL}/healthz"
 ```
 
@@ -41,7 +41,7 @@ aws cloudformation validate-template \
 
 PostgreSQL integration coverage runs when `CRABHELM_TEST_POSTGRES_URL` identifies an isolated test database. Before treating an AWS installation as production-ready, also complete the stack, DNS, OIDC, appliance-upload, health, runtime-reconnect, and lifecycle checks in the [AWS deployment guide](../deploy/aws/README.md). Never point those checks at a Cloudflare installation's state or secrets.
 
-Authenticated state for the existing direct-provider reference proof must show the claw as `ready`, Gateway `2026.6.11`, configured and resolved model `openai/gpt-5.5`, `authReady: true`, `liveInferenceProbe: true`, and one connected runtime bridge. A ClawRouter/FakeCo proof must instead show the desired `clawrouter/<provider>/<model>`, matching observed router origin/provider scope, `routerHealthy: true`, `catalogReady: true`, `routeVerified: true`, a successful bounded `models status --probe`, a fresh exact-model `CLAWROUTER_CANARY_OK` marker for the current credential epoch, and one connected runtime bridge. Gateway startup proof uses `/readyz`; ongoing liveness uses `/healthz`. Production readiness is never inferred from provider allocation, ClawRouter configuration alone, echoed shell source, or process existence.
+Authenticated state for the existing direct-provider reference proof must show the claw as `ready`, Gateway `2026.6.11`, configured and resolved model `openai/gpt-5.5`, `authReady: true`, `liveInferenceProbe: true`, and one connected runtime bridge. That artifact predates the OpenClaw ClawRouter provider-overlay fix and is not evidence for routed mode. A ClawRouter/FakeCo proof requires a new digest-pinned appliance built from the landed overlay commit and must show the desired `clawrouter/<catalog-model-id>`, matching explicit canonical provider mapping and observed router scope, `routerHealthy: true`, `catalogReady: true`, `routeVerified: true`, a successful bounded `models status --probe`, a fresh exact-model `CLAWROUTER_CANARY_OK` marker for the current credential epoch, and one connected runtime bridge. Gateway startup proof uses `/readyz`; ongoing liveness uses `/healthz`. Production readiness is never inferred from provider allocation, ClawRouter configuration alone, echoed shell source, or process existence.
 
 ## Production proof publication policy
 
