@@ -741,6 +741,7 @@ type ManagedDesired = {
   model: string;
   fallbackModels: string[];
   routerBaseUrl?: string;
+  legacyOpenAiBaseUrl?: string;
   slackEnabled: boolean;
   dmPolicy: "pairing" | "allowlist" | "disabled";
   groupPolicy: "allowlist" | "disabled";
@@ -907,6 +908,7 @@ function readManagedState(config: Record<string, unknown>): ManagedDesired {
   const diagnosticsOtel = asRecord(diagnostics.otel);
   const plugins = asRecord(config.plugins);
   const providers = asRecord(asRecord(config.models).providers);
+  const openAiBaseUrl = asRecord(providers.openai).baseUrl;
   const clawRouterEntry = asRecord(asRecord(plugins.entries).clawrouter);
   const clawRouterAllowed = Array.isArray(plugins.allow) && plugins.allow.includes("clawrouter");
   const diagnosticsEntry = asRecord(asRecord(plugins.entries)["diagnostics-otel"]);
@@ -919,6 +921,7 @@ function readManagedState(config: Record<string, unknown>): ManagedDesired {
     ...(clawRouterAllowed && clawRouterEntry.enabled === true && typeof asRecord(providers.clawrouter).baseUrl === "string"
       ? { routerBaseUrl: String(asRecord(providers.clawrouter).baseUrl) }
       : {}),
+    ...(typeof openAiBaseUrl === "string" ? { legacyOpenAiBaseUrl: openAiBaseUrl } : {}),
     slackEnabled: hasSlack && slack.enabled !== false,
     dmPolicy:
       slack.dmPolicy === "allowlist" || slack.dmPolicy === "disabled"
@@ -973,6 +976,11 @@ function applyManagedDesired(config: Record<string, unknown>, desired: ManagedDe
     ensureRecord(modelProviders, "clawrouter").baseUrl = desired.routerBaseUrl;
   } else {
     delete modelProviders.clawrouter;
+  }
+  const openAiProvider = asRecord(modelProviders.openai);
+  delete openAiProvider.baseUrl;
+  if (modelProviders.openai !== undefined && Object.keys(openAiProvider).length === 0) {
+    delete modelProviders.openai;
   }
   const diagnosticsEntry = ensureRecord(ensureRecord(plugins, "entries"), "diagnostics-otel");
   diagnosticsEntry.enabled = desired.otel.enabled;

@@ -62,6 +62,7 @@ test("child status command binds evidence to the configured child id", async () 
 test("child apply command performs managed-field compare-and-swap", async () => {
   const config: Record<string, unknown> = {
     agents: { defaults: { model: "openai/gpt-5.5" } },
+    models: { providers: { openai: { baseUrl: "https://crabhelm.example.test/model/v1", api: "responses" } } },
     plugins: { allow: "invalid-existing-policy" },
   };
   const handlers = new Map<string, (params?: string | null) => Promise<string>>();
@@ -114,6 +115,10 @@ test("child apply command performs managed-field compare-and-swap", async () => 
     fallbacks: [],
   });
   assert.equal((config.logging as { level: string }).level, "warn");
+  assert.deepEqual(
+    ((config.models as { providers: { openai: Record<string, unknown> } }).providers.openai),
+    { api: "responses" },
+  );
   assert.deepEqual((config.plugins as { allow: string[] }).allow, ["crabhelm", "slack", "diagnostics-otel"]);
   assert.equal(
     ((config.plugins as { entries: { "diagnostics-otel": { enabled: boolean } } }).entries["diagnostics-otel"].enabled),
