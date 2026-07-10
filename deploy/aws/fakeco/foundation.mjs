@@ -77,6 +77,86 @@ async function main() {
       printJson({ ok: true, phase, output, parameterCount: rendered.parameters.length });
       return;
     }
+    case "render-image-publication": {
+      const sourceSha = requireOption(options, "source-sha");
+      const output = requireOption(options, "output");
+      const rendered = renderImagePublication(profile, sourceSha, process.env);
+      await writePrivateJson(output, rendered);
+      printJson({
+        ok: true,
+        output,
+        sourceSha: rendered.sourceSha,
+        temporaryTag: rendered.temporaryTag,
+      });
+      return;
+    }
+    case "verify-image-publication-target": {
+      const rendered = await readJson(
+        requireOption(options, "rendered"),
+        "rendered FakeCo image publication",
+      );
+      const result = verifyObservedImagePublicationTarget(
+        profile,
+        rendered,
+        await readBoundedJson(
+          requireOption(options, "repository-response"),
+          "ECR repository response",
+          1024 * 1024,
+        ),
+        await readBoundedJson(
+          requireOption(options, "registry-scan-response"),
+          "ECR registry scan configuration",
+          1024 * 1024,
+        ),
+        await readBoundedJson(
+          requireOption(options, "repository-scan-response"),
+          "ECR repository scan configuration",
+          1024 * 1024,
+        ),
+      );
+      const output = requireOption(options, "output");
+      await writePrivateJson(output, result);
+      printJson({
+        ok: true,
+        output,
+        scanType: result.scan.type,
+        scanFrequency: result.scan.frequency,
+      });
+      return;
+    }
+    case "finalize-image-publication": {
+      const target = await readJson(
+        requireOption(options, "target"),
+        "verified FakeCo image publication target",
+      );
+      const publication = finalizeImagePublication(
+        profile,
+        target,
+        await readBoundedJson(
+          requireOption(options, "build-metadata"),
+          "BuildKit metadata",
+          2 * 1024 * 1024,
+        ),
+        await readBoundedJson(
+          requireOption(options, "ecr-image"),
+          "ECR image description",
+          2 * 1024 * 1024,
+        ),
+      );
+      const output = requireOption(options, "output");
+      await writePrivateJson(output, publication);
+      printJson({ ok: true, output, imageUri: publication.imageUri });
+      return;
+    }
+    case "image-publication-digest": {
+      const publication = await readJson(
+        requireOption(options, "publication"),
+        "FakeCo image publication",
+      );
+      verifyImagePublicationRecord(profile, publication);
+      process.stdout.write(publication.imageDigest);
+      return;
+    }
     case "verify": {
       const renderedPath = requireOption(options, "rendered");
       const rendered = await readJson(renderedPath, "rendered FakeCo deployment");
@@ -123,7 +203,6 @@ async function main() {
       const configInspection = inspection.kind === "single"
         ? inspection
         : inspectEcrIndexChild(
-            rendered,
             inspection,
             await readBoundedJson(
               requireOption(options, "child-ecr-response"),
@@ -148,7 +227,6 @@ async function main() {
       const configInspection = inspection.kind === "single"
         ? inspection
         : inspectEcrIndexChild(
-            rendered,
             inspection,
             await readBoundedJson(
               requireOption(options, "child-ecr-response"),
@@ -165,12 +243,70 @@ async function main() {
         ),
         inspection.kind,
       );
-      printJson({
+      const proof = {
         ok: true,
         kind: result.kind,
         os: result.os,
         architecture: result.architecture,
-      });
+      };
+      if (options.output) {
+        await writePrivateJson(options.output, {
+          ...proof,
+          imageDigest: result.selectedDigest,
+        });
+      }
+      printJson(proof);
+      return;
+    }
+    case "image-scan-state": {
+      const publication = await readJson(
+        requireOption(options, "publication"),
+        "FakeCo image publication",
+      );
+      const result = inspectImageScan(
+        profile,
+        publication,
+        requireOption(options, "scan-digest"),
+        await readBoundedJson(
+          requireOption(options, "scan-findings"),
+          "ECR image scan findings",
+          20 * 1024 * 1024,
+        ),
+      );
+      process.stdout.write(result.state);
+      return;
+    }
+    case "finalize-image-scan": {
+      const publication = await readJson(
+        requireOption(options, "publication"),
+        "FakeCo image publication",
+      );
+      const platformProof = await readJson(
+        requireOption(options, "platform-proof"),
+        "FakeCo image platform proof",
+      );
+      const result = finalizeImageScan(
+        profile,
+        publication,
+        platformProof,
+        requireOption(options, "scan-digest"),
+        await readBoundedJson(
+          requireOption(options, "scan-findings"),
+          "ECR image scan findings",
+          20 * 1024 * 1024,
+        ),
+      );
+      const output = requireOption(options, "output");
+      await writePrivateJson(output, result);
+      printJson({ ok: true, output, imageUri: result.imageUri });
+      return;
+    }
+    case "image-publication-summary": {
+      const publication = await readJson(
+        requireOption(options, "publication"),
+        "final FakeCo image publication",
+      );
+      process.stdout.write(formatImagePublicationSummary(profile, publication));
       return;
     }
     case "teardown-plan": {
@@ -226,7 +362,7 @@ async function main() {
     }
     default:
       throw new Error(
-        "usage: foundation.mjs <validate-profile|render|verify|parameter-overrides|image-manifest-kind|image-selected-digest|image-config-digest|verify-image-manifest|teardown-plan> [options]",
+        "usage: foundation.mjs <validate-profile|render|render-image-publication|verify-image-publication-target|finalize-image-publication|image-publication-digest|verify|parameter-overrides|image-manifest-kind|image-selected-digest|image-config-digest|verify-image-manifest|image-scan-state|finalize-image-scan|image-publication-summary|teardown-plan> [options]",
       );
   }
 }
@@ -241,6 +377,11 @@ function validateProfile(profile) {
   assertEqual(profile.environments?.deploy, "fakeco", "deploy environment");
   assertEqual(profile.environments?.teardown, "fakeco-teardown", "teardown environment");
   assertEqual(
+    profile.environments?.imagePublish,
+    "fakeco-image-publish",
+    "image publication environment",
+  );
+  assertEqual(
     profile.oidcSubjects?.deploy,
     "repo:openclaw/crabhelm:environment:fakeco",
     "deploy OIDC subject",
@@ -250,7 +391,17 @@ function validateProfile(profile) {
     "repo:openclaw/crabhelm:environment:fakeco-teardown",
     "teardown OIDC subject",
   );
+  assertEqual(
+    profile.oidcSubjects?.imagePublish,
+    "repo:openclaw/crabhelm:environment:fakeco-image-publish",
+    "image publication OIDC subject",
+  );
   assertEqual(profile.concurrencyGroup, "crabhelm-fakeco", "concurrency group");
+  assertEqual(
+    profile.imagePublishConcurrencyGroup,
+    "crabhelm-fakeco-image-publish",
+    "image publication concurrency group",
+  );
   assertEqual(
     profile.cloudFormationArtifactBucketPattern,
     "openclaw-fakeco-cfn-{accountId}-{region}",
@@ -258,6 +409,21 @@ function validateProfile(profile) {
   );
   assertEqual(profile.workloadRolePath, "/openclaw/fakeco/crabhelm/", "workload role path");
   assertEqual(profile.ecrRepositoryName, "openclaw/fakeco/crabhelm", "ECR repository name");
+  assertEqual(
+    profile.ecrRepositoryUriPattern,
+    "{accountId}.dkr.ecr.{region}.amazonaws.com/openclaw/fakeco/crabhelm",
+    "ECR repository URI pattern",
+  );
+  assertEqual(
+    profile.githubRolePaths?.imagePublish,
+    "openclaw/fakeco/github/crabhelm-image-publish",
+    "image publication role path",
+  );
+  assertEqual(
+    profile.imageScanPolicy?.maximumCriticalFindings,
+    0,
+    "maximum critical image findings",
+  );
   assertEqual(profile.tags?.Environment, "fakeco", "Environment tag");
   assertEqual(profile.tags?.ManagedBy, "github-actions", "ManagedBy tag");
   assertEqual(profile.tags?.Project, "crabhelm", "Project tag");
@@ -265,18 +431,30 @@ function validateProfile(profile) {
     assertEqual(profile.lockedParameters?.[key], value, `locked parameter ${key}`);
   }
   const foundationInputs = validateInputDefinitions(profile.foundationInputs, false);
+  const imagePublicationInputs = validateInputDefinitions(
+    profile.imagePublicationInputs,
+    false,
+  );
   const parameterInputs = validateInputDefinitions(profile.parameterInputs, true);
   const foundationNames = foundationInputs.map((entry) => entry.env);
   const parameterEnvironmentNames = parameterInputs.map((entry) => entry.env);
+  const publicationEnvironmentNames = imagePublicationInputs.map((entry) => entry.env);
   if (new Set(foundationNames).size !== foundationNames.length ||
-      new Set(parameterEnvironmentNames).size !== parameterEnvironmentNames.length) {
+      new Set(parameterEnvironmentNames).size !== parameterEnvironmentNames.length ||
+      new Set(publicationEnvironmentNames).size !== publicationEnvironmentNames.length) {
     throw new Error("profile input environment names must be unique within each input surface");
   }
-  const environmentNames = [...new Set([...foundationNames, ...parameterEnvironmentNames])];
-  for (const name of foundationNames.filter((entry) => parameterEnvironmentNames.includes(entry))) {
-    const foundationKind = foundationInputs.find((entry) => entry.env === name)?.kind;
-    const parameterKind = parameterInputs.find((entry) => entry.env === name)?.kind;
-    assertEqual(parameterKind, foundationKind, `shared input validator ${name}`);
+  const environmentNames = [...new Set([
+    ...foundationNames,
+    ...parameterEnvironmentNames,
+    ...publicationEnvironmentNames,
+  ])];
+  const allInputs = [...foundationInputs, ...parameterInputs, ...imagePublicationInputs];
+  for (const name of environmentNames) {
+    const kinds = new Set(
+      allInputs.filter((entry) => entry.env === name).map((entry) => entry.kind),
+    );
+    if (kinds.size !== 1) throw new Error(`shared input validator ${name} differs`);
   }
   const parameterNames = parameterInputs.map((entry) => entry.parameter);
   if (new Set(parameterNames).size !== parameterNames.length) {
@@ -374,6 +552,238 @@ function renderFromEnvironment(profile, phase, environment) {
   };
   verifyRendered(profile, rendered);
   return rendered;
+}
+
+function renderImagePublication(profile, sourceSha, environment) {
+  const validatedSourceSha = validateValue("sourceSha", sourceSha, {});
+  const raw = new Map();
+  for (const definition of profile.imagePublicationInputs) {
+    const value = environment[definition.env];
+    if (typeof value !== "string" || value.length === 0) {
+      throw new Error(`${definition.env} is required`);
+    }
+    assertSingleLine(value, definition.env);
+    raw.set(definition.env, value);
+  }
+  const context = {
+    profile,
+    accountId: validateValue("accountId", raw.get("FAKECO_AWS_ACCOUNT_ID"), {}),
+    region: validateValue("region", raw.get("FAKECO_AWS_REGION"), {}),
+  };
+  const target = {
+    accountId: context.accountId,
+    region: context.region,
+    githubRoleArn: validateValue(
+      "imagePublishRoleArn",
+      raw.get("FAKECO_IMAGE_PUBLISH_ROLE_ARN"),
+      context,
+    ),
+    ecrRepositoryArn: validateValue(
+      "ecrRepositoryArn",
+      raw.get("FAKECO_ECR_REPOSITORY_ARN"),
+      context,
+    ),
+    ecrRepositoryUri: validateValue(
+      "ecrRepositoryUri",
+      raw.get("FAKECO_ECR_REPOSITORY_URI"),
+      context,
+    ),
+  };
+  const temporaryTag = `git-${validatedSourceSha}`;
+  const rendered = {
+    schemaVersion: 1,
+    kind: "fakeco-image-publication-target",
+    profile: profile.name,
+    repository: profile.repository,
+    sourceSha: validatedSourceSha,
+    oidcSubject: profile.oidcSubjects.imagePublish,
+    target,
+    temporaryTag,
+    taggedImageUri: `${target.ecrRepositoryUri}:${temporaryTag}`,
+    repositoryVerified: false,
+  };
+  verifyImagePublicationTargetDocument(profile, rendered, false);
+  return rendered;
+}
+
+function verifyImagePublicationTargetDocument(profile, rendered, requireObserved) {
+  requireObject(rendered, "rendered image publication");
+  assertEqual(rendered.schemaVersion, 1, "image publication schemaVersion");
+  if (
+    rendered.kind !== "fakeco-image-publication-target" &&
+    rendered.kind !== "fakeco-image-publication"
+  ) {
+    throw new Error("image publication kind is invalid");
+  }
+  assertEqual(rendered.profile, profile.name, "image publication profile");
+  assertEqual(rendered.repository, profile.repository, "image publication repository");
+  const sourceSha = validateValue("sourceSha", rendered.sourceSha, {});
+  assertEqual(
+    rendered.oidcSubject,
+    profile.oidcSubjects.imagePublish,
+    "image publication OIDC subject",
+  );
+  requireObject(rendered.target, "image publication target");
+  const context = {
+    profile,
+    accountId: validateValue("accountId", rendered.target.accountId, {}),
+    region: validateValue("region", rendered.target.region, {}),
+  };
+  validateValue("imagePublishRoleArn", rendered.target.githubRoleArn, context);
+  validateValue("ecrRepositoryArn", rendered.target.ecrRepositoryArn, context);
+  validateValue("ecrRepositoryUri", rendered.target.ecrRepositoryUri, context);
+  const expectedTag = `git-${sourceSha}`;
+  assertEqual(rendered.temporaryTag, expectedTag, "image publication temporary tag");
+  assertOpaqueEqual(
+    rendered.taggedImageUri,
+    `${rendered.target.ecrRepositoryUri}:${expectedTag}`,
+    "image publication tagged URI",
+  );
+  if (requireObserved) {
+    assertEqual(rendered.repositoryVerified, true, "image publication repository proof");
+    requireObject(rendered.scan, "image publication scan configuration");
+    if (rendered.scan.type !== "BASIC" && rendered.scan.type !== "ENHANCED") {
+      throw new Error("image publication scan type is invalid");
+    }
+    const allowedFrequencies = rendered.scan.type === "BASIC"
+      ? new Set(["SCAN_ON_PUSH"])
+      : new Set(["SCAN_ON_PUSH", "CONTINUOUS_SCAN"]);
+    if (!allowedFrequencies.has(rendered.scan.frequency)) {
+      throw new Error("image publication repository must scan every pushed image");
+    }
+  } else {
+    assertEqual(rendered.repositoryVerified, false, "unverified image publication target");
+  }
+  return context;
+}
+
+function verifyObservedImagePublicationTarget(
+  profile,
+  rendered,
+  repositoryResponse,
+  registryScanResponse,
+  repositoryScanResponse,
+) {
+  verifyImagePublicationTargetDocument(profile, rendered, false);
+  requireObject(repositoryResponse, "ECR repository response");
+  if (!Array.isArray(repositoryResponse.repositories) || repositoryResponse.repositories.length !== 1) {
+    throw new Error("ECR repository response must contain exactly one repository");
+  }
+  const repository = repositoryResponse.repositories[0];
+  requireObject(repository, "ECR repository");
+  assertOpaqueEqual(
+    repository.registryId,
+    rendered.target.accountId,
+    "ECR repository registry account",
+  );
+  assertOpaqueEqual(
+    repository.repositoryArn,
+    rendered.target.ecrRepositoryArn,
+    "ECR repository ARN",
+  );
+  assertOpaqueEqual(
+    repository.repositoryName,
+    profile.ecrRepositoryName,
+    "ECR repository name",
+  );
+  assertOpaqueEqual(
+    repository.repositoryUri,
+    rendered.target.ecrRepositoryUri,
+    "ECR repository URI",
+  );
+  assertEqual(repository.imageTagMutability, "IMMUTABLE", "ECR image tag mutability");
+
+  requireObject(registryScanResponse, "ECR registry scan configuration");
+  const scanType = registryScanResponse.scanType;
+  if (scanType !== "BASIC" && scanType !== "ENHANCED") {
+    throw new Error("ECR registry scan type must be BASIC or ENHANCED");
+  }
+  requireObject(repositoryScanResponse, "ECR repository scan configuration");
+  if (!Array.isArray(repositoryScanResponse.failures) || repositoryScanResponse.failures.length !== 0) {
+    throw new Error("ECR repository scan configuration reported a failure");
+  }
+  if (
+    !Array.isArray(repositoryScanResponse.scanningConfigurations) ||
+    repositoryScanResponse.scanningConfigurations.length !== 1
+  ) {
+    throw new Error("ECR repository scan configuration must contain exactly one repository");
+  }
+  const scan = repositoryScanResponse.scanningConfigurations[0];
+  requireObject(scan, "ECR repository scan configuration");
+  assertOpaqueEqual(
+    scan.repositoryArn,
+    rendered.target.ecrRepositoryArn,
+    "ECR scan repository ARN",
+  );
+  assertOpaqueEqual(scan.repositoryName, profile.ecrRepositoryName, "ECR scan repository name");
+  assertEqual(scan.scanOnPush, true, "ECR repository scan-on-push setting");
+  const allowedFrequencies = scanType === "BASIC"
+    ? new Set(["SCAN_ON_PUSH"])
+    : new Set(["SCAN_ON_PUSH", "CONTINUOUS_SCAN"]);
+  if (!allowedFrequencies.has(scan.scanFrequency)) {
+    throw new Error("ECR repository must use scan-on-push or continuous scanning");
+  }
+  return {
+    ...rendered,
+    repositoryVerified: true,
+    scan: {
+      type: scanType,
+      frequency: scan.scanFrequency,
+    },
+  };
+}
+
+function finalizeImagePublication(profile, target, buildMetadata, ecrImageResponse) {
+  verifyImagePublicationTargetDocument(profile, target, true);
+  requireObject(buildMetadata, "BuildKit metadata");
+  const buildDigest = requireSha256Digest(
+    buildMetadata["containerimage.digest"],
+    "BuildKit pushed image digest",
+  );
+  requireObject(ecrImageResponse, "ECR image description");
+  if (!Array.isArray(ecrImageResponse.imageDetails) || ecrImageResponse.imageDetails.length !== 1) {
+    throw new Error("ECR image description must contain exactly one image");
+  }
+  const image = ecrImageResponse.imageDetails[0];
+  requireObject(image, "ECR image description");
+  assertOpaqueEqual(image.registryId, target.target.accountId, "published image registry account");
+  assertOpaqueEqual(image.repositoryName, profile.ecrRepositoryName, "published image repository");
+  assertOpaqueEqual(image.imageDigest, buildDigest, "BuildKit and ECR image digest");
+  if (!Array.isArray(image.imageTags) || !image.imageTags.includes(target.temporaryTag)) {
+    throw new Error("published image does not have the verified commit-derived tag");
+  }
+  const publication = {
+    ...target,
+    kind: "fakeco-image-publication",
+    imageDigest: buildDigest,
+    imageUri: `${target.target.ecrRepositoryUri}@${buildDigest}`,
+  };
+  verifyImagePublicationRecord(profile, publication);
+  return publication;
+}
+
+function verifyImagePublicationRecord(profile, publication) {
+  verifyImagePublicationTargetDocument(profile, publication, true);
+  if (publication.kind !== "fakeco-image-publication") {
+    throw new Error("finalized image publication kind is invalid");
+  }
+  const imageDigest = requireSha256Digest(
+    publication.imageDigest,
+    "published image digest",
+  );
+  assertOpaqueEqual(
+    publication.imageUri,
+    `${publication.target.ecrRepositoryUri}@${imageDigest}`,
+    "published digest-bound image URI",
+  );
+  return {
+    accountId: publication.target.accountId,
+    region: publication.target.region,
+    ecrRepositoryArn: publication.target.ecrRepositoryArn,
+    ecrRepositoryName: profile.ecrRepositoryName,
+    imageDigest,
+    imageUri: publication.imageUri,
+  };
 }
 
 function verifyRendered(profile, rendered, stackDocument) {
@@ -770,18 +1180,16 @@ function optionalTopLevelResourceField(block, field, logicalId) {
 }
 
 function inspectEcrManifest(profile, rendered, response) {
-  verifyRendered(profile, rendered);
-  const parameters = parameterMap(rendered.parameters);
-  const imageUri = parameters.get("ImageUri");
-  const expectedDigest = imageUri.slice(imageUri.lastIndexOf("@") + 1);
+  const selection = resolveImageSelection(profile, rendered);
+  const expectedDigest = selection.imageDigest;
   const parsed = parseBoundEcrManifest(
-    rendered,
+    selection,
     response,
     expectedDigest,
     "ECR image manifest",
   );
   if (singleImageMediaTypes.has(parsed.mediaType)) {
-    return inspectSingleManifest(parsed, expectedDigest, "container image");
+    return inspectSingleManifest(parsed, expectedDigest, "container image", selection);
   }
   if (imageIndexMediaTypes.has(parsed.mediaType)) {
     if (!Array.isArray(parsed.manifest.manifests) || parsed.manifest.manifests.length === 0) {
@@ -808,17 +1216,18 @@ function inspectEcrManifest(profile, rendered, response) {
         "Linux/AMD64 child manifest digest",
       ),
       selectedMediaType: candidate.mediaType,
+      selection,
     };
   }
   throw new Error("container image manifest media type is unsupported");
 }
 
-function inspectEcrIndexChild(rendered, indexInspection, response) {
+function inspectEcrIndexChild(indexInspection, response) {
   if (indexInspection.kind !== "index") {
     throw new Error("child image inspection requires an image index");
   }
   const parsed = parseBoundEcrManifest(
-    rendered,
+    indexInspection.selection,
     response,
     indexInspection.selectedDigest,
     "ECR child image manifest",
@@ -835,10 +1244,28 @@ function inspectEcrIndexChild(rendered, indexInspection, response) {
     parsed,
     indexInspection.selectedDigest,
     "Linux/AMD64 child image",
+    indexInspection.selection,
   );
 }
 
-function parseBoundEcrManifest(rendered, response, expectedDigest, label) {
+function resolveImageSelection(profile, rendered) {
+  if (rendered?.kind === "fakeco-image-publication") {
+    return verifyImagePublicationRecord(profile, rendered);
+  }
+  verifyRendered(profile, rendered);
+  const parameters = parameterMap(rendered.parameters);
+  const imageUri = parameters.get("ImageUri");
+  return {
+    accountId: rendered.target.accountId,
+    region: rendered.target.region,
+    ecrRepositoryArn: rendered.target.ecrRepositoryArn,
+    ecrRepositoryName: profile.ecrRepositoryName,
+    imageDigest: imageUri.slice(imageUri.lastIndexOf("@") + 1),
+    imageUri,
+  };
+}
+
+function parseBoundEcrManifest(selection, response, expectedDigest, label) {
   requireObject(response, "ECR image manifest response");
   if (!Array.isArray(response.failures) || response.failures.length !== 0) {
     throw new Error(`${label} lookup reported a failure`);
@@ -849,9 +1276,8 @@ function parseBoundEcrManifest(rendered, response, expectedDigest, label) {
   const image = response.images[0];
   requireObject(image, label);
   requireObject(image.imageId, `${label} id`);
-  const expectedRepository = rendered.target.ecrRepositoryArn.split(":repository/")[1];
-  assertOpaqueEqual(image.registryId, rendered.target.accountId, `${label} registry account`);
-  assertOpaqueEqual(image.repositoryName, expectedRepository, `${label} repository`);
+  assertOpaqueEqual(image.registryId, selection.accountId, `${label} registry account`);
+  assertOpaqueEqual(image.repositoryName, selection.ecrRepositoryName, `${label} repository`);
   assertOpaqueEqual(image.imageId.imageDigest, expectedDigest, `${label} digest`);
   if (typeof image.imageManifest !== "string" || image.imageManifest.length > 5 * 1024 * 1024) {
     throw new Error(`${label} must be bounded JSON text`);
@@ -882,7 +1308,7 @@ function parseBoundEcrManifest(rendered, response, expectedDigest, label) {
   return { manifest, mediaType };
 }
 
-function inspectSingleManifest(parsed, selectedDigest, label) {
+function inspectSingleManifest(parsed, selectedDigest, label, selection) {
   requireObject(parsed.manifest.config, `${label} config descriptor`);
   if (!imageConfigMediaTypes.has(parsed.manifest.config.mediaType)) {
     throw new Error(`${label} config media type is unsupported`);
@@ -894,6 +1320,7 @@ function inspectSingleManifest(parsed, selectedDigest, label) {
       parsed.manifest.config.digest,
       `${label} config digest`,
     ),
+    selection,
   };
 }
 
@@ -912,6 +1339,184 @@ function verifyImageConfig(inspection, document, outputKind) {
     selectedDigest: inspection.selectedDigest,
     configDigest: inspection.configDigest,
   };
+}
+
+function inspectImageScan(profile, publication, scanDigestValue, response) {
+  const selection = verifyImagePublicationRecord(profile, publication);
+  const scanDigest = requireSha256Digest(scanDigestValue, "image scan digest");
+  requireObject(response, "ECR image scan findings");
+  if (response.nextToken !== undefined && response.nextToken !== null) {
+    throw new Error("ECR image scan findings must not be truncated");
+  }
+  assertOpaqueEqual(response.registryId, selection.accountId, "image scan registry account");
+  assertOpaqueEqual(
+    response.repositoryName,
+    selection.ecrRepositoryName,
+    "image scan repository",
+  );
+  requireObject(response.imageId, "image scan identity");
+  assertOpaqueEqual(response.imageId.imageDigest, scanDigest, "image scan digest");
+  requireObject(response.imageScanStatus, "image scan status");
+  const status = response.imageScanStatus.status;
+  if (status === "IN_PROGRESS" || status === "PENDING") {
+    return { state: "pending", status };
+  }
+  const readyStatuses = publication.scan.type === "BASIC"
+    ? new Set(["COMPLETE"])
+    : new Set(["ACTIVE", "COMPLETE"]);
+  if (!readyStatuses.has(status)) {
+    throw new Error("ECR image scan ended in a non-ready terminal status");
+  }
+  requireObject(response.imageScanFindings, "completed image scan findings");
+  const completedAt = response.imageScanFindings.imageScanCompletedAt;
+  if (typeof completedAt !== "string" || Number.isNaN(Date.parse(completedAt))) {
+    throw new Error("completed image scan is missing a valid completion timestamp");
+  }
+  return {
+    state: "ready",
+    status,
+    completedAt: new Date(completedAt).toISOString(),
+    counts: normalizeSeverityCounts(response.imageScanFindings.findingSeverityCounts),
+    scanDigest,
+  };
+}
+
+function normalizeSeverityCounts(value) {
+  const names = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFORMATIONAL", "UNDEFINED"];
+  if (value === undefined) value = {};
+  requireObject(value, "image scan severity counts");
+  for (const key of Object.keys(value)) {
+    if (!names.includes(key)) throw new Error("image scan severity map contains unsupported keys");
+  }
+  return Object.fromEntries(names.map((name) => {
+    const count = value[name] ?? 0;
+    if (!Number.isSafeInteger(count) || count < 0) {
+      throw new Error(`image scan severity count ${name} is invalid`);
+    }
+    return [name, count];
+  }));
+}
+
+function finalizeImageScan(profile, publication, platformProof, scanDigest, response) {
+  verifyImagePublicationRecord(profile, publication);
+  requireObject(platformProof, "image platform proof");
+  assertEqual(platformProof.ok, true, "image platform proof result");
+  if (platformProof.kind !== "single" && platformProof.kind !== "index") {
+    throw new Error("image platform proof kind is invalid");
+  }
+  assertEqual(platformProof.os, "linux", "image platform operating system");
+  assertEqual(platformProof.architecture, "amd64", "image platform architecture");
+  assertOpaqueEqual(platformProof.imageDigest, scanDigest, "image platform scan digest");
+  const scan = inspectImageScan(profile, publication, scanDigest, response);
+  if (scan.state !== "ready") throw new Error("ECR image scan is not complete");
+  const criticalLimit = profile.imageScanPolicy.maximumCriticalFindings;
+  if (scan.counts.CRITICAL > criticalLimit) {
+    throw new Error(
+      `ECR image scan has ${scan.counts.CRITICAL} CRITICAL findings; maximum is ${criticalLimit}`,
+    );
+  }
+  const result = {
+    schemaVersion: 1,
+    kind: "fakeco-crabhelm-control-plane-image",
+    repository: profile.repository,
+    sourceSha: publication.sourceSha,
+    imageUri: publication.imageUri,
+    imageDigest: publication.imageDigest,
+    temporaryTag: publication.temporaryTag,
+    platform: {
+      os: "linux",
+      architecture: "amd64",
+      imageDigest: scan.scanDigest,
+    },
+    scan: {
+      type: publication.scan.type,
+      frequency: publication.scan.frequency,
+      status: scan.status,
+      completedAt: scan.completedAt,
+      threshold: {
+        maximumCriticalFindings: criticalLimit,
+      },
+      findingSeverityCounts: scan.counts,
+    },
+  };
+  verifyFinalImagePublication(profile, result);
+  return result;
+}
+
+function verifyFinalImagePublication(profile, publication) {
+  requireObject(publication, "final image publication");
+  assertEqual(publication.schemaVersion, 1, "final image publication schemaVersion");
+  assertEqual(
+    publication.kind,
+    "fakeco-crabhelm-control-plane-image",
+    "final image publication kind",
+  );
+  assertEqual(publication.repository, profile.repository, "final image publication repository");
+  const sourceSha = validateValue("sourceSha", publication.sourceSha, {});
+  const imageDigest = requireSha256Digest(
+    publication.imageDigest,
+    "final published image digest",
+  );
+  if (
+    typeof publication.imageUri !== "string" ||
+    !new RegExp(
+      `^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com/${escapeRegex(profile.ecrRepositoryName)}@${escapeRegex(imageDigest)}$`,
+      "u",
+    ).test(publication.imageUri)
+  ) {
+    throw new Error("final published image URI is invalid");
+  }
+  assertEqual(publication.temporaryTag, `git-${sourceSha}`, "final image temporary tag");
+  requireObject(publication.platform, "final image platform");
+  assertEqual(publication.platform.os, "linux", "final image operating system");
+  assertEqual(publication.platform.architecture, "amd64", "final image architecture");
+  requireSha256Digest(publication.platform.imageDigest, "final platform image digest");
+  requireObject(publication.scan, "final image scan");
+  if (publication.scan.type !== "BASIC" && publication.scan.type !== "ENHANCED") {
+    throw new Error("final image scan type is invalid");
+  }
+  if (!new Set(["SCAN_ON_PUSH", "CONTINUOUS_SCAN"]).has(publication.scan.frequency)) {
+    throw new Error("final image scan frequency is invalid");
+  }
+  const readyStatuses = publication.scan.type === "BASIC"
+    ? new Set(["COMPLETE"])
+    : new Set(["ACTIVE", "COMPLETE"]);
+  if (!readyStatuses.has(publication.scan.status)) {
+    throw new Error("final image scan status is invalid");
+  }
+  if (
+    typeof publication.scan.completedAt !== "string" ||
+    Number.isNaN(Date.parse(publication.scan.completedAt))
+  ) {
+    throw new Error("final image scan completion time is invalid");
+  }
+  requireObject(publication.scan.threshold, "final image scan threshold");
+  assertEqual(
+    publication.scan.threshold.maximumCriticalFindings,
+    profile.imageScanPolicy.maximumCriticalFindings,
+    "final image critical threshold",
+  );
+  const counts = normalizeSeverityCounts(publication.scan.findingSeverityCounts);
+  if (counts.CRITICAL > publication.scan.threshold.maximumCriticalFindings) {
+    throw new Error("final image publication exceeds its critical finding threshold");
+  }
+  return publication;
+}
+
+function formatImagePublicationSummary(profile, publication) {
+  verifyFinalImagePublication(profile, publication);
+  const counts = normalizeSeverityCounts(publication.scan.findingSeverityCounts);
+  return [
+    "### FakeCo Crabhelm control-plane image published",
+    "",
+    `- Source commit: \`${publication.sourceSha}\``,
+    `- Digest-bound image: \`${publication.imageUri}\``,
+    "- Platform: `linux/amd64`",
+    `- ECR scan: \`${publication.scan.type}/${publication.scan.frequency}\` (${publication.scan.status})`,
+    `- Findings: CRITICAL=${counts.CRITICAL}, HIGH=${counts.HIGH}, MEDIUM=${counts.MEDIUM}, LOW=${counts.LOW}`,
+    "- Next step: review the artifact, then manually set `FAKECO_IMAGE_URI` in the protected `fakeco` Environment.",
+    "",
+  ].join("\n");
 }
 
 function requireSha256Digest(value, label) {
@@ -937,6 +1542,13 @@ function validateValue(kind, value, context) {
       return value;
     case "githubRoleArn":
       return exactIamArn(value, context, "role", context.profile.githubRolePaths[context.phase]);
+    case "imagePublishRoleArn":
+      return exactIamArn(
+        value,
+        context,
+        "role",
+        context.profile.githubRolePaths.imagePublish,
+      );
     case "cloudFormationServiceRoleArn":
       return exactIamArn(
         value,
@@ -961,6 +1573,13 @@ function validateValue(kind, value, context) {
     case "ecrRepositoryArn": {
       const expected = `arn:aws:ecr:${context.region}:${context.accountId}:repository/${context.profile.ecrRepositoryName}`;
       assertOpaqueEqual(value, expected, "FakeCo ECR repository ARN");
+      return value;
+    }
+    case "ecrRepositoryUri": {
+      const expected = context.profile.ecrRepositoryUriPattern
+        .replace("{accountId}", context.accountId)
+        .replace("{region}", context.region);
+      assertOpaqueEqual(value, expected, "FakeCo ECR repository URI");
       return value;
     }
     case "certificateArn":
@@ -1016,6 +1635,11 @@ function validateValue(kind, value, context) {
     case "digest":
       if (!/^[0-9a-f]{64}$/u.test(value) || /^0{64}$/u.test(value)) {
         throw new Error("artifact digest must be a non-placeholder lowercase SHA-256 digest");
+      }
+      return value;
+    case "sourceSha":
+      if (!/^[0-9a-f]{40}$/u.test(value) || /^0{40}$/u.test(value)) {
+        throw new Error("source SHA must be an exact non-placeholder lowercase 40-character commit id");
       }
       return value;
     case "topicName":

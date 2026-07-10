@@ -6,7 +6,7 @@ Live evidence is separate from unit and simulator evidence. Detailed production 
 | --- | --- | --- |
 | Cloudflare reference control plane | Configured console and runtime hosts; organization and per-claw Durable Objects; alarm reconciliation | Live |
 | AWS control plane | Singleton ECS/Fargate service behind an HTTPS ALB; ALB OIDC assertion verification; native runtime WebSockets; PostgreSQL state; private S3 stores; SQS audit delivery | Implemented + automated; deployment-specific live proof required |
-| FakeCo AWS foundation | Locked account/Region renderer; exact deploy/teardown OIDC subjects; permissions boundary and role path; external ECR digest/XOR and digest-bound Linux/AMD64 config proof; bounded storage/log retention; deterministic tags; live-template-bound exact-set standard-only retained-resource teardown plan; no secret reads | Implemented + automated; GitHub Environments and AWS prerequisites not created |
+| FakeCo AWS foundation | Locked account/Region renderer; exact deploy/teardown/image-publish OIDC subjects; dedicated protected-main image role; landed-source reachability; BuildKit/ECR digest equality; digest-bound Linux/AMD64 config and ECR scan-threshold proof; permissions boundary and role path; bounded storage/log retention; deterministic tags; live-template-bound exact-set standard-only retained-resource teardown plan; no secret reads | Implemented + automated; GitHub Environments, ECR image publication, and AWS prerequisites not created or run |
 | Identity-aware console | Cloudflare Access JWT issuer, audience, signature, and expiry verified before principal resolution; AWS verifies the ALB assertion signature, signer ARN, OIDC client, issuer, and expiry, then maps configured emails and groups to the administrator role | Cloudflare live; AWS automated |
 | Private appliance | Digest-pinned archive under top-level `bundle/` in private R2 or S3; archive and manifest digests enforced before bootstrap | Cloudflare live; AWS automated |
 | Real placement | Crabbox-created workspace with provider resource evidence; no simulator selected in production | Live |
@@ -37,6 +37,7 @@ AWS implementation checks:
 pnpm exec tsgo -p tsconfig.aws.json --noEmit
 node --import tsx --test tests/aws/*.test.ts
 pnpm aws:fakeco:validate
+actionlint .github/workflows/publish-fakeco-image.yml
 ruby -e 'require "psych"; Psych.parse_file(ARGV[0])' deploy/aws/template.yaml
 ```
 

@@ -1,0 +1,249 @@
+name: Publish FakeCo control-plane image
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact landed 40-character Crabhelm commit SHA reachable from current main.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: crabhelm-fakeco-image-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main' && github.ref_protected
+    environment: fakeco-image-publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      FAKECO_AWS_ACCOUNT_ID: ${{ vars.FAKECO_AWS_ACCOUNT_ID }}
+      FAKECO_AWS_REGION: ${{ vars.FAKECO_AWS_REGION }}
+      FAKECO_IMAGE_PUBLISH_ROLE_ARN: ${{ vars.FAKECO_IMAGE_PUBLISH_ROLE_ARN }}
+      FAKECO_ECR_REPOSITORY_ARN: ${{ vars.FAKECO_ECR_REPOSITORY_ARN }}
+      FAKECO_ECR_REPOSITORY_URI: ${{ vars.FAKECO_ECR_REPOSITORY_URI }}
+    steps:
+      - name: Check out protected current main
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify landed source and render publication target
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_REF_PROTECTED" == "true" ]]
+          [[ "$(uname -m)" == "x86_64" ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse "${SOURCE_SHA}^{commit}")" == "$SOURCE_SHA" ]]
+          git merge-base --is-ancestor "$SOURCE_SHA" "$GITHUB_SHA"
+          node deploy/aws/fakeco/foundation.mjs render-image-publication \
+            --source-sha "$SOURCE_SHA" \
+            --output "$RUNNER_TEMP/fakeco-image-target.json"
+          source_dir="$RUNNER_TEMP/fakeco-source"
+          mkdir -m 0700 "$source_dir"
+          git archive --format=tar "$SOURCE_SHA" >"$RUNNER_TEMP/fakeco-source.tar"
+          tar --extract --file "$RUNNER_TEMP/fakeco-source.tar" --directory "$source_dir"
+          test -f "$source_dir/Dockerfile.aws"
+
+      - name: Configure image-publication credentials
+        uses: aws-actions/configure-aws-credentials@00943011d9042930efac3dcd3a170e4273319bc8 # v5.1.0
+        with:
+          allowed-account-ids: ${{ vars.FAKECO_AWS_ACCOUNT_ID }}
+          aws-region: ${{ vars.FAKECO_AWS_REGION }}
+          mask-aws-account-id: true
+          role-session-name: crabhelm-fakeco-image-publish
+          role-to-assume: ${{ vars.FAKECO_IMAGE_PUBLISH_ROLE_ARN }}
+          unset-current-credentials: true
+
+      - name: Verify exact immutable repository and scan-on-push coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$(aws sts get-caller-identity --query Account --output text)" == "$FAKECO_AWS_ACCOUNT_ID" ]]
+          aws ecr describe-repositories \
+            --registry-id "$FAKECO_AWS_ACCOUNT_ID" \
+            --repository-names openclaw/fakeco/crabhelm \
+            --output json >"$RUNNER_TEMP/fakeco-ecr-repository.json"
+          aws ecr get-registry-scanning-configuration \
+            --output json >"$RUNNER_TEMP/fakeco-ecr-registry-scan.json"
+          aws ecr batch-get-repository-scanning-configuration \
+            --repository-names openclaw/fakeco/crabhelm \
+            --output json >"$RUNNER_TEMP/fakeco-ecr-repository-scan.json"
+          node deploy/aws/fakeco/foundation.mjs verify-image-publication-target \
+            --rendered "$RUNNER_TEMP/fakeco-image-target.json" \
+            --repository-response "$RUNNER_TEMP/fakeco-ecr-repository.json" \
+            --registry-scan-response "$RUNNER_TEMP/fakeco-ecr-registry-scan.json" \
+            --repository-scan-response "$RUNNER_TEMP/fakeco-ecr-repository-scan.json" \
+            --output "$RUNNER_TEMP/fakeco-image-verified-target.json"
+
+      - name: Build natively and push SBOM/provenance image
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          registry_host="${FAKECO_ECR_REPOSITORY_URI%%/*}"
+          [[ "$registry_host" == "${FAKECO_AWS_ACCOUNT_ID}.dkr.ecr.${FAKECO_AWS_REGION}.amazonaws.com" ]]
+          aws ecr get-login-password | docker login \
+            --username AWS \
+            --password-stdin "$registry_host"
+          builder="crabhelm-fakeco-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() {
+            docker buildx rm --force "$builder" >/dev/null 2>&1 || true
+            docker logout "$registry_host" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker buildx create --name "$builder" --driver docker-container --use
+          docker buildx inspect --bootstrap
+          docker buildx build \
+            --platform linux/amd64 \
+            --file "$RUNNER_TEMP/fakeco-source/Dockerfile.aws" \
+            --tag "${FAKECO_ECR_REPOSITORY_URI}:git-${SOURCE_SHA}" \
+            --sbom=true \
+            --provenance=mode=max \
+            --metadata-file "$RUNNER_TEMP/fakeco-build-metadata.json" \
+            --push \
+            "$RUNNER_TEMP/fakeco-source"
+
+      - name: Bind BuildKit and ECR digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          image_description="$RUNNER_TEMP/fakeco-ecr-image.json"
+          for attempt in $(seq 1 12); do
+            if aws ecr describe-images \
+              --registry-id "$FAKECO_AWS_ACCOUNT_ID" \
+              --repository-name openclaw/fakeco/crabhelm \
+              --image-ids "imageTag=git-${SOURCE_SHA}" \
+              --output json >"$image_description" 2>/dev/null; then
+              break
+            fi
+            if [[ "$attempt" == "12" ]]; then
+              echo "ECR did not expose the pushed commit tag before the deadline" >&2
+              exit 1
+            fi
+            sleep 5
+          done
+          node deploy/aws/fakeco/foundation.mjs finalize-image-publication \
+            --target "$RUNNER_TEMP/fakeco-image-verified-target.json" \
+            --build-metadata "$RUNNER_TEMP/fakeco-build-metadata.json" \
+            --ecr-image "$image_description" \
+            --output "$RUNNER_TEMP/fakeco-image-publication.json"
+
+      - name: Verify digest-bound Linux AMD64 image
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          image_digest="$(node deploy/aws/fakeco/foundation.mjs image-publication-digest \
+            --publication "$RUNNER_TEMP/fakeco-image-publication.json")"
+          aws ecr batch-get-image \
+            --registry-id "$FAKECO_AWS_ACCOUNT_ID" \
+            --repository-name openclaw/fakeco/crabhelm \
+            --image-ids "imageDigest=$image_digest" \
+            --output json >"$RUNNER_TEMP/fakeco-ecr-manifest.json"
+          manifest_args=(
+            --rendered "$RUNNER_TEMP/fakeco-image-publication.json"
+            --ecr-response "$RUNNER_TEMP/fakeco-ecr-manifest.json"
+          )
+          image_kind="$(node deploy/aws/fakeco/foundation.mjs image-manifest-kind \
+            "${manifest_args[@]}")"
+          scan_digest="$(node deploy/aws/fakeco/foundation.mjs image-selected-digest \
+            "${manifest_args[@]}")"
+          [[ "$image_kind" == "single" || "$image_kind" == "index" ]]
+          if [[ "$image_kind" == "index" ]]; then
+            aws ecr batch-get-image \
+              --registry-id "$FAKECO_AWS_ACCOUNT_ID" \
+              --repository-name openclaw/fakeco/crabhelm \
+              --image-ids "imageDigest=$scan_digest" \
+              --output json >"$RUNNER_TEMP/fakeco-ecr-child-manifest.json"
+            manifest_args+=(
+              --child-ecr-response "$RUNNER_TEMP/fakeco-ecr-child-manifest.json"
+            )
+          fi
+          config_digest="$(node deploy/aws/fakeco/foundation.mjs image-config-digest \
+            "${manifest_args[@]}")"
+          config_url="$(aws ecr get-download-url-for-layer \
+            --registry-id "$FAKECO_AWS_ACCOUNT_ID" \
+            --repository-name openclaw/fakeco/crabhelm \
+            --layer-digest "$config_digest" \
+            --query downloadUrl \
+            --output text)"
+          curl --fail --silent --show-error \
+            --max-filesize 10485760 \
+            --proto '=https' \
+            --tlsv1.2 \
+            --output "$RUNNER_TEMP/fakeco-image-config.json" \
+            "$config_url"
+          unset config_url
+          node deploy/aws/fakeco/foundation.mjs verify-image-manifest \
+            "${manifest_args[@]}" \
+            --config "$RUNNER_TEMP/fakeco-image-config.json" \
+            --output "$RUNNER_TEMP/fakeco-image-platform.json"
+          printf '%s' "$scan_digest" >"$RUNNER_TEMP/fakeco-image-scan-digest.txt"
+
+      - name: Wait for ECR vulnerability scan and enforce threshold
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          scan_digest="$(<"$RUNNER_TEMP/fakeco-image-scan-digest.txt")"
+          scan_findings="$RUNNER_TEMP/fakeco-image-scan-findings.json"
+          scan_state="pending"
+          for attempt in $(seq 1 60); do
+            if aws ecr describe-image-scan-findings \
+              --registry-id "$FAKECO_AWS_ACCOUNT_ID" \
+              --repository-name openclaw/fakeco/crabhelm \
+              --image-id "imageDigest=$scan_digest" \
+              --no-paginate \
+              --query '{registryId:registryId,repositoryName:repositoryName,imageId:imageId,imageScanStatus:imageScanStatus,imageScanFindings:{imageScanCompletedAt:imageScanFindings.imageScanCompletedAt,findingSeverityCounts:imageScanFindings.findingSeverityCounts}}' \
+              --output json >"$scan_findings" 2>/dev/null; then
+              scan_state="$(node deploy/aws/fakeco/foundation.mjs image-scan-state \
+                --publication "$RUNNER_TEMP/fakeco-image-publication.json" \
+                --scan-digest "$scan_digest" \
+                --scan-findings "$scan_findings")"
+              if [[ "$scan_state" == "ready" ]]; then
+                break
+              fi
+            fi
+            if [[ "$attempt" == "60" ]]; then
+              echo "ECR image scan did not complete before the deadline" >&2
+              exit 1
+            fi
+            sleep 5
+          done
+          [[ "$scan_state" == "ready" ]]
+          node deploy/aws/fakeco/foundation.mjs finalize-image-scan \
+            --publication "$RUNNER_TEMP/fakeco-image-publication.json" \
+            --platform-proof "$RUNNER_TEMP/fakeco-image-platform.json" \
+            --scan-digest "$scan_digest" \
+            --scan-findings "$scan_findings" \
+            --output "$RUNNER_TEMP/fakeco-crabhelm-image.json"
+          node deploy/aws/fakeco/foundation.mjs image-publication-summary \
+            --publication "$RUNNER_TEMP/fakeco-crabhelm-image.json" \
+            >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload non-secret digest-bound image record
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fakeco-crabhelm-image-${{ inputs.source_sha }}
+          path: ${{ runner.temp }}/fakeco-crabhelm-image.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
