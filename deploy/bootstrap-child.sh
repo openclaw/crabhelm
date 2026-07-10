@@ -163,10 +163,39 @@ fi
 "$openclaw_binary" config set agents.defaults.model.primary "$model"
 # ClawRouter owns upstream provider secrets and routing. The child receives only
 # its scoped ClawRouter credential and this managed provider origin.
+existing_router_headers="$("$openclaw_binary" config get models.providers.clawrouter.headers --json 2>/dev/null || true)"
+managed_router_header_names="$("$node_binary" - "$existing_router_headers" <<'NODE'
+let headers;
+try {
+  headers = JSON.parse(process.argv[2]);
+} catch {
+  headers = {};
+}
+if (!headers || typeof headers !== "object" || Array.isArray(headers)) headers = {};
+const managed = new Set([
+  "x-clawrouter-project-id",
+  "x-clawrouter-agent-id",
+  "x-clawrouter-parent-agent-id",
+  "x-clawrouter-session-id",
+  "x-clawrouter-request-id",
+  "x-request-id",
+]);
+for (const name of Object.keys(headers)) {
+  if (managed.has(name.toLowerCase()) && /^[A-Za-z0-9-]{1,128}$/.test(name)) {
+    process.stdout.write(`${name}\n`);
+  }
+}
+NODE
+)" || die "managed ClawRouter headers are invalid"
+while IFS= read -r managed_router_header; do
+  [[ -n "$managed_router_header" ]] || continue
+  "$openclaw_binary" config unset "models.providers.clawrouter.headers.$managed_router_header"
+done <<<"$managed_router_header_names"
 if [[ -n "$router_base_url" ]]; then
   "$openclaw_binary" config set plugins.entries.clawrouter.enabled true --strict-json
   "$openclaw_binary" config set models.providers.clawrouter.baseUrl "$router_base_url"
   "$openclaw_binary" config set models.providers.clawrouter.apiKey --ref-provider default --ref-source env --ref-id CLAWROUTER_API_KEY
+  "$openclaw_binary" config set models.providers.clawrouter.headers.X-ClawRouter-Project-Id "$child_id"
 else
   "$openclaw_binary" config set plugins.entries.clawrouter.enabled false --strict-json
   if "$openclaw_binary" config get models.providers.clawrouter.baseUrl >/dev/null 2>&1; then

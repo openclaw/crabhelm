@@ -92,7 +92,17 @@ test("child status requires canonical Gateway liveness and readiness", async (co
 test("child apply command performs managed-field compare-and-swap", async () => {
   const config: Record<string, unknown> = {
     agents: { defaults: { model: "openai/gpt-5.5" } },
-    models: { providers: { openai: { baseUrl: "https://crabhelm.example.test/model/v1", api: "responses" } } },
+    models: {
+      providers: {
+        openai: { baseUrl: "https://crabhelm.example.test/model/v1", api: "responses" },
+        clawrouter: {
+          headers: {
+            "X-ClawRouter-Project-Id": "stale-project",
+            "X-ClawRouter-Agent-Id": "stale-agent",
+          },
+        },
+      },
+    },
     plugins: { allow: "invalid-existing-policy" },
   };
   const handlers = new Map<string, (params?: string | null) => Promise<string>>();
@@ -149,6 +159,7 @@ test("child apply command performs managed-field compare-and-swap", async () => 
     ((config.models as { providers: { openai: Record<string, unknown> } }).providers.openai),
     { api: "responses" },
   );
+  assert.equal("clawrouter" in ((config.models as { providers: Record<string, unknown> }).providers), false);
   assert.deepEqual((config.plugins as { allow: string[] }).allow, ["crabhelm", "slack", "diagnostics-otel"]);
   assert.equal(
     ((config.plugins as { entries: { "diagnostics-otel": { enabled: boolean } } }).entries["diagnostics-otel"].enabled),
@@ -226,9 +237,23 @@ test("child apply command performs managed-field compare-and-swap", async () => 
 });
 
 test("child apply owns the ClawRouter model and origin as one managed setting", async () => {
+  const childId = "11111111-1111-4111-8111-111111111111";
   const config: Record<string, unknown> = {
     agents: { defaults: { model: "openai/gpt-5.5" } },
     plugins: { allow: ["browser", "crabhelm", "slack"] },
+    models: {
+      providers: {
+        clawrouter: {
+          headers: {
+            "X-Static": "preserved",
+            "x-clawrouter-project-id": "stale-project",
+            "X-ClawRouter-Agent-Id": "stale-agent",
+            "X-ClawRouter-Session-Id": "stale-session",
+            "X-ClawRouter-Request-Id": "stale-request",
+          },
+        },
+      },
+    },
   };
   const handlers = new Map<string, (params?: string | null) => Promise<string>>();
   registerChildCommands(
@@ -239,16 +264,17 @@ test("child apply owns the ClawRouter model and origin as one managed setting", 
       },
       registerNodeInvokePolicy() {},
     },
-    "child-1",
+    childId,
   );
   const status = JSON.parse(
-    await handlers.get(childStatusCommand)?.(JSON.stringify({ clawId: "child-1" })) ?? "{}",
+    await handlers.get(childStatusCommand)?.(JSON.stringify({ clawId: childId })) ?? "{}",
   );
   const apply = handlers.get(childApplyCommand);
   assert.ok(apply);
   const desired = {
     model: "clawrouter/openai/gpt-5.5",
     routerBaseUrl: "https://clawrouter.example.test",
+    routerProjectId: childId,
     fallbackModels: [],
     slackEnabled: false,
     dmPolicy: "pairing",
@@ -256,7 +282,7 @@ test("child apply owns the ClawRouter model and origin as one managed setting", 
     logLevel: "info",
   };
   const applied = JSON.parse(await apply(JSON.stringify({
-    clawId: "child-1",
+    clawId: childId,
     generation: 2,
     desiredHash: "routed-hash",
     expectedManagedHash: status.managedHash,
@@ -273,25 +299,47 @@ test("child apply owns the ClawRouter model and origin as one managed setting", 
     {
       baseUrl: "https://clawrouter.example.test",
       apiKey: { source: "env", provider: "default", id: "CLAWROUTER_API_KEY" },
+      headers: {
+        "X-Static": "preserved",
+        "X-ClawRouter-Project-Id": childId,
+      },
     },
   );
   const converged = JSON.parse(
-    await handlers.get(childStatusCommand)?.(JSON.stringify({ clawId: "child-1" })) ?? "{}",
+    await handlers.get(childStatusCommand)?.(JSON.stringify({ clawId: childId })) ?? "{}",
   );
+  const routedProvider = ((config.models as { providers: { clawrouter: Record<string, unknown> } }).providers.clawrouter);
+  (routedProvider.headers as Record<string, string>)["X-ClawRouter-Session-Id"] = "stale-session";
+  const attributionDrift = JSON.parse(
+    await handlers.get(childStatusCommand)?.(JSON.stringify({ clawId: childId })) ?? "{}",
+  );
+  assert.notEqual(attributionDrift.managedHash, converged.managedHash);
+  assert.equal(attributionDrift.appliedDesiredHash, undefined);
+  delete (routedProvider.headers as Record<string, string>)["X-ClawRouter-Session-Id"];
   delete (((config.models as { providers: { clawrouter: Record<string, unknown> } }).providers.clawrouter).apiKey);
   const credentialDrift = JSON.parse(
-    await handlers.get(childStatusCommand)?.(JSON.stringify({ clawId: "child-1" })) ?? "{}",
+    await handlers.get(childStatusCommand)?.(JSON.stringify({ clawId: childId })) ?? "{}",
   );
   assert.notEqual(credentialDrift.managedHash, converged.managedHash);
   await assert.rejects(
     apply(JSON.stringify({
-      clawId: "child-1",
+      clawId: childId,
       generation: 3,
       desiredHash: "missing-origin",
       expectedManagedHash: "unused",
       desired: { ...desired, routerBaseUrl: undefined },
     })),
     /must select ClawRouter together/u,
+  );
+  await assert.rejects(
+    apply(JSON.stringify({
+      clawId: childId,
+      generation: 3,
+      desiredHash: "wrong-project",
+      expectedManagedHash: "unused",
+      desired: { ...desired, routerProjectId: "22222222-2222-4222-8222-222222222222" },
+    })),
+    /must match the immutable child id/u,
   );
 });
 

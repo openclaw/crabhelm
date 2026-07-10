@@ -245,6 +245,7 @@ test("bootstrap accepts the authoritative multi-segment ClawRouter model and ori
         tenantId: "fakeco",
         policyId: "crabhelm_685b2bda351e450ba91c45938c54454f",
         credentialId: "crabhelm_685b2bda351e450ba91c45938c54454f",
+        projectId: "685b2bda-351e-450b-a91c-45938c54454f",
         allowedProviders: ["openai"],
         modelProviders: { "clawrouter/openai/gpt-5.5": "openai" },
         providers: ["openai"],

@@ -239,6 +239,7 @@ test("creates per-claw ClawRouter desired state from fleet policy", () => {
     tenantId: "fakeco",
     policyId: `crabhelm_${claw.id.replaceAll("-", "")}`,
     credentialId: `crabhelm_${claw.id.replaceAll("-", "")}`,
+    projectId: claw.id,
     allowedProviders: ["anthropic", "openai"],
     modelProviders: {
       "clawrouter/anthropic/claude-sonnet-4.6": "anthropic",

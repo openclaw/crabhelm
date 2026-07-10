@@ -123,6 +123,7 @@ function normalizeModels(
       tenantId: clawRouter.tenantId,
       policyId: credentialId,
       credentialId,
+      projectId: clawId,
       allowedProviders: [...clawRouter.allowedProviders],
       modelProviders: Object.fromEntries(
         Object.entries(clawRouter.modelProviders).sort(([first], [second]) => first.localeCompare(second)),

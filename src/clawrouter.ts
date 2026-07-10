@@ -450,6 +450,7 @@ function assertDesiredRouter(
     router.tenantId !== config.tenantId ||
     router.policyId !== expectedId ||
     router.credentialId !== expectedId ||
+    router.projectId !== claw.id ||
     !sameStrings(router.allowedProviders, config.allowedProviders) ||
     !sameStringRecord(router.modelProviders, config.modelProviders) ||
     expectedProviders.some((provider) => !provider) ||

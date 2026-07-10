@@ -46,6 +46,9 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
 if [[ "$1" = config && "$2" = get && "$3" = plugins.allow ]]; then
   printf '["browser","crabhelm"]\n'
 fi
+if [[ "$1" = config && "$2" = get && "$3" = models.providers.clawrouter.headers ]]; then
+  printf '{"X-Static":"preserved","x-clawrouter-project-id":"stale","X-ClawRouter-Agent-Id":"stale","X-ClawRouter-Session-Id":"stale","X-ClawRouter-Request-Id":"stale"}\n'
+fi
 `);
   await executable(path.join(bin, "curl"), "#!/usr/bin/env bash\nexit 0\n");
   const digest = createHash("sha256").update(await readFile(plugin)).digest("hex");
@@ -96,6 +99,12 @@ fi
   assert.match(calls, /agents\.defaults\.model\.primary clawrouter\/openai\/gpt-5\.5/);
   assert.match(calls, /config set models\.providers\.clawrouter\.baseUrl https:\/\/clawrouter\.example\.test/);
   assert.match(calls, /config set models\.providers\.clawrouter\.apiKey .*default.*env.*CLAWROUTER_API_KEY/);
+  assert.match(calls, /config unset models\.providers\.clawrouter\.headers\.x-clawrouter-project-id/u);
+  assert.match(calls, /config unset models\.providers\.clawrouter\.headers\.X-ClawRouter-Agent-Id/u);
+  assert.match(calls, /config unset models\.providers\.clawrouter\.headers\.X-ClawRouter-Session-Id/u);
+  assert.match(calls, /config unset models\.providers\.clawrouter\.headers\.X-ClawRouter-Request-Id/u);
+  assert.match(calls, /config set models\.providers\.clawrouter\.headers\.X-ClawRouter-Project-Id 11111111-1111-4111-8111-111111111111/u);
+  assert.doesNotMatch(calls, /config unset models\.providers\.clawrouter\.headers\.X-Static/u);
   assert.doesNotMatch(calls, /models\.providers\.clawrouter\.models/u);
   assert.match(calls, /config unset models\.providers\.openai\.baseUrl/);
   assert.match(calls, /agents\.defaults\.workspace .*\/state\/workspace/);

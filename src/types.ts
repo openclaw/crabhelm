@@ -48,6 +48,7 @@ export type InferenceRouter =
       tenantId: string;
       policyId: string;
       credentialId: string;
+      projectId: string;
       allowedProviders: string[];
       modelProviders: Record<string, string>;
       providers: string[];
