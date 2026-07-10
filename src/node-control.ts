@@ -17,7 +17,7 @@ export const childPairingListCommand = "crabhelm.child.pairing.list" as const;
 export const childPairingApproveCommand = "crabhelm.child.pairing.approve" as const;
 export const childHealthCommand = "crabhelm.child.health" as const;
 export const childDrainCommand = "crabhelm.child.drain.status" as const;
-const protocolVersion = 2;
+const protocolVersion = 3;
 const healthProbeMaxAgeMs = 5 * 60 * 1000;
 const execFileAsync = promisify(execFile);
 
@@ -368,6 +368,16 @@ export class OpenClawNodeControl {
           node.nodeId,
           status,
           "Child node paired; policy-aware Crabhelm plugin upgrade is required for OpenTelemetry",
+        ),
+        status: "pending",
+      };
+    }
+    if (claw.desired.inference.router.kind === "clawrouter" && status.protocolVersion < 3) {
+      return {
+        ...this.#evidence(
+          node.nodeId,
+          status,
+          "Child node paired; protocol v3 upgrade is required for ClawRouter attribution",
         ),
         status: "pending",
       };
@@ -737,7 +747,7 @@ export class OpenClawNodeControl {
 }
 
 type ChildStatusPayload = {
-  protocolVersion: 1 | 2;
+  protocolVersion: 1 | 2 | 3;
   gatewayReady: boolean;
   gatewayVersion?: string;
   managedHash: string;
@@ -1675,8 +1685,8 @@ function requirePositiveInteger(value: unknown, label: string): number {
   return value;
 }
 
-function isSupportedChildProtocol(value: unknown): value is 1 | 2 {
-  return value === 1 || value === 2;
+function isSupportedChildProtocol(value: unknown): value is 1 | 2 | 3 {
+  return value === 1 || value === 2 || value === 3;
 }
 
 function parseRecord(value?: string | null): Record<string, unknown> {

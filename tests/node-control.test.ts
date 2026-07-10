@@ -53,7 +53,7 @@ test("child status command binds evidence to the configured child id", async () 
   assert.equal(response.ok, true);
   assert.equal(response.childId, "child-1");
   assert.equal(response.pluginMode, "child");
-  assert.equal(response.protocolVersion, 2);
+  assert.equal(response.protocolVersion, 3);
   assert.equal(response.gatewayReady, false);
   assert.equal(response.gatewayVersion, "test-version");
   assert.equal(typeof response.managedHash, "string");
@@ -670,6 +670,54 @@ test("node control requires protocol v2 before enabling OpenTelemetry", async ()
   const result = await control.inspect(claw);
   assert.equal(result.status, "pending");
   assert.match(result.message, /plugin upgrade is required/u);
+  assert.equal(applyCalls, 0);
+});
+
+test("node control requires protocol v3 before applying ClawRouter attribution", async () => {
+  const model = "clawrouter/openai/gpt-5.5";
+  const claw = createClawRecord({
+    name: "Legacy routed child",
+    owner: { subject: "github:legacy-routed", label: "@legacy-routed", source: "github" },
+    inference: { model },
+  }, new Date(), {
+    clawRouter: {
+      baseUrl: "https://clawrouter.example.test",
+      tenantId: "fakeco",
+      allowedProviders: ["openai"],
+      modelProviders: { [model]: "openai" },
+      defaultModel: model,
+    },
+  });
+  let applyCalls = 0;
+  const control = new OpenClawNodeControl({
+    async list() {
+      return { nodes: [{
+        nodeId: childNodeId(claw.id),
+        displayName: childNodeDisplayName(claw.id),
+        connected: true,
+        commands: [childStatusCommand, childApplyCommand],
+      }] };
+    },
+    async invoke(params) {
+      if (params.command === childApplyCommand) applyCalls += 1;
+      return {
+        ok: true,
+        payload: {
+          ok: true,
+          childId: claw.id,
+          pluginMode: "child",
+          protocolVersion: 2,
+          gatewayReady: true,
+          managedHash: "legacy-managed",
+          appliedDesiredHash: childPolicyHash(claw),
+        },
+      };
+    },
+  });
+
+  const result = await control.inspect(claw);
+  assert.equal(result.status, "pending");
+  assert.match(result.message, /protocol v3 upgrade is required/u);
   assert.equal(applyCalls, 0);
 });
 
