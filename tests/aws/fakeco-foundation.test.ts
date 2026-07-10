@@ -453,6 +453,10 @@ test("FakeCo workflows are manual, protected-main, isolated, pinned, and secret-
   assert.match(deploy, /ecr get-download-url-for-layer/u);
   assert.match(deploy, /verify-image-manifest/u);
   assert.ok(deploy.indexOf("verify-image-manifest") < deploy.indexOf("cloudformation deploy"));
+  assert.match(deploy, /secret_kms_key_id="\$\(aws secretsmanager describe-secret/u);
+  assert.match(deploy, /kms describe-key[\s\S]*--key-id "\$secret_kms_key_id"/u);
+  assert.match(deploy, /sns get-topic-attributes/u);
+  assert.ok(deploy.indexOf("sns get-topic-attributes") < deploy.indexOf("cloudformation deploy"));
   assert.match(teardown, /environment: fakeco-teardown/u);
   assert.match(teardown, /CONFIRM_STACK_NAME: \$\{\{ inputs\.confirm_stack_name \}\}/u);
   assert.doesNotMatch(teardown, /\[\[ "\$\{\{ inputs\./u);

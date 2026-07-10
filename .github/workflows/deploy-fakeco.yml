@@ -134,10 +134,20 @@ jobs:
             --secret-id "$FAKECO_APPLICATION_SECRET_ARN" \
             --query 'ARN' \
             --output text)" == "$FAKECO_APPLICATION_SECRET_ARN" ]]
+          secret_kms_key_id="$(aws secretsmanager describe-secret \
+            --secret-id "$FAKECO_APPLICATION_SECRET_ARN" \
+            --query 'KmsKeyId' \
+            --output text)"
+          [[ -n "$secret_kms_key_id" && "$secret_kms_key_id" != "None" ]]
           [[ "$(aws kms describe-key \
-            --key-id "$FAKECO_APPLICATION_SECRET_KMS_KEY_ARN" \
+            --key-id "$secret_kms_key_id" \
             --query 'KeyMetadata.Arn' \
             --output text)" == "$FAKECO_APPLICATION_SECRET_KMS_KEY_ARN" ]]
+          topic_arn="arn:aws:sns:${FAKECO_AWS_REGION}:${FAKECO_AWS_ACCOUNT_ID}:${FAKECO_OPERATOR_ALERT_TOPIC_NAME}"
+          [[ "$(aws sns get-topic-attributes \
+            --topic-arn "$topic_arn" \
+            --query 'Attributes.TopicArn' \
+            --output text)" == "$topic_arn" ]]
           aws s3api head-bucket \
             --bucket "$FAKECO_CLOUDFORMATION_ARTIFACT_BUCKET" \
             --expected-bucket-owner "$FAKECO_AWS_ACCOUNT_ID"
