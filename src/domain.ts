@@ -18,7 +18,7 @@ import type {
 
 const subjectPattern = /^[a-zA-Z0-9][a-zA-Z0-9_.:@/+\-]{0,199}$/;
 const slugPattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
-const directModelPattern = /^[a-z0-9][a-z0-9_.-]*\/[a-zA-Z0-9][a-zA-Z0-9_.:\-]{0,199}$/;
+const directModelPattern = /^[a-z0-9][a-z0-9_.-]*(?:\/[a-zA-Z0-9][a-zA-Z0-9_.:\-]{0,199})+$/;
 const clawRouterModelPattern = /^clawrouter\/[a-z0-9][a-z0-9-]{0,63}\/[a-zA-Z0-9][a-zA-Z0-9_.:\-]{0,199}(?:\/[a-zA-Z0-9][a-zA-Z0-9_.:\-]{0,199})*$/;
 const sha256Pattern = /^[0-9a-f]{64}$/;
 
@@ -78,7 +78,9 @@ function normalizeModels(
   const fallbackModels = [...new Set(input?.fallbackModels ?? [])];
   const routedSyntax = Boolean(clawRouter) || (allowClawRouterTemplate && model.startsWith("clawrouter/"));
   for (const value of [model, ...fallbackModels]) {
-    if (routedSyntax ? !clawRouterModelPattern.test(value) : !directModelPattern.test(value)) {
+    if (routedSyntax
+      ? !clawRouterModelPattern.test(value)
+      : value.startsWith("clawrouter/") || !directModelPattern.test(value)) {
       throw new Error(routedSyntax
         ? `ClawRouter fleets require clawrouter/provider/model form: ${value}`
         : `model must use provider/model form: ${value}`);

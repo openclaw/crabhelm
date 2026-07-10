@@ -193,11 +193,19 @@ test("rejects non provider/model inference identifiers", () => {
       }),
     /provider\/model/,
   );
+  assert.equal(
+    createClawRecord({
+      name: "Nested direct model",
+      owner: { subject: "manual:segments", label: "Segments", source: "manual" },
+      inference: { model: "openrouter/anthropic/claude-sonnet-4.6" },
+    }).desired.inference.model,
+    "openrouter/anthropic/claude-sonnet-4.6",
+  );
   assert.throws(
     () => createClawRecord({
-      name: "Too many direct segments",
-      owner: { subject: "manual:segments", label: "Segments", source: "manual" },
-      inference: { model: "openai/gpt-5.5/extra" },
+      name: "Router without fleet",
+      owner: { subject: "manual:router", label: "Router", source: "manual" },
+      inference: { model: "clawrouter/openai/gpt-5.5" },
     }),
     /provider\/model/u,
   );
