@@ -97,7 +97,7 @@ docker build \
 docker push "$IMAGE_URI"
 ```
 
-External images use ECR only. Pass both the exact `ExistingEcrRepositoryArn` and an `ImageUri` ending in `@sha256:<digest>`; the image URI's account, Region, and repository must match that ARN. The stack execution role scopes layer reads to that repository. Non-ECR registry credentials are not configured by this template.
+External images use ECR only. Pass both the exact `ExistingEcrRepositoryArn` and an `ImageUri` ending in `@sha256:<digest>`; the image URI's account, Region, and repository must match that ARN. The stack execution role scopes layer reads to that repository. The current task runtime is `LINUX`/`X86_64`; FakeCo verifies a single image's config or exactly one Linux/AMD64 index child before starting CloudFormation. ARM64 images and migration are out of scope. Non-ECR registry credentials are not configured by this template.
 
 ### Stack-owned ECR
 
@@ -146,7 +146,7 @@ aws cloudformation deploy \
 
 ### Disposable FakeCo profile
 
-Use the committed [locked profile, offline renderer, live-stack verifier, and retained-resource teardown planner](fakeco/README.md), not hand-written overrides. It enforces external precreated ECR, a digest-only image, `ProvisionService=true`, the target account/Region and fixed IAM paths, one-day backups, 20 GiB without RDS storage autoscaling, disabled RDS log export, seven-day ECS logs, single-AZ RDS, and one task. It rejects the production ClawRouter origin and cannot silently route a disposable stack there.
+Use the committed [locked profile, offline renderer, image-platform verifier, live-stack verifier, and retained-resource teardown planner](fakeco/README.md), not hand-written overrides. It enforces external precreated ECR, a digest-only Linux/AMD64 image, `ProvisionService=true`, the target account/Region and fixed IAM paths, one-day backups, 20 GiB without RDS storage autoscaling, disabled RDS log export, seven-day ECS logs, single-AZ RDS, and one task. It rejects the production ClawRouter origin and cannot silently route a disposable stack there.
 
 The profile preserves one NAT gateway in public subnet A. The S3 gateway endpoint removes S3 data from that path, but all other task egress remains explicitly single-NAT and non-HA. The deploy and teardown workflows are manual, protected-main-only, share one concurrency group, use separate exact OIDC subjects, and read no secret values.
 

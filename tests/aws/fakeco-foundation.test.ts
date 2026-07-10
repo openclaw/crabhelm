@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -131,6 +132,214 @@ test("FakeCo verify binds the observed stack to parameters, tags, and service ro
   assert.match(rejected.stderr, /observed CloudFormation service role/u);
 });
 
+test("FakeCo image preflight accepts only unambiguous Linux AMD64 artifacts", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const renderedPath = path.join(directory, "rendered.json");
+  const render = runFoundation(
+    ["render", "--phase", "deploy", "--output", renderedPath],
+    fakecoEnvironment("deploy"),
+  );
+  assert.equal(render.status, 0, render.stderr);
+  const responsePath = path.join(directory, "ecr-response.json");
+  const configPath = path.join(directory, "image-config.json");
+  const topDigest = `sha256:${"a".repeat(64)}`;
+  const configBytes = JSON.stringify({ os: "linux", architecture: "amd64" });
+  const configDigest = `sha256:${createHash("sha256").update(configBytes).digest("hex")}`;
+  const childDigest = `sha256:${"f".repeat(64)}`;
+  const singleMediaType = "application/vnd.oci.image.manifest.v1+json";
+  const childMediaType = "application/vnd.oci.image.manifest.v1+json";
+  const indexMediaType = "application/vnd.oci.image.index.v1+json";
+
+  await writeFile(responsePath, JSON.stringify(ecrResponse(topDigest, singleMediaType, {
+    schemaVersion: 2,
+    mediaType: singleMediaType,
+    config: {
+      mediaType: "application/vnd.oci.image.config.v1+json",
+      digest: configDigest,
+      size: 200,
+    },
+    layers: [],
+  })), "utf8");
+  const digestResult = runFoundation([
+    "image-config-digest",
+    "--rendered", renderedPath,
+    "--ecr-response", responsePath,
+  ]);
+  assert.equal(digestResult.status, 0, digestResult.stderr);
+  assert.equal(digestResult.stdout, configDigest);
+  await writeFile(configPath, configBytes, "utf8");
+  const singleVerified = runFoundation([
+    "verify-image-manifest",
+    "--rendered", renderedPath,
+    "--ecr-response", responsePath,
+    "--config", configPath,
+  ]);
+  assert.equal(singleVerified.status, 0, singleVerified.stderr);
+  assert.deepEqual(JSON.parse(singleVerified.stdout), {
+    ok: true,
+    kind: "single",
+    os: "linux",
+    architecture: "amd64",
+    selectedDigest: topDigest,
+    configDigest,
+  });
+
+  await writeFile(configPath, `${configBytes}\n`, "utf8");
+  const changedConfig = runFoundation([
+    "verify-image-manifest",
+    "--rendered", renderedPath,
+    "--ecr-response", responsePath,
+    "--config", configPath,
+  ]);
+  assert.notEqual(changedConfig.status, 0);
+  assert.match(changedConfig.stderr, /container image config digest/u);
+
+  const armConfigBytes = JSON.stringify({ os: "linux", architecture: "arm64" });
+  const armConfigDigest = `sha256:${createHash("sha256").update(armConfigBytes).digest("hex")}`;
+  await writeFile(responsePath, JSON.stringify(ecrResponse(topDigest, singleMediaType, {
+    schemaVersion: 2,
+    mediaType: singleMediaType,
+    config: {
+      mediaType: "application/vnd.oci.image.config.v1+json",
+      digest: armConfigDigest,
+      size: 200,
+    },
+    layers: [],
+  })), "utf8");
+  await writeFile(configPath, armConfigBytes, "utf8");
+  const armSingle = runFoundation([
+    "verify-image-manifest",
+    "--rendered", renderedPath,
+    "--ecr-response", responsePath,
+    "--config", configPath,
+  ]);
+  assert.notEqual(armSingle.status, 0);
+  assert.match(armSingle.stderr, /os=linux and architecture=amd64/u);
+
+  const validIndex = {
+    schemaVersion: 2,
+    mediaType: indexMediaType,
+    manifests: [
+      {
+        mediaType: childMediaType,
+        digest: childDigest,
+        size: 500,
+        platform: { os: "linux", architecture: "amd64" },
+      },
+      {
+        mediaType: childMediaType,
+        digest: `sha256:${"1".repeat(64)}`,
+        size: 500,
+        platform: { os: "linux", architecture: "arm64" },
+      },
+      {
+        mediaType: childMediaType,
+        digest: `sha256:${"2".repeat(64)}`,
+        size: 500,
+        platform: { os: "unknown", architecture: "unknown" },
+      },
+    ],
+  };
+  await writeFile(
+    responsePath,
+    JSON.stringify(ecrResponse(topDigest, indexMediaType, validIndex)),
+    "utf8",
+  );
+  const indexDigest = runFoundation([
+    "image-config-digest",
+    "--rendered", renderedPath,
+    "--ecr-response", responsePath,
+  ]);
+  assert.equal(indexDigest.status, 0, indexDigest.stderr);
+  assert.equal(indexDigest.stdout, "");
+  const indexVerified = runFoundation([
+    "verify-image-manifest",
+    "--rendered", renderedPath,
+    "--ecr-response", responsePath,
+  ]);
+  assert.equal(indexVerified.status, 0, indexVerified.stderr);
+  assert.deepEqual(JSON.parse(indexVerified.stdout), {
+    ok: true,
+    kind: "index",
+    os: "linux",
+    architecture: "amd64",
+    selectedDigest: childDigest,
+  });
+
+  const dockerIndexMediaType = "application/vnd.docker.distribution.manifest.list.v2+json";
+  const dockerChildMediaType = "application/vnd.docker.distribution.manifest.v2+json";
+  const dockerIndex = {
+    ...validIndex,
+    mediaType: dockerIndexMediaType,
+    manifests: validIndex.manifests.map((entry) => ({
+      ...entry,
+      mediaType: dockerChildMediaType,
+    })),
+  };
+  await writeFile(
+    responsePath,
+    JSON.stringify(ecrResponse(topDigest, dockerIndexMediaType, dockerIndex)),
+    "utf8",
+  );
+  const dockerIndexVerified = runFoundation([
+    "verify-image-manifest",
+    "--rendered", renderedPath,
+    "--ecr-response", responsePath,
+  ]);
+  assert.equal(dockerIndexVerified.status, 0, dockerIndexVerified.stderr);
+  assert.equal(JSON.parse(dockerIndexVerified.stdout).selectedDigest, childDigest);
+
+  const invalidIndexes: Array<[string, unknown, RegExp]> = [
+    [
+      "ARM-only",
+      { ...validIndex, manifests: validIndex.manifests.filter((entry) => entry.platform.architecture !== "amd64") },
+      /no Linux\/AMD64 child/u,
+    ],
+    [
+      "ambiguous AMD64",
+      { ...validIndex, manifests: [validIndex.manifests[0], { ...validIndex.manifests[0], digest: `sha256:${"3".repeat(64)}` }] },
+      /ambiguous Linux\/AMD64 children/u,
+    ],
+    [
+      "missing children",
+      { ...validIndex, manifests: [] },
+      /no child manifests/u,
+    ],
+    [
+      "missing child digest",
+      { ...validIndex, manifests: [{ ...validIndex.manifests[0], digest: undefined }] },
+      /child manifest digest must be/u,
+    ],
+  ];
+  for (const [label, manifest, error] of invalidIndexes) {
+    await writeFile(
+      responsePath,
+      JSON.stringify(ecrResponse(topDigest, indexMediaType, manifest)),
+      "utf8",
+    );
+    const result = runFoundation([
+      "verify-image-manifest",
+      "--rendered", renderedPath,
+      "--ecr-response", responsePath,
+    ]);
+    assert.notEqual(result.status, 0, label);
+    assert.match(result.stderr, error, label);
+  }
+
+  await writeFile(
+    responsePath,
+    JSON.stringify(ecrResponse(`sha256:${"9".repeat(64)}`, indexMediaType, validIndex)),
+    "utf8",
+  );
+  const wrongDigest = runFoundation([
+    "verify-image-manifest",
+    "--rendered", renderedPath,
+    "--ecr-response", responsePath,
+  ]);
+  assert.notEqual(wrongDigest.status, 0);
+  assert.match(wrongDigest.stderr, /ECR image digest/u);
+});
+
 test("FakeCo teardown plan is standard-only and inventories retained resources", async (t) => {
   const directory = await temporaryDirectory(t);
   const renderedPath = path.join(directory, "rendered.json");
@@ -200,6 +409,10 @@ test("FakeCo workflows are manual, protected-main, isolated, pinned, and secret-
   assert.match(deploy, /environment: fakeco/u);
   assert.match(deploy, /--parameter-overrides "\$\{parameter_overrides\[@\]\}"/u);
   assert.match(deploy, /--tags Environment=fakeco ManagedBy=github-actions Project=crabhelm/u);
+  assert.match(deploy, /ecr batch-get-image/u);
+  assert.match(deploy, /ecr get-download-url-for-layer/u);
+  assert.match(deploy, /verify-image-manifest/u);
+  assert.ok(deploy.indexOf("verify-image-manifest") < deploy.indexOf("cloudformation deploy"));
   assert.match(teardown, /environment: fakeco-teardown/u);
   assert.match(teardown, /CONFIRM_STACK_NAME: \$\{\{ inputs\.confirm_stack_name \}\}/u);
   assert.doesNotMatch(teardown, /\[\[ "\$\{\{ inputs\./u);
@@ -209,6 +422,7 @@ test("FakeCo workflows are manual, protected-main, isolated, pinned, and secret-
 
 test("AWS template enforces boundary, scoped IAM, digest XOR, and bounded FakeCo storage", async () => {
   const template = await readFile(path.join(repositoryRoot, "deploy/aws/template.yaml"), "utf8");
+  const guide = await readFile(path.join(repositoryRoot, "deploy/aws/README.md"), "utf8");
   assert.match(template, /WorkloadPermissionsBoundaryArn:[\s\S]*WorkloadRolePath:/u);
   assert.equal((template.match(/PermissionsBoundary: !Ref WorkloadPermissionsBoundaryArn/gu) ?? []).length, 2);
   assert.equal((template.match(/Path: !Ref WorkloadRolePath/gu) ?? []).length, 2);
@@ -221,6 +435,11 @@ test("AWS template enforces boundary, scoped IAM, digest XOR, and bounded FakeCo
   assert.match(template, /BackupRetentionPeriod: !Ref DatabaseBackupRetentionDays/u);
   assert.match(template, /EnableCloudwatchLogsExports: !If[\s\S]*ExportDatabaseLogs/u);
   assert.match(template, /S3GatewayEndpoint:[\s\S]*VpcEndpointType: Gateway/u);
+  assert.match(
+    template,
+    /RuntimePlatform:\n\s+CpuArchitecture: X86_64\n\s+OperatingSystemFamily: LINUX/u,
+  );
+  assert.match(guide, /--platform linux\/amd64/u);
 
   const taskRole = template.slice(template.indexOf("  TaskRole:"), template.indexOf("  TaskDefinition:"));
   for (const action of [
@@ -300,7 +519,8 @@ function fakecoEnvironment(phase: "deploy" | "teardown"): Record<string, string>
     FAKECO_OIDC_CLIENT_ID: "fakeco-client-id",
     FAKECO_OIDC_CLIENT_SECRET_VERSION: "1",
     FAKECO_APPLICATION_SECRET_ARN:
-      "arn:aws:secretsmanager:us-west-2:123456789012:secret:openclaw/fakeco/crabhelm-abcdef",
+      "arn:aws:secretsmanager:us-west-2:123456789012:secret:" +
+      "openclaw/fakeco/crabhelm-abcdef",
     FAKECO_APPLICATION_SECRET_KMS_KEY_ARN:
       "arn:aws:kms:us-west-2:123456789012:key/11111111-2222-3333-4444-555555555555",
     FAKECO_CRABBOX_URL: "https://crabbox.fakeco.example/control",
@@ -333,6 +553,19 @@ function stackDescription(rendered: RenderedDeployment) {
         { OutputKey: "EcsServiceArn", OutputValue: "arn:aws:ecs:us-west-2:123456789012:service/test" },
         { OutputKey: "VpcId", OutputValue: "vpc-123" },
       ],
+    }],
+  };
+}
+
+function ecrResponse(imageDigest: string, mediaType: string, manifest: unknown) {
+  return {
+    failures: [],
+    images: [{
+      registryId: "123456789012",
+      repositoryName: "openclaw/fakeco/crabhelm",
+      imageId: { imageDigest },
+      imageManifestMediaType: mediaType,
+      imageManifest: JSON.stringify(manifest),
     }],
   };
 }

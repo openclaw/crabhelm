@@ -14,6 +14,7 @@ Nothing in this directory creates an AWS account, organization unit, IAM Identit
 - one shared concurrency group, `crabhelm-fakeco`, with in-progress runs never cancelled;
 - protected `main` as the only accepted workflow ref;
 - external ECR only, using `openclaw/fakeco/crabhelm@sha256:<digest>` from the target account and Region;
+- Linux/AMD64 image compatibility before stack mutation: a single manifest must declare `os=linux` and `architecture=amd64`, while an image index must contain exactly one Linux/AMD64 child;
 - `CreateEcrRepository=false` and `ProvisionService=true`; the billable `ProvisionService=false` bootstrap is invalid for FakeCo;
 - workload roles under `/openclaw/fakeco/crabhelm/`, both using the required account-owned permissions boundary;
 - one ECS task, one NAT gateway, single-AZ RDS, 20 GiB RDS with storage autoscaling disabled, one-day automated backups, RDS log export disabled, and seven-day ECS log retention;
@@ -34,11 +35,11 @@ Create and review these outside this repository before enabling either workflow:
 4. `arn:aws:iam::<account>:role/openclaw/fakeco/cloudformation/crabhelm-service`, the only CloudFormation service role either GitHub role may pass.
 5. `arn:aws:iam::<account>:policy/openclaw/fakeco/crabhelm-workload-boundary`, which permits only the reviewed ECS workload role envelope.
 6. Private, encrypted, versioned S3 bucket `openclaw-fakeco-cfn-<account>-<region>` for non-secret CloudFormation templates. The deploy role needs access only to `crabhelm/fakeco/cloudformation/*`.
-7. Immutable, scan-on-push ECR repository `openclaw/fakeco/crabhelm` and a reviewed image already pushed by digest.
+7. Immutable, scan-on-push ECR repository `openclaw/fakeco/crabhelm` and a reviewed Linux/AMD64 image already pushed by digest.
 8. The application secret and customer-managed KMS key. The workflow receives only their ARNs and calls `DescribeSecret`/`DescribeKey`; it never reads a secret value.
 9. ACM certificate, external DNS, ALB OIDC client, Crabbox target, ClawRouter installation, audit-alert SNS topic, and digest-pinned post-overlay OpenClaw appliance.
 
-The deploy GitHub role needs only OIDC session admission, metadata reads for the named prerequisites, writes to the exact CloudFormation artifact-bucket prefix, CloudFormation change-set/stack operations for `crabhelm-fakeco`, and `iam:PassRole` for the exact CloudFormation service role. The teardown role needs stack/resource reads, standard stack deletion, and the same exact `iam:PassRole`; it does not need create/update permissions. The CloudFormation service role owns stack mutation and must constrain workload IAM creation to the fixed path and require the named permissions boundary.
+The deploy GitHub role needs only OIDC session admission, metadata reads for the named prerequisites, `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the exact repository, writes to the exact CloudFormation artifact-bucket prefix, CloudFormation change-set/stack operations for `crabhelm-fakeco`, and `iam:PassRole` for the exact CloudFormation service role. The teardown role needs stack/resource reads, standard stack deletion, and the same exact `iam:PassRole`; it does not need create/update permissions. The CloudFormation service role owns stack mutation and must constrain workload IAM creation to the fixed path and require the named permissions boundary.
 
 The application secret format remains the one documented in the parent [AWS guide](../README.md). Secret values never belong in GitHub variables, workflow inputs, rendered parameter files, stack parameters, logs, or teardown artifacts.
 
@@ -84,7 +85,7 @@ FAKECO_APPLIANCE_MANIFEST_SHA256
 FAKECO_OPERATOR_ALERT_TOPIC_NAME
 ```
 
-The validator requires every ARN and the ECR image URI to match the selected account and Region. It rejects the production ClawRouter origin, wildcard/broad role paths, tagged images, missing inputs, and cross-target resources.
+The validator requires every ARN and the ECR image URI to match the selected account and Region. It rejects the production ClawRouter origin, wildcard/broad role paths, tagged images, missing inputs, cross-target resources, ARM-only images, missing platform evidence, and ambiguous image indexes. ARM64 migration is outside this profile.
 
 ## Local validation and rendering
 
@@ -108,7 +109,7 @@ Rendered files are mode `0600` and ignored by Git. They contain application-secr
 
 ## Manual deployment
 
-[`deploy-fakeco.yml`](../../../.github/workflows/deploy-fakeco.yml) is `workflow_dispatch` only. It refuses non-protected or non-`main` refs, renders before requesting AWS credentials, checks the caller account and exact prerequisite identities, confirms the digest exists in the external ECR repository, and performs one CloudFormation deployment with:
+[`deploy-fakeco.yml`](../../../.github/workflows/deploy-fakeco.yml) is `workflow_dispatch` only. It refuses non-protected or non-`main` refs, renders before requesting AWS credentials, and checks the caller account and exact prerequisite identities. Before CloudFormation, it reads the selected ECR manifest. For a single image it downloads only the referenced, digest-verified config blob and accepts exact `linux`/`amd64`; for an OCI or Docker index it requires exactly one Linux/AMD64 child. The presigned config URL and config document are temporary, never uploaded or printed, and no image layer is pulled. It then performs one CloudFormation deployment with:
 
 - `CAPABILITY_IAM`;
 - the exact CloudFormation service-role ARN;

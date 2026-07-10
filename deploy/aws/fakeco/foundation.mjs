@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createHash } from "node:crypto";
 import { chmod, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +30,18 @@ const safeStackStatuses = new Set([
   "CREATE_COMPLETE",
   "UPDATE_COMPLETE",
   "UPDATE_ROLLBACK_COMPLETE",
+]);
+const singleImageMediaTypes = new Set([
+  "application/vnd.docker.distribution.manifest.v2+json",
+  "application/vnd.oci.image.manifest.v1+json",
+]);
+const imageIndexMediaTypes = new Set([
+  "application/vnd.docker.distribution.manifest.list.v2+json",
+  "application/vnd.oci.image.index.v1+json",
+]);
+const imageConfigMediaTypes = new Set([
+  "application/vnd.docker.container.image.v1+json",
+  "application/vnd.oci.image.config.v1+json",
 ]);
 
 async function main() {
@@ -77,6 +90,49 @@ async function main() {
       }
       return;
     }
+    case "image-config-digest": {
+      const rendered = await readJson(
+        requireOption(options, "rendered"),
+        "rendered FakeCo deployment",
+      );
+      const response = await readBoundedJson(
+        requireOption(options, "ecr-response"),
+        "ECR image manifest response",
+        6 * 1024 * 1024,
+      );
+      const inspection = inspectEcrManifest(profile, rendered, response);
+      if (inspection.kind === "single") process.stdout.write(inspection.configDigest);
+      return;
+    }
+    case "verify-image-manifest": {
+      const rendered = await readJson(
+        requireOption(options, "rendered"),
+        "rendered FakeCo deployment",
+      );
+      const response = await readBoundedJson(
+        requireOption(options, "ecr-response"),
+        "ECR image manifest response",
+        6 * 1024 * 1024,
+      );
+      const inspection = inspectEcrManifest(profile, rendered, response);
+      const result = inspection.kind === "single"
+        ? verifySingleImageConfig(
+            inspection,
+            await readBoundedJsonDocument(
+              requireOption(options, "config"),
+              "container image config",
+              10 * 1024 * 1024,
+            ),
+          )
+        : {
+            kind: inspection.kind,
+            os: "linux",
+            architecture: "amd64",
+            selectedDigest: inspection.selectedDigest,
+          };
+      printJson({ ok: true, ...result });
+      return;
+    }
     case "teardown-plan": {
       const rendered = await readJson(
         requireOption(options, "rendered"),
@@ -107,7 +163,7 @@ async function main() {
     }
     default:
       throw new Error(
-        "usage: foundation.mjs <validate-profile|render|verify|parameter-overrides|teardown-plan> [options]",
+        "usage: foundation.mjs <validate-profile|render|verify|parameter-overrides|image-config-digest|verify-image-manifest|teardown-plan> [options]",
       );
   }
 }
@@ -474,6 +530,116 @@ function buildTeardownPlan(profile, rendered, stack, resourcesDocument, retentio
   };
 }
 
+function inspectEcrManifest(profile, rendered, response) {
+  verifyRendered(profile, rendered);
+  requireObject(response, "ECR image manifest response");
+  if (!Array.isArray(response.failures) || response.failures.length !== 0) {
+    throw new Error("ECR image manifest lookup reported a failure");
+  }
+  if (!Array.isArray(response.images) || response.images.length !== 1) {
+    throw new Error("ECR image manifest lookup must return exactly one image");
+  }
+  const image = response.images[0];
+  requireObject(image, "ECR image");
+  requireObject(image.imageId, "ECR image id");
+  const parameters = parameterMap(rendered.parameters);
+  const imageUri = parameters.get("ImageUri");
+  const expectedDigest = imageUri.slice(imageUri.lastIndexOf("@") + 1);
+  const expectedRepository = rendered.target.ecrRepositoryArn.split(":repository/")[1];
+  assertEqual(image.registryId, rendered.target.accountId, "ECR image registry account");
+  assertEqual(image.repositoryName, expectedRepository, "ECR image repository");
+  assertEqual(image.imageId.imageDigest, expectedDigest, "ECR image digest");
+  if (typeof image.imageManifest !== "string" || image.imageManifest.length > 5 * 1024 * 1024) {
+    throw new Error("ECR image manifest must be bounded JSON text");
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(image.imageManifest);
+  } catch {
+    throw new Error("ECR image manifest is not valid JSON");
+  }
+  requireObject(manifest, "ECR image manifest");
+  assertEqual(manifest.schemaVersion, 2, "ECR image manifest schemaVersion");
+  const responseMediaType = image.imageManifestMediaType;
+  const embeddedMediaType = manifest.mediaType;
+  if (responseMediaType !== undefined && typeof responseMediaType !== "string") {
+    throw new Error("ECR image manifest media type is invalid");
+  }
+  if (embeddedMediaType !== undefined && typeof embeddedMediaType !== "string") {
+    throw new Error("embedded image manifest media type is invalid");
+  }
+  if (responseMediaType && embeddedMediaType && responseMediaType !== embeddedMediaType) {
+    throw new Error("ECR response and embedded image manifest media types disagree");
+  }
+  const mediaType = responseMediaType || embeddedMediaType;
+  if (singleImageMediaTypes.has(mediaType)) {
+    requireObject(manifest.config, "container image config descriptor");
+    if (!imageConfigMediaTypes.has(manifest.config.mediaType)) {
+      throw new Error("container image config media type is unsupported");
+    }
+    const configDigest = requireSha256Digest(
+      manifest.config.digest,
+      "container image config digest",
+    );
+    return {
+      kind: "single",
+      selectedDigest: expectedDigest,
+      configDigest,
+    };
+  }
+  if (imageIndexMediaTypes.has(mediaType)) {
+    if (!Array.isArray(manifest.manifests) || manifest.manifests.length === 0) {
+      throw new Error("container image index has no child manifests");
+    }
+    const candidates = manifest.manifests.filter((descriptor) => {
+      if (!descriptor || typeof descriptor !== "object" || Array.isArray(descriptor)) return false;
+      return descriptor.platform?.os === "linux" && descriptor.platform?.architecture === "amd64";
+    });
+    if (candidates.length === 0) {
+      throw new Error("container image index has no Linux/AMD64 child");
+    }
+    if (candidates.length !== 1) {
+      throw new Error("container image index has ambiguous Linux/AMD64 children");
+    }
+    const candidate = candidates[0];
+    if (!singleImageMediaTypes.has(candidate.mediaType)) {
+      throw new Error("Linux/AMD64 child manifest media type is unsupported");
+    }
+    return {
+      kind: "index",
+      selectedDigest: requireSha256Digest(
+        candidate.digest,
+        "Linux/AMD64 child manifest digest",
+      ),
+    };
+  }
+  throw new Error("container image manifest media type is unsupported");
+}
+
+function verifySingleImageConfig(inspection, document) {
+  const actualDigest = `sha256:${createHash("sha256").update(document.bytes).digest("hex")}`;
+  assertEqual(actualDigest, inspection.configDigest, "container image config digest");
+  const config = document.value;
+  requireObject(config, "container image config");
+  if (config.os !== "linux" || config.architecture !== "amd64") {
+    throw new Error("single container image must declare os=linux and architecture=amd64");
+  }
+  return {
+    kind: inspection.kind,
+    os: config.os,
+    architecture: config.architecture,
+    selectedDigest: inspection.selectedDigest,
+    configDigest: inspection.configDigest,
+  };
+}
+
+function requireSha256Digest(value, label) {
+  if (typeof value !== "string" || !/^sha256:[0-9a-f]{64}$/u.test(value)) {
+    throw new Error(`${label} must be a lowercase SHA-256 digest`);
+  }
+  return value;
+}
+
 function validateValue(kind, value, context) {
   if (typeof value !== "string" || value.length === 0) {
     throw new Error(`${kind} value is required`);
@@ -695,6 +861,27 @@ async function readJson(filePath, label) {
   }
   try {
     return JSON.parse(text);
+  } catch {
+    throw new Error(`${label} is not valid JSON`);
+  }
+}
+
+async function readBoundedJson(filePath, label, maximumBytes) {
+  return (await readBoundedJsonDocument(filePath, label, maximumBytes)).value;
+}
+
+async function readBoundedJsonDocument(filePath, label, maximumBytes) {
+  let bytes;
+  try {
+    bytes = await readFile(filePath);
+  } catch (error) {
+    throw new Error(`${label} could not be read: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (bytes.byteLength > maximumBytes) {
+    throw new Error(`${label} exceeds its size limit`);
+  }
+  try {
+    return { bytes, value: JSON.parse(bytes.toString("utf8")) };
   } catch {
     throw new Error(`${label} is not valid JSON`);
   }

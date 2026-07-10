@@ -95,11 +95,37 @@ jobs:
             --repository-names openclaw/fakeco/crabhelm \
             --query 'repositories[0].repositoryArn' \
             --output text)" == "$FAKECO_ECR_REPOSITORY_ARN" ]]
-          [[ "$(aws ecr describe-images \
+          aws ecr batch-get-image \
+            --registry-id "$FAKECO_AWS_ACCOUNT_ID" \
             --repository-name openclaw/fakeco/crabhelm \
             --image-ids "imageDigest=${FAKECO_IMAGE_URI##*@}" \
-            --query 'imageDetails[0].imageDigest' \
-            --output text)" == "${FAKECO_IMAGE_URI##*@}" ]]
+            --output json >"$RUNNER_TEMP/fakeco-ecr-manifest.json"
+          config_digest="$(node deploy/aws/fakeco/foundation.mjs image-config-digest \
+            --rendered "$RUNNER_TEMP/fakeco-rendered.json" \
+            --ecr-response "$RUNNER_TEMP/fakeco-ecr-manifest.json")"
+          if [[ -n "$config_digest" ]]; then
+            config_url="$(aws ecr get-download-url-for-layer \
+              --registry-id "$FAKECO_AWS_ACCOUNT_ID" \
+              --repository-name openclaw/fakeco/crabhelm \
+              --layer-digest "$config_digest" \
+              --query downloadUrl \
+              --output text)"
+            curl --fail --silent --show-error \
+              --max-filesize 10485760 \
+              --proto '=https' \
+              --tlsv1.2 \
+              --output "$RUNNER_TEMP/fakeco-image-config.json" \
+              "$config_url"
+            unset config_url
+            node deploy/aws/fakeco/foundation.mjs verify-image-manifest \
+              --rendered "$RUNNER_TEMP/fakeco-rendered.json" \
+              --ecr-response "$RUNNER_TEMP/fakeco-ecr-manifest.json" \
+              --config "$RUNNER_TEMP/fakeco-image-config.json"
+          else
+            node deploy/aws/fakeco/foundation.mjs verify-image-manifest \
+              --rendered "$RUNNER_TEMP/fakeco-rendered.json" \
+              --ecr-response "$RUNNER_TEMP/fakeco-ecr-manifest.json"
+          fi
           [[ "$(aws acm describe-certificate \
             --certificate-arn "$FAKECO_CERTIFICATE_ARN" \
             --query 'Certificate.CertificateArn' \
