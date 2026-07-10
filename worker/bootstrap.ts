@@ -819,7 +819,7 @@ export function inferenceProbeCommand(
     `if (!Array.isArray(results) || !results.some((result) => result?.provider === 'clawrouter' && result?.model === ${JSON.stringify(model)} && result?.status === 'ok')) process.exit(3);`,
   ].join(" ");
   const turnCommand = routerBaseUrl
-    ? `timeout -k 10 180 "\${agent_command[@]}" "$openclaw_cli" agent --agent main --model ${shellQuote(model)} --message ${shellQuote("Reply exactly: CLAWROUTER_CANARY_OK")} --json >${output} 2>${error}`
+    ? `timeout -k 10 180 "\${agent_command[@]}" "$openclaw_cli" agent --agent main --model ${shellQuote(model)} --session-id "$probe_session" --message ${shellQuote("Reply exactly: CLAWROUTER_CANARY_OK")} --json >${output} 2>${error}`
     : `timeout -k 10 180 "\${agent_command[@]}" "$openclaw_cli" agent --agent main --session-id "$probe_session" --message ${shellQuote("Calculate 731 multiplied by 919. Reply with only the decimal integer, without formatting or punctuation.")} --thinking off --json >${output} 2>${error}`;
   return [
     `probe_label=${shellQuote(probeLabel)}`,

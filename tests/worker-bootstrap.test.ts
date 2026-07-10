@@ -162,7 +162,7 @@ test("live inference proof checks the exact ClawRouter base before the model tur
   assert.match(command, /clawrouter\.example\.test/u);
   assert.match(command, /clawrouter\/openai\/gpt-5\.5/u);
   assert.match(command, /models status --probe --probe-provider clawrouter --probe-max-tokens 8 --json/u);
-  assert.match(command, /agent --agent main --model 'clawrouter\/openai\/gpt-5\.5' --message 'Reply exactly: CLAWROUTER_CANARY_OK' --json/u);
+  assert.match(command, /agent --agent main --model 'clawrouter\/openai\/gpt-5\.5' --session-id "\$probe_session" --message 'Reply exactly: CLAWROUTER_CANARY_OK' --json/u);
   assert.ok(
     command.indexOf("config get models.providers.clawrouter.baseUrl") < command.indexOf("models status --probe"),
   );
