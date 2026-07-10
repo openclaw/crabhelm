@@ -148,7 +148,7 @@ aws cloudformation deploy \
 
 Use the committed [locked profile, offline renderer, image-platform verifier, live-stack verifier, and retained-resource teardown planner](fakeco/README.md), not hand-written overrides. It enforces external precreated ECR, a digest-only Linux/AMD64 image, `ProvisionService=true`, the target account/Region and fixed IAM paths, one-day backups, 20 GiB without RDS storage autoscaling, disabled RDS log export, seven-day ECS logs, single-AZ RDS, and one task. It rejects the production ClawRouter origin and cannot silently route a disposable stack there.
 
-The profile preserves one NAT gateway in public subnet A. The S3 gateway endpoint removes S3 data from that path, but all other task egress remains explicitly single-NAT and non-HA. The deploy and teardown workflows are manual, protected-main-only, share one concurrency group, use separate exact OIDC subjects, and read no secret values.
+The profile preserves one NAT gateway in public subnet A. The S3 gateway endpoint removes application S3 and regional ECR image-layer data from that path, with the AWS-owned regional ECR layer bucket explicitly allowed; all other task egress remains single-NAT and non-HA. The deploy and teardown workflows are manual, protected-main-only, share one concurrency group, use separate exact OIDC subjects, and read no secret values.
 
 Before live FakeCo validation, build and upload an appliance from the landed OpenClaw provider-overlay commit and pin its manifest, archive, and Node digests in this stack. The repository's current `2026.6.11` appliance pin predates that overlay fix and is direct-provider reference evidence only; it is not ClawRouter-compatible. Do not change or claim a release version in this integration PR.
 

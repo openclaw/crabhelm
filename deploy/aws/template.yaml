@@ -634,13 +634,14 @@ Resources:
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
-          - Sid: ReadAppliancesAndVault
+          - Sid: ReadAppliancesVaultAndEcrLayers
             Effect: Allow
             Principal: "*"
             Action: s3:GetObject
             Resource:
               - !Sub ${AppliancesBucket.Arn}/releases/*
               - !Sub ${OAuthVaultBucket.Arn}/*
+              - !Sub arn:${AWS::Partition}:s3:::prod-${AWS::Region}-starport-layer-bucket/*
           - Sid: WriteVaultAndAudit
             Effect: Allow
             Principal: "*"

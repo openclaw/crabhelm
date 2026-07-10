@@ -700,7 +700,11 @@ function validateValue(kind, value, context) {
     case "clawRouterUrl": {
       const origin = validateHttpsUrl(value, true);
       const hostname = new URL(origin).hostname.toLowerCase();
-      if (hostname === "clawrouter.openclaw.ai" || hostname.endsWith(".invalid")) {
+      if (
+        hostname.endsWith(".") ||
+        hostname === "clawrouter.openclaw.ai" ||
+        hostname.endsWith(".invalid")
+      ) {
         throw new Error("FakeCo ClawRouter origin must be an explicit non-production origin");
       }
       return origin;

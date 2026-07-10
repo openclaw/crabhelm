@@ -21,7 +21,7 @@ Nothing in this directory creates an AWS account, organization unit, IAM Identit
 - metadata-only Prometheus enabled, ClawRouter enabled with retention controlled by the application contract, and no direct provider credential;
 - stack tags `Project=crabhelm`, `Environment=fakeco`, and `ManagedBy=github-actions`.
 
-The S3 gateway endpoint keeps application S3 traffic off the NAT gateway at no endpoint-hour charge. Other external HTTPS traffic still uses the single NAT gateway in public subnet A. This is explicitly non-HA: an Availability Zone or NAT failure can interrupt task egress even though the ALB spans two public subnets.
+The S3 gateway endpoint keeps application S3 traffic and regional ECR image-layer downloads off the NAT gateway at no endpoint-hour charge. Its least-privilege policy includes the AWS-owned `prod-<region>-starport-layer-bucket` required for private ECR pulls. Other external HTTPS traffic still uses the single NAT gateway in public subnet A. This is explicitly non-HA: an Availability Zone or NAT failure can interrupt task egress even though the ALB spans two public subnets.
 
 ## Account-foundation prerequisites
 

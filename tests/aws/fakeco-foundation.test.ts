@@ -93,6 +93,11 @@ test("FakeCo render fails closed on tags, target drift, production router, or br
       /explicit non-production origin/u,
     ],
     [
+      "production router with an FQDN dot",
+      { FAKECO_CLAWROUTER_BASE_URL: "https://clawrouter.openclaw.ai." },
+      /explicit non-production origin/u,
+    ],
+    [
       "unbounded GitHub role",
       { FAKECO_GITHUB_ROLE_ARN: "arn:aws:iam::123456789012:role/Administrator" },
       /FakeCo role ARN/u,
@@ -435,6 +440,10 @@ test("AWS template enforces boundary, scoped IAM, digest XOR, and bounded FakeCo
   assert.match(template, /BackupRetentionPeriod: !Ref DatabaseBackupRetentionDays/u);
   assert.match(template, /EnableCloudwatchLogsExports: !If[\s\S]*ExportDatabaseLogs/u);
   assert.match(template, /S3GatewayEndpoint:[\s\S]*VpcEndpointType: Gateway/u);
+  assert.match(
+    template,
+    /arn:\$\{AWS::Partition\}:s3:::prod-\$\{AWS::Region\}-starport-layer-bucket\/\*/u,
+  );
   assert.match(
     template,
     /RuntimePlatform:\n\s+CpuArchitecture: X86_64\n\s+OperatingSystemFamily: LINUX/u,
