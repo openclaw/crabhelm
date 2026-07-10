@@ -131,8 +131,8 @@ export function loadAwsConfig(environment: Environment = process.env): AwsConfig
 
   const bootstrapSigningSecret = signingSecret(environment, "BOOTSTRAP_SIGNING_SECRET");
   const sessionSigningSecret = signingSecret(environment, "SESSION_SIGNING_SECRET");
-  const invocationSigningSecret = signingSecret(environment, "INVOCATION_SIGNING_SECRET");
-  const runtimeSigningSecret = signingSecret(environment, "RUNTIME_SIGNING_SECRET");
+  const invocationSecret = signingSecret(environment, "INVOCATION_SIGNING_SECRET");
+  const runtimeSecret = signingSecret(environment, "RUNTIME_SIGNING_SECRET");
   const modelSigningSecret = modelProxy === "on"
     ? signingSecret(environment, "MODEL_SIGNING_SECRET")
     : optionalSigningSecret(environment, "MODEL_SIGNING_SECRET");
@@ -177,8 +177,8 @@ export function loadAwsConfig(environment: Environment = process.env): AwsConfig
     CRABBOX_TOKEN: requiredSecret(environment, "CRABBOX_TOKEN"),
     BOOTSTRAP_SIGNING_SECRET: bootstrapSigningSecret,
     SESSION_SIGNING_SECRET: sessionSigningSecret,
-    INVOCATION_SIGNING_SECRET: invocationSigningSecret,
-    RUNTIME_SIGNING_SECRET: runtimeSigningSecret,
+    INVOCATION_SIGNING_SECRET: invocationSecret,
+    RUNTIME_SIGNING_SECRET: runtimeSecret,
     VAULT_MASTER_KEY: vaultMasterKey(environment),
     OPENAI_API_KEY: requiredSecret(environment, "OPENAI_API_KEY"),
     SLACK_SIGNING_SECRET: requiredSecret(environment, "SLACK_SIGNING_SECRET"),

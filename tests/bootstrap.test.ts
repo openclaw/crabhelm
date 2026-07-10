@@ -70,8 +70,8 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
       CRABHELM_MODEL: "openai/gpt-5.4-mini",
       CRABHELM_MODEL_BASE_URL: "https://crabhelm-runtime.example.test/model/v1",
       CRABHELM_SLACK_ENABLED: "true",
-      OPENCLAW_GATEWAY_TOKEN: "must-not-reach-openclaw",
-      OPENCLAW_GATEWAY_PASSWORD: "must-not-reach-openclaw",
+      OPENCLAW_GATEWAY_TOKEN: "blocked",
+      OPENCLAW_GATEWAY_PASSWORD: "blocked",
     },
   });
 

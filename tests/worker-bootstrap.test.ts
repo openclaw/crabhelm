@@ -21,6 +21,7 @@ const testNodeId = "e".repeat(64);
 const testReleaseMarker = `${"a".repeat(64)}.${"c".repeat(64)}.${testNodeId}`;
 const testSigningKey = ["crabhelm", "bootstrap", "test", "signing", "material"].join("-");
 const differentSigningKey = ["different", "bootstrap", "test", "signing", "material"].join("-");
+const rotatedDirectCredential = ["OPENAI_API_KEY", "rotated-epoch-secret"].join("=");
 
 test("Cloudflare workspace bootstrap binds child identity, model, and channel state", async () => {
   const claw = createClawRecord({
@@ -230,7 +231,7 @@ while (($#)); do
 done
 case "$url" in
   */bundle.tgz) cp ${JSON.stringify(path.join(fixtures, "bundle.tgz"))} "$dest" ;;
-  */credentials.env) printf 'OPENAI_API_KEY=rotated-epoch-secret\\n' >"$dest" ;;
+  */credentials.env) printf '%s\\n' ${JSON.stringify(rotatedDirectCredential)} >"$dest" ;;
   */managed-spec.json*) printf '{}\\n' >"$dest" ;;
   *) exit 22 ;;
 esac
@@ -281,7 +282,7 @@ esac
   });
   assert.equal(
     await readFile(guestLog, "utf8"),
-    "gen=4 model=openai/gpt-5.5 credentials=OPENAI_API_KEY=rotated-epoch-secret\n",
+    `gen=4 model=openai/gpt-5.5 credentials=${rotatedDirectCredential}\n`,
   );
   const marker = path.join(home, ".openclaw", "crabhelm-credentials-generation");
   assert.equal(await readFile(marker, "utf8"), "c4\n");
@@ -415,7 +416,7 @@ while (($#)); do
 done
 case "$url" in
   */bundle.tgz) cp ${JSON.stringify(path.join(fixtures, "bundle.tgz"))} "$dest" ;;
-  */credentials.env) printf 'OPENAI_API_KEY=rotated-epoch-secret\\n' >"$dest" ;;
+  */credentials.env) printf '%s\\n' ${JSON.stringify(rotatedDirectCredential)} >"$dest" ;;
   */managed-spec.json*) printf '{}\\n' >"$dest" ;;
   *) exit 22 ;;
 esac
@@ -464,7 +465,7 @@ esac
   });
   assert.equal(
     await readFile(guestLog, "utf8"),
-    `gen=4 release=${"e".repeat(64)}.${archiveId}.${"f".repeat(64)} base=https://crabhelm-runtime.example.test/model/v1 model=openai/gpt-5.5 credentials=OPENAI_API_KEY=rotated-epoch-secret\n`,
+    `gen=4 release=${"e".repeat(64)}.${archiveId}.${"f".repeat(64)} base=https://crabhelm-runtime.example.test/model/v1 model=openai/gpt-5.5 credentials=${rotatedDirectCredential}\n`,
   );
   const marker = path.join(home, ".openclaw", "crabhelm-credentials-generation");
   assert.equal(await readFile(marker, "utf8"), "c4\n");
