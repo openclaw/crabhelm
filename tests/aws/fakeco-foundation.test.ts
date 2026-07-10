@@ -24,6 +24,7 @@ test("FakeCo profile locks target identity and exact GitHub OIDC subjects", () =
   assert.deepEqual(output.oidcSubjects, {
     deploy: "repo:openclaw/crabhelm:environment:fakeco",
     teardown: "repo:openclaw/crabhelm:environment:fakeco-teardown",
+    imagePublish: "repo:openclaw/crabhelm:environment:fakeco-image-publish",
   });
 });
 

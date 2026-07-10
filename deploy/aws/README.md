@@ -99,6 +99,10 @@ docker push "$IMAGE_URI"
 
 External images use ECR only. Pass both the exact `ExistingEcrRepositoryArn` and an `ImageUri` ending in `@sha256:<digest>`; the image URI's account, Region, and repository must match that ARN. The stack execution role scopes layer reads to that repository. The current task runtime is `LINUX`/`X86_64`; FakeCo verifies a single image's config or exactly one Linux/AMD64 index descriptor plus that digest-bound child's config before starting CloudFormation. ARM64 images and migration are out of scope. Non-ECR registry credentials are not configured by this template.
 
+For FakeCo, use the manual [`publish-fakeco-image.yml`](../../.github/workflows/publish-fakeco-image.yml) owner instead of a workstation push. It accepts one exact landed Crabhelm source commit, builds `Dockerfile.aws` natively for Linux/AMD64 with BuildKit SBOM and maximum provenance, pushes only the precreated immutable `openclaw/fakeco/crabhelm` ECR repository, binds the BuildKit and ECR digests, reuses the canonical manifest/config verifier, and blocks any CRITICAL ECR scan finding. Its non-secret artifact supplies the digest-bound `FAKECO_IMAGE_URI` for a later manual deploy-Environment update; the workflow never changes that Environment itself.
+
+This ECS control-plane image is not an OpenClaw Gateway artifact. The publisher does not build or publish OpenClaw standalone OCI images, and it does not create the separately reviewed x86_64 Gateway appliance inputs (`NodeRuntimeSha256`, `ApplianceArchiveSha256`, and `ApplianceManifestSha256`) delivered through the private appliance bucket.
+
 ### Stack-owned ECR
 
 CloudFormation cannot push the first image into a repository it is creating. Use two updates:

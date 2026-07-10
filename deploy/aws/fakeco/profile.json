@@ -6,22 +6,30 @@
   "stackName": "crabhelm-fakeco",
   "environments": {
     "deploy": "fakeco",
-    "teardown": "fakeco-teardown"
+    "teardown": "fakeco-teardown",
+    "imagePublish": "fakeco-image-publish"
   },
   "oidcSubjects": {
     "deploy": "repo:openclaw/crabhelm:environment:fakeco",
-    "teardown": "repo:openclaw/crabhelm:environment:fakeco-teardown"
+    "teardown": "repo:openclaw/crabhelm:environment:fakeco-teardown",
+    "imagePublish": "repo:openclaw/crabhelm:environment:fakeco-image-publish"
   },
   "githubRolePaths": {
     "deploy": "openclaw/fakeco/github/crabhelm-deploy",
-    "teardown": "openclaw/fakeco/github/crabhelm-teardown"
+    "teardown": "openclaw/fakeco/github/crabhelm-teardown",
+    "imagePublish": "openclaw/fakeco/github/crabhelm-image-publish"
   },
   "cloudFormationServiceRolePath": "openclaw/fakeco/cloudformation/crabhelm-service",
   "cloudFormationArtifactBucketPattern": "openclaw-fakeco-cfn-{accountId}-{region}",
   "workloadPermissionsBoundaryPath": "openclaw/fakeco/crabhelm-workload-boundary",
   "workloadRolePath": "/openclaw/fakeco/crabhelm/",
   "ecrRepositoryName": "openclaw/fakeco/crabhelm",
+  "ecrRepositoryUriPattern": "{accountId}.dkr.ecr.{region}.amazonaws.com/openclaw/fakeco/crabhelm",
   "concurrencyGroup": "crabhelm-fakeco",
+  "imagePublishConcurrencyGroup": "crabhelm-fakeco-image-publish",
+  "imageScanPolicy": {
+    "maximumCriticalFindings": 0
+  },
   "tags": {
     "Environment": "fakeco",
     "ManagedBy": "github-actions",
@@ -66,6 +74,13 @@
     { "env": "FAKECO_CLOUDFORMATION_SERVICE_ROLE_ARN", "kind": "cloudFormationServiceRoleArn" },
     { "env": "FAKECO_CLOUDFORMATION_ARTIFACT_BUCKET", "kind": "cloudFormationArtifactBucket" },
     { "env": "FAKECO_ECR_REPOSITORY_ARN", "kind": "ecrRepositoryArn" }
+  ],
+  "imagePublicationInputs": [
+    { "env": "FAKECO_AWS_ACCOUNT_ID", "kind": "accountId" },
+    { "env": "FAKECO_AWS_REGION", "kind": "region" },
+    { "env": "FAKECO_IMAGE_PUBLISH_ROLE_ARN", "kind": "imagePublishRoleArn" },
+    { "env": "FAKECO_ECR_REPOSITORY_ARN", "kind": "ecrRepositoryArn" },
+    { "env": "FAKECO_ECR_REPOSITORY_URI", "kind": "ecrRepositoryUri" }
   ],
   "parameterInputs": [
     { "env": "FAKECO_IMAGE_URI", "parameter": "ImageUri", "kind": "imageUri" },
