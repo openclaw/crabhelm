@@ -1,0 +1,170 @@
+name: Deploy FakeCo
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: crabhelm-fakeco
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.ref_protected
+    environment: fakeco
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      FAKECO_AWS_ACCOUNT_ID: ${{ vars.FAKECO_AWS_ACCOUNT_ID }}
+      FAKECO_AWS_REGION: ${{ vars.FAKECO_AWS_REGION }}
+      FAKECO_GITHUB_ROLE_ARN: ${{ vars.FAKECO_GITHUB_ROLE_ARN }}
+      FAKECO_CLOUDFORMATION_SERVICE_ROLE_ARN: ${{ vars.FAKECO_CLOUDFORMATION_SERVICE_ROLE_ARN }}
+      FAKECO_CLOUDFORMATION_ARTIFACT_BUCKET: ${{ vars.FAKECO_CLOUDFORMATION_ARTIFACT_BUCKET }}
+      FAKECO_ECR_REPOSITORY_ARN: ${{ vars.FAKECO_ECR_REPOSITORY_ARN }}
+      FAKECO_IMAGE_URI: ${{ vars.FAKECO_IMAGE_URI }}
+      FAKECO_WORKLOAD_PERMISSIONS_BOUNDARY_ARN: ${{ vars.FAKECO_WORKLOAD_PERMISSIONS_BOUNDARY_ARN }}
+      FAKECO_CERTIFICATE_ARN: ${{ vars.FAKECO_CERTIFICATE_ARN }}
+      FAKECO_CONSOLE_HOSTNAME: ${{ vars.FAKECO_CONSOLE_HOSTNAME }}
+      FAKECO_RUNTIME_HOSTNAME: ${{ vars.FAKECO_RUNTIME_HOSTNAME }}
+      FAKECO_OIDC_ISSUER: ${{ vars.FAKECO_OIDC_ISSUER }}
+      FAKECO_OIDC_AUTHORIZATION_ENDPOINT: ${{ vars.FAKECO_OIDC_AUTHORIZATION_ENDPOINT }}
+      FAKECO_OIDC_TOKEN_ENDPOINT: ${{ vars.FAKECO_OIDC_TOKEN_ENDPOINT }}
+      FAKECO_OIDC_USERINFO_ENDPOINT: ${{ vars.FAKECO_OIDC_USERINFO_ENDPOINT }}
+      FAKECO_OIDC_CLIENT_ID: ${{ vars.FAKECO_OIDC_CLIENT_ID }}
+      FAKECO_OIDC_CLIENT_SECRET_VERSION: ${{ vars.FAKECO_OIDC_CLIENT_SECRET_VERSION }}
+      FAKECO_APPLICATION_SECRET_ARN: ${{ vars.FAKECO_APPLICATION_SECRET_ARN }}
+      FAKECO_APPLICATION_SECRET_KMS_KEY_ARN: ${{ vars.FAKECO_APPLICATION_SECRET_KMS_KEY_ARN }}
+      FAKECO_CRABBOX_URL: ${{ vars.FAKECO_CRABBOX_URL }}
+      FAKECO_CRABBOX_TARGET_ID: ${{ vars.FAKECO_CRABBOX_TARGET_ID }}
+      FAKECO_CRABBOX_TARGET_LABEL: ${{ vars.FAKECO_CRABBOX_TARGET_LABEL }}
+      FAKECO_CRABBOX_TARGET_REGION: ${{ vars.FAKECO_CRABBOX_TARGET_REGION }}
+      FAKECO_ADMIN_EMAILS: ${{ vars.FAKECO_ADMIN_EMAILS }}
+      FAKECO_GITHUB_OAUTH_CLIENT_ID: ${{ vars.FAKECO_GITHUB_OAUTH_CLIENT_ID }}
+      FAKECO_CLAWROUTER_BASE_URL: ${{ vars.FAKECO_CLAWROUTER_BASE_URL }}
+      FAKECO_NODE_RUNTIME_SHA256: ${{ vars.FAKECO_NODE_RUNTIME_SHA256 }}
+      FAKECO_APPLIANCE_ARCHIVE_SHA256: ${{ vars.FAKECO_APPLIANCE_ARCHIVE_SHA256 }}
+      FAKECO_APPLIANCE_MANIFEST_SHA256: ${{ vars.FAKECO_APPLIANCE_MANIFEST_SHA256 }}
+      FAKECO_OPERATOR_ALERT_TOPIC_NAME: ${{ vars.FAKECO_OPERATOR_ALERT_TOPIC_NAME }}
+    steps:
+      - name: Check out protected main
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Render locked FakeCo deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_REF_PROTECTED" == "true" ]]
+          node deploy/aws/fakeco/foundation.mjs validate-profile
+          node deploy/aws/fakeco/foundation.mjs render \
+            --phase deploy \
+            --output "$RUNNER_TEMP/fakeco-rendered.json"
+          node deploy/aws/fakeco/foundation.mjs verify \
+            --rendered "$RUNNER_TEMP/fakeco-rendered.json"
+
+      - name: Configure target-account credentials
+        uses: aws-actions/configure-aws-credentials@00943011d9042930efac3dcd3a170e4273319bc8 # v5.1.0
+        with:
+          allowed-account-ids: ${{ vars.FAKECO_AWS_ACCOUNT_ID }}
+          aws-region: ${{ vars.FAKECO_AWS_REGION }}
+          mask-aws-account-id: true
+          role-session-name: crabhelm-fakeco-deploy
+          role-to-assume: ${{ vars.FAKECO_GITHUB_ROLE_ARN }}
+          unset-current-credentials: true
+
+      - name: Verify account-foundation prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_account="$(aws sts get-caller-identity --query Account --output text)"
+          [[ "$actual_account" == "$FAKECO_AWS_ACCOUNT_ID" ]]
+          [[ "$(aws iam get-role \
+            --role-name "${FAKECO_CLOUDFORMATION_SERVICE_ROLE_ARN##*/}" \
+            --query 'Role.Arn' \
+            --output text)" == "$FAKECO_CLOUDFORMATION_SERVICE_ROLE_ARN" ]]
+          [[ "$(aws iam get-policy \
+            --policy-arn "$FAKECO_WORKLOAD_PERMISSIONS_BOUNDARY_ARN" \
+            --query 'Policy.Arn' \
+            --output text)" == "$FAKECO_WORKLOAD_PERMISSIONS_BOUNDARY_ARN" ]]
+          [[ "$(aws ecr describe-repositories \
+            --repository-names openclaw/fakeco/crabhelm \
+            --query 'repositories[0].repositoryArn' \
+            --output text)" == "$FAKECO_ECR_REPOSITORY_ARN" ]]
+          [[ "$(aws ecr describe-images \
+            --repository-name openclaw/fakeco/crabhelm \
+            --image-ids "imageDigest=${FAKECO_IMAGE_URI##*@}" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)" == "${FAKECO_IMAGE_URI##*@}" ]]
+          [[ "$(aws acm describe-certificate \
+            --certificate-arn "$FAKECO_CERTIFICATE_ARN" \
+            --query 'Certificate.CertificateArn' \
+            --output text)" == "$FAKECO_CERTIFICATE_ARN" ]]
+          [[ "$(aws secretsmanager describe-secret \
+            --secret-id "$FAKECO_APPLICATION_SECRET_ARN" \
+            --query 'ARN' \
+            --output text)" == "$FAKECO_APPLICATION_SECRET_ARN" ]]
+          [[ "$(aws kms describe-key \
+            --key-id "$FAKECO_APPLICATION_SECRET_KMS_KEY_ARN" \
+            --query 'KeyMetadata.Arn' \
+            --output text)" == "$FAKECO_APPLICATION_SECRET_KMS_KEY_ARN" ]]
+          aws s3api head-bucket \
+            --bucket "$FAKECO_CLOUDFORMATION_ARTIFACT_BUCKET" \
+            --expected-bucket-owner "$FAKECO_AWS_ACCOUNT_ID"
+
+      - name: Deploy one digest-pinned stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t parameter_overrides < <(
+            node deploy/aws/fakeco/foundation.mjs parameter-overrides \
+              --rendered "$RUNNER_TEMP/fakeco-rendered.json"
+          )
+          aws cloudformation deploy \
+            --stack-name crabhelm-fakeco \
+            --template-file deploy/aws/template.yaml \
+            --s3-bucket "$FAKECO_CLOUDFORMATION_ARTIFACT_BUCKET" \
+            --s3-prefix crabhelm/fakeco/cloudformation \
+            --capabilities CAPABILITY_IAM \
+            --role-arn "$FAKECO_CLOUDFORMATION_SERVICE_ROLE_ARN" \
+            --parameter-overrides "${parameter_overrides[@]}" \
+            --tags Environment=fakeco ManagedBy=github-actions Project=crabhelm \
+            --no-fail-on-empty-changeset
+
+      - name: Verify deployed stack and singleton service
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws cloudformation describe-stacks \
+            --stack-name crabhelm-fakeco \
+            --output json >"$RUNNER_TEMP/fakeco-stack.json"
+          node deploy/aws/fakeco/foundation.mjs verify \
+            --rendered "$RUNNER_TEMP/fakeco-rendered.json" \
+            --stack "$RUNNER_TEMP/fakeco-stack.json"
+          cluster="$(aws cloudformation describe-stacks \
+            --stack-name crabhelm-fakeco \
+            --query "Stacks[0].Outputs[?OutputKey==\`EcsClusterName\`].OutputValue | [0]" \
+            --output text)"
+          service="$(aws cloudformation describe-stacks \
+            --stack-name crabhelm-fakeco \
+            --query "Stacks[0].Outputs[?OutputKey==\`EcsServiceArn\`].OutputValue | [0]" \
+            --output text)"
+          alb_dns="$(aws cloudformation describe-stacks \
+            --stack-name crabhelm-fakeco \
+            --query "Stacks[0].Outputs[?OutputKey==\`AlbDnsName\`].OutputValue | [0]" \
+            --output text)"
+          aws ecs wait services-stable --cluster "$cluster" --services "$service"
+          curl --fail --silent --show-error \
+            --connect-to "${FAKECO_RUNTIME_HOSTNAME}:443:${alb_dns}:443" \
+            "https://${FAKECO_RUNTIME_HOSTNAME}/healthz" >/dev/null
+          printf '%s\n' \
+            '### FakeCo deploy verified' \
+            '- protected main source' \
+            '- digest-pinned external ECR image' \
+            '- locked stack parameters and tags' \
+            '- singleton ECS service stable' \
+            '- runtime /healthz healthy' >>"$GITHUB_STEP_SUMMARY"

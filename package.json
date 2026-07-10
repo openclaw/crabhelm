@@ -12,6 +12,7 @@
     "check": "pnpm build && pnpm test && pnpm test:workers && pnpm aws:check",
     "aws:build": "tsgo -p tsconfig.aws.json --noEmit && esbuild aws/server.ts --bundle --banner:js=\"import { createRequire as __crabhelmCreateRequire } from 'node:module'; const require = __crabhelmCreateRequire(import.meta.url);\" --platform=node --format=esm --target=node22 --outfile=dist/aws/server.js --external:aws-crt --external:bufferutil --external:pg-native --external:utf-8-validate && node --check dist/aws/server.js && node --input-type=module --eval \"const module = await import('./dist/aws/server.js'); if (typeof module.startAwsServer !== 'function') process.exit(1);\"",
     "aws:check": "pnpm aws:build && pnpm aws:test",
+    "aws:fakeco:validate": "node deploy/aws/fakeco/foundation.mjs validate-profile",
     "aws:test": "node --import tsx --test tests/aws/*.test.ts",
     "dev": "tsx dev/server.ts",
     "prepack": "pnpm build",

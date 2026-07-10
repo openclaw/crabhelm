@@ -21,3 +21,6 @@ coverage/
 .wrangler/
 wrangler.production.jsonc
 wrangler.*.local.jsonc
+deploy/aws/fakeco/*.local.json
+deploy/aws/fakeco/*-rendered.json
+deploy/aws/fakeco/*-teardown-plan.json

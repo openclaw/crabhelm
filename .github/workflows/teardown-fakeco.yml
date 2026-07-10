@@ -1,0 +1,129 @@
+name: Teardown FakeCo
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_stack_name:
+        description: Type crabhelm-fakeco to confirm standard stack deletion.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: crabhelm-fakeco
+  cancel-in-progress: false
+
+jobs:
+  teardown:
+    if: github.ref == 'refs/heads/main' && github.ref_protected
+    environment: fakeco-teardown
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      FAKECO_AWS_ACCOUNT_ID: ${{ vars.FAKECO_AWS_ACCOUNT_ID }}
+      FAKECO_AWS_REGION: ${{ vars.FAKECO_AWS_REGION }}
+      FAKECO_GITHUB_ROLE_ARN: ${{ vars.FAKECO_GITHUB_ROLE_ARN }}
+      FAKECO_CLOUDFORMATION_SERVICE_ROLE_ARN: ${{ vars.FAKECO_CLOUDFORMATION_SERVICE_ROLE_ARN }}
+      FAKECO_CLOUDFORMATION_ARTIFACT_BUCKET: ${{ vars.FAKECO_CLOUDFORMATION_ARTIFACT_BUCKET }}
+      FAKECO_ECR_REPOSITORY_ARN: ${{ vars.FAKECO_ECR_REPOSITORY_ARN }}
+      FAKECO_IMAGE_URI: ${{ vars.FAKECO_IMAGE_URI }}
+      FAKECO_WORKLOAD_PERMISSIONS_BOUNDARY_ARN: ${{ vars.FAKECO_WORKLOAD_PERMISSIONS_BOUNDARY_ARN }}
+      FAKECO_CERTIFICATE_ARN: ${{ vars.FAKECO_CERTIFICATE_ARN }}
+      FAKECO_CONSOLE_HOSTNAME: ${{ vars.FAKECO_CONSOLE_HOSTNAME }}
+      FAKECO_RUNTIME_HOSTNAME: ${{ vars.FAKECO_RUNTIME_HOSTNAME }}
+      FAKECO_OIDC_ISSUER: ${{ vars.FAKECO_OIDC_ISSUER }}
+      FAKECO_OIDC_AUTHORIZATION_ENDPOINT: ${{ vars.FAKECO_OIDC_AUTHORIZATION_ENDPOINT }}
+      FAKECO_OIDC_TOKEN_ENDPOINT: ${{ vars.FAKECO_OIDC_TOKEN_ENDPOINT }}
+      FAKECO_OIDC_USERINFO_ENDPOINT: ${{ vars.FAKECO_OIDC_USERINFO_ENDPOINT }}
+      FAKECO_OIDC_CLIENT_ID: ${{ vars.FAKECO_OIDC_CLIENT_ID }}
+      FAKECO_OIDC_CLIENT_SECRET_VERSION: ${{ vars.FAKECO_OIDC_CLIENT_SECRET_VERSION }}
+      FAKECO_APPLICATION_SECRET_ARN: ${{ vars.FAKECO_APPLICATION_SECRET_ARN }}
+      FAKECO_APPLICATION_SECRET_KMS_KEY_ARN: ${{ vars.FAKECO_APPLICATION_SECRET_KMS_KEY_ARN }}
+      FAKECO_CRABBOX_URL: ${{ vars.FAKECO_CRABBOX_URL }}
+      FAKECO_CRABBOX_TARGET_ID: ${{ vars.FAKECO_CRABBOX_TARGET_ID }}
+      FAKECO_CRABBOX_TARGET_LABEL: ${{ vars.FAKECO_CRABBOX_TARGET_LABEL }}
+      FAKECO_CRABBOX_TARGET_REGION: ${{ vars.FAKECO_CRABBOX_TARGET_REGION }}
+      FAKECO_ADMIN_EMAILS: ${{ vars.FAKECO_ADMIN_EMAILS }}
+      FAKECO_GITHUB_OAUTH_CLIENT_ID: ${{ vars.FAKECO_GITHUB_OAUTH_CLIENT_ID }}
+      FAKECO_CLAWROUTER_BASE_URL: ${{ vars.FAKECO_CLAWROUTER_BASE_URL }}
+      FAKECO_NODE_RUNTIME_SHA256: ${{ vars.FAKECO_NODE_RUNTIME_SHA256 }}
+      FAKECO_APPLIANCE_ARCHIVE_SHA256: ${{ vars.FAKECO_APPLIANCE_ARCHIVE_SHA256 }}
+      FAKECO_APPLIANCE_MANIFEST_SHA256: ${{ vars.FAKECO_APPLIANCE_MANIFEST_SHA256 }}
+      FAKECO_OPERATOR_ALERT_TOPIC_NAME: ${{ vars.FAKECO_OPERATOR_ALERT_TOPIC_NAME }}
+    steps:
+      - name: Check out protected main
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Render locked FakeCo teardown target
+        shell: bash
+        env:
+          CONFIRM_STACK_NAME: ${{ inputs.confirm_stack_name }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_REF_PROTECTED" == "true" ]]
+          [[ "$CONFIRM_STACK_NAME" == "crabhelm-fakeco" ]]
+          node deploy/aws/fakeco/foundation.mjs validate-profile
+          node deploy/aws/fakeco/foundation.mjs render \
+            --phase teardown \
+            --output "$RUNNER_TEMP/fakeco-rendered.json"
+          node deploy/aws/fakeco/foundation.mjs verify \
+            --rendered "$RUNNER_TEMP/fakeco-rendered.json"
+
+      - name: Configure teardown-account credentials
+        uses: aws-actions/configure-aws-credentials@00943011d9042930efac3dcd3a170e4273319bc8 # v5.1.0
+        with:
+          allowed-account-ids: ${{ vars.FAKECO_AWS_ACCOUNT_ID }}
+          aws-region: ${{ vars.FAKECO_AWS_REGION }}
+          mask-aws-account-id: true
+          role-session-name: crabhelm-fakeco-teardown
+          role-to-assume: ${{ vars.FAKECO_GITHUB_ROLE_ARN }}
+          unset-current-credentials: true
+
+      - name: Build retained-resource teardown plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_account="$(aws sts get-caller-identity --query Account --output text)"
+          [[ "$actual_account" == "$FAKECO_AWS_ACCOUNT_ID" ]]
+          aws cloudformation describe-stacks \
+            --stack-name crabhelm-fakeco \
+            --output json >"$RUNNER_TEMP/fakeco-stack.json"
+          aws cloudformation describe-stack-resources \
+            --stack-name crabhelm-fakeco \
+            --output json >"$RUNNER_TEMP/fakeco-resources.json"
+          node deploy/aws/fakeco/foundation.mjs teardown-plan \
+            --rendered "$RUNNER_TEMP/fakeco-rendered.json" \
+            --stack "$RUNNER_TEMP/fakeco-stack.json" \
+            --resources "$RUNNER_TEMP/fakeco-resources.json" \
+            --output "$RUNNER_TEMP/fakeco-teardown-plan.json"
+
+      - name: Preserve teardown plan
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fakeco-teardown-plan-${{ github.run_id }}
+          path: ${{ runner.temp }}/fakeco-teardown-plan.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Delete stack in standard mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws cloudformation delete-stack \
+            --stack-name crabhelm-fakeco \
+            --role-arn "$FAKECO_CLOUDFORMATION_SERVICE_ROLE_ARN" \
+            --deletion-mode STANDARD
+          aws cloudformation wait stack-delete-complete \
+            --stack-name crabhelm-fakeco
+          printf '%s\n' \
+            '### FakeCo stack deleted' \
+            '- CloudFormation deletion mode: STANDARD' \
+            '- no force-delete fallback' \
+            '- retained-resource plan uploaded before deletion' \
+            '- external account-foundation resources untouched' >>"$GITHUB_STEP_SUMMARY"

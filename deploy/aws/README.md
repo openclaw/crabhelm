@@ -12,7 +12,7 @@ ClawRouter is a separate installation boundary. This stack may call its OpenAI-c
 
 [`template.yaml`](template.yaml) creates:
 
-- one VPC with two public ALB subnets, two private task subnets, two isolated database subnets, and one NAT gateway;
+- one VPC with two public ALB subnets, two private task subnets, two isolated database subnets, one NAT gateway, and a free S3 gateway endpoint;
 - one HTTPS ALB with host rules for the console and runtime origins;
 - one 0.5-vCPU/1-GiB Fargate task;
 - one encrypted PostgreSQL RDS instance, Multi-AZ by default, with stack-generated credentials in Secrets Manager;
@@ -34,7 +34,9 @@ The stack does not create DNS records. It outputs the ALB DNS name for externall
 - A same-account, same-Region Secrets Manager JSON secret.
 - Reviewed appliance and runtime digests.
 
-The commands below assume an authenticated human AWS CLI session, typically an approved IAM Identity Center permission set or equivalent operator role. This repository does not yet provide a GitHub Actions deploy workflow/OIDC trust, a dedicated CloudFormation service role, budget resources, or permissions-boundary parameters on the ECS task roles. Automated deployment is therefore not yet least-privilege-ready; add those controls in the AWS foundation layer before granting a CI principal stack mutation access.
+The generic commands below assume an authenticated human AWS CLI session, typically an approved IAM Identity Center permission set or equivalent operator role. The template requires a workload permissions-boundary ARN and applies it to both ECS roles under the configured role path. Pass a reviewed CloudFormation service role with `--role-arn`; that deployment-plane identity is deliberately not a stack parameter.
+
+The locked disposable profile has separate manual deploy/teardown workflows and validators. Its GitHub OIDC provider, two roles, protected Environments, CloudFormation service role/template bucket, workload boundary, ECR, application secret/KMS key, ACM/DNS, and cost controls remain account-foundation prerequisites; see the [FakeCo foundation guide](fakeco/README.md).
 
 The OIDC issuer and endpoints must use publicly trusted certificates and publicly resolvable DNS. The ALB must be able to reach the token and user-info endpoints over IPv4 HTTPS; an IPv6-only or otherwise unreachable endpoint will make console authentication fail even if stack creation succeeds. A publicly resolvable name may resolve to private IPv4 addresses when VPC routing and security controls allow the ALB to reach them.
 
@@ -84,7 +86,7 @@ Secrets encrypted with the account's default Secrets Manager key need no extra p
 
 ## Build an image
 
-`Dockerfile.aws` bundles the exported server in `aws/server.ts`, copies the SQL migrations and web console, and installs the separate AWS commercial and GovCloud RDS global CA bundles. The service selects the bundle from `AWS_REGION`. The container's small ESM launcher calls `startAwsServer()`. The Node image and both reviewed CA bundles are digest-pinned; update those pins intentionally. Build for the task architecture and use an immutable tag:
+`Dockerfile.aws` bundles the exported server in `aws/server.ts`, copies the SQL migrations and web console, and installs the separate AWS commercial and GovCloud RDS global CA bundles. The service selects the bundle from `AWS_REGION`. The container's small ESM launcher calls `startAwsServer()`. The Node image and both reviewed CA bundles are digest-pinned; update those pins intentionally. Build and push with a temporary immutable tag, then resolve the registry digest used by `ImageUri`:
 
 ```bash
 docker build \
@@ -95,7 +97,7 @@ docker build \
 docker push "$IMAGE_URI"
 ```
 
-`ImageUri` may reference ECR in this account, cross-account ECR with a suitable repository policy, or another registry reachable by ECS. Private non-ECR registries need additional repository credentials and are not configured by this template.
+External images use ECR only. Pass both the exact `ExistingEcrRepositoryArn` and an `ImageUri` ending in `@sha256:<digest>`; the image URI's account, Region, and repository must match that ARN. The stack execution role scopes layer reads to that repository. Non-ECR registry credentials are not configured by this template.
 
 ### Stack-owned ECR
 
@@ -117,9 +119,14 @@ The abbreviated command below shows required inputs. Keep deployment-specific va
 aws cloudformation deploy \
   --stack-name crabhelm-aws \
   --template-file deploy/aws/template.yaml \
+  --s3-bucket "$CLOUDFORMATION_ARTIFACT_BUCKET" \
+  --role-arn "$CLOUDFORMATION_SERVICE_ROLE_ARN" \
   --capabilities CAPABILITY_IAM \
   --parameter-overrides \
     ImageUri="$IMAGE_URI" \
+    ExistingEcrRepositoryArn="$ECR_REPOSITORY_ARN" \
+    WorkloadPermissionsBoundaryArn="$WORKLOAD_PERMISSIONS_BOUNDARY_ARN" \
+    WorkloadRolePath=/openclaw/crabhelm/ \
     CertificateArn="$CERTIFICATE_ARN" \
     ConsoleHostname="$CONSOLE_HOSTNAME" \
     RuntimeHostname="$RUNTIME_HOSTNAME" \
@@ -139,22 +146,9 @@ aws cloudformation deploy \
 
 ### Disposable FakeCo profile
 
-For a disposable FakeCo installation, keep the singleton coordinator and separate-installation boundaries intact. Use a unique stack name, hosts, application secret, ClawRouter tenant, and Crabbox target; do not reuse any Cloudflare or production fleet state. The relevant overrides are:
+Use the committed [locked profile, offline renderer, live-stack verifier, and retained-resource teardown planner](fakeco/README.md), not hand-written overrides. It enforces external precreated ECR, a digest-only image, `ProvisionService=true`, the target account/Region and fixed IAM paths, one-day backups, 20 GiB without RDS storage autoscaling, disabled RDS log export, seven-day ECS logs, single-AZ RDS, and one task. It rejects the production ClawRouter origin and cannot silently route a disposable stack there.
 
-```text
-ClawRouterMode=on
-ClawRouterBaseUrl=https://<separate-clawrouter-host>
-ClawRouterTenantId=fakeco
-ClawRouterAllowedProviders=openai
-ClawRouterModelProviderMap=clawrouter/openai/gpt-5.5=openai
-ClawRouterDefaultModel=clawrouter/openai/gpt-5.5
-DatabaseMultiAz=false
-DatabaseDeletionProtection=false
-LoadBalancerDeletionProtection=false
-PrometheusMode=on
-```
-
-`ClawRouterBaseUrl` has no usable routed default: the template placeholder is rejected when `ClawRouterMode=on`, so FakeCo cannot silently route to production. `DatabaseMultiAz=false` and disabled deletion protection are disposable-environment choices, not production defaults. `PrometheusMode=on` requires the secret described above. If ClawRouter uses Cloudflare Access, also set `ClawRouterAccessServiceToken=on`. This profile does not change `DesiredCount=1`; scaling the ECS service remains unsupported.
+The profile preserves one NAT gateway in public subnet A. The S3 gateway endpoint removes S3 data from that path, but all other task egress remains explicitly single-NAT and non-HA. The deploy and teardown workflows are manual, protected-main-only, share one concurrency group, use separate exact OIDC subjects, and read no secret values.
 
 Before live FakeCo validation, build and upload an appliance from the landed OpenClaw provider-overlay commit and pin its manifest, archive, and Node digests in this stack. The repository's current `2026.6.11` appliance pin predates that overlay fix and is direct-provider reference evidence only; it is not ClawRouter-compatible. Do not change or claim a release version in this integration PR.
 
@@ -237,7 +231,7 @@ aws sqs list-message-move-tasks \
 
 Watch the ECS consumer logs, source queue, and DLQ until the move finishes and the visible-message alarm clears. If messages return to the DLQ, stop redriving and continue incident diagnosis.
 
-For an image update, change `ImageUri` or `ImageTag` and update the stack. Rotations are credential-specific. For a server credential that is safe to refresh by restart—such as the Crabbox token, Slack credentials, or GitHub OAuth client secret—force a deployment:
+For an external image update, change the digest-pinned `ImageUri`; stack-owned ECR installations change `ImageTag`. Rotations are credential-specific. For a server credential that is safe to refresh by restart—such as the Crabbox token, Slack credentials, or GitHub OAuth client secret—force a deployment:
 
 ```bash
 aws ecs update-service \
@@ -255,3 +249,5 @@ After rotating `OPENAI_API_KEY`, also bump every affected direct-mode claw's cre
 Before deleting the stack, update it with `LoadBalancerDeletionProtection=false` and `DatabaseDeletionProtection=false`, then confirm workload removal through the normal Crabhelm lifecycle.
 
 Database replacement/deletion takes a final snapshot. After a successful stack create, credentials, buckets and their policies, queues, the log group, and a stack-created ECR repository are retained deliberately; review and remove them separately only after retention and audit obligations are satisfied. A failed initial stack create rolls these resources back instead of retaining them, so a corrected deployment can reuse their names.
+
+FakeCo uses the separate `fakeco-teardown` Environment and [standard-only teardown workflow](fakeco/README.md#manual-teardown). It verifies the live stack, uploads a names/ARNs/IDs-only retained-resource plan, never uses force deletion, and leaves external account-foundation resources untouched. Retained-data disposal and account closure remain outside this repository.

@@ -86,6 +86,8 @@ The AWS stack builds the same control-plane service for Node.js and provisions E
 
 The AWS backend is a separate installation boundary. Do not attach it to an existing Cloudflare fleet or reuse that fleet's database, buckets, queue, signing secrets, runtime credentials, or hostnames.
 
+Disposable FakeCo uses a [locked AWS profile](deploy/aws/fakeco/README.md) with offline render/verify/teardown-plan commands and manual protected-main deploy/teardown workflows. It accepts only non-secret names, ARNs, IDs, origins, and digests; account/OIDC/IAM/ECR/KMS/ACM/DNS/budget foundation remains external.
+
 ## Local development
 
 ```bash
