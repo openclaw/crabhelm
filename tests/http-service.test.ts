@@ -17,6 +17,10 @@ import {
 } from "../worker/http-service.js";
 import { bootstrapToken } from "../worker/bootstrap.js";
 import { signClaims } from "../worker/security.js";
+import {
+  slackIngressEnabled,
+  slackIntegrationConfigured,
+} from "../worker/slack-config.js";
 
 const CONSOLE = "https://crabhelm.example.test";
 const RUNTIME = "https://crabhelm-runtime.example.test";
@@ -165,6 +169,26 @@ test("Slack-off mode reports the integration as not configured", async () => {
   assert.equal(response.status, 200);
   const state = await response.json() as { integrations: { slack: boolean } };
   assert.equal(state.integrations.slack, false);
+});
+
+test("Slack mode preserves the missing default and fails closed on invalid values", () => {
+  const credentials = {
+    SLACK_SIGNING_SECRET: "stale",
+    SLACK_BOT_TOKEN: "stale",
+  };
+
+  assert.equal(slackIngressEnabled({}), true);
+  assert.equal(slackIngressEnabled({ CRABHELM_SLACK: "on" }), true);
+  assert.equal(slackIntegrationConfigured(credentials), true);
+
+  for (const mode of ["off", "false", "OFF", "disabled", "", " on "]) {
+    const env = {
+      ...credentials,
+      CRABHELM_SLACK: mode,
+    } as unknown as Env;
+    assert.equal(slackIngressEnabled(env), false, mode);
+    assert.equal(slackIntegrationConfigured(env), false, mode);
+  }
 });
 
 test("portable HTTP and control-plane services persist policy state across reconstruction", async () => {

@@ -3,9 +3,9 @@ type SlackEnvironment = Pick<
   "CRABHELM_SLACK" | "SLACK_BOT_TOKEN" | "SLACK_SIGNING_SECRET"
 >;
 
-/** Missing mode preserves the existing Slack-on contract outside locked profiles. */
+/** Missing mode preserves the existing Slack-on contract; invalid values fail closed. */
 export function slackIngressEnabled(env: Pick<SlackEnvironment, "CRABHELM_SLACK">): boolean {
-  return env.CRABHELM_SLACK !== "off";
+  return env.CRABHELM_SLACK === undefined || env.CRABHELM_SLACK === "on";
 }
 
 export function slackIntegrationConfigured(env: SlackEnvironment): boolean {
