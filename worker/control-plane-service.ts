@@ -1,4 +1,10 @@
 import type { CrabhelmRuntime, DeploymentRuntimeTarget } from "../src/config.js";
+import {
+  clawRouterEnabled,
+  ClawRouterControl,
+  resolveClawRouterConfig,
+} from "../src/clawrouter.js";
+import { clawCredentialsGeneration } from "../src/domain.js";
 import { CrabboxChildCoreProvider, RoutedChildCoreProvider } from "../src/providers.js";
 import { CrabhelmReconciler } from "../src/reconciler.js";
 import { CrabhelmRegistry } from "../src/registry.js";
@@ -29,7 +35,6 @@ import {
 } from "./bootstrap.js";
 import type { StateStore, StateTransaction } from "../src/state.js";
 import { GovernanceController } from "./governance-controller.js";
-import { modelProxyAdmissionReady } from "./model-proxy.js";
 import { signClaims } from "./security.js";
 
 const maxBodyBytes = 64 * 1024;
@@ -60,11 +65,27 @@ export class CrabhelmControlPlaneService {
   readonly #releaseIdentity: { archiveId: string; releaseId: string };
   readonly #env: Env;
   readonly #platform: ControlPlanePlatform;
+  readonly #clawRouter?: ClawRouterControl;
 
   constructor(state: ControlPlaneStateDatabase, env: Env, platform: ControlPlanePlatform) {
     this.#env = env;
     this.#platform = platform;
     const target = deploymentTarget(env);
+    let clawRouter: ClawRouterControl | undefined;
+    let routedInference = false;
+    let inferenceModeValid = false;
+    try {
+      routedInference = clawRouterEnabled(env);
+      const config = resolveClawRouterConfig(env);
+      if (config) clawRouter = new ClawRouterControl(config);
+      inferenceModeValid = true;
+    } catch {
+      // Admission remains closed below; never project secret-bearing config errors.
+    }
+    this.#clawRouter = clawRouter;
+    const inferenceReady = inferenceModeValid && (
+      routedInference ? Boolean(clawRouter) : Boolean(env.OPENAI_API_KEY?.trim())
+    );
     const admissionOpen = Boolean(
       env.CRABBOX_URL?.trim() &&
       env.CRABBOX_TOKEN?.trim() &&
@@ -73,12 +94,12 @@ export class CrabhelmControlPlaneService {
       validSigningSecret(env.INVOCATION_SIGNING_SECRET) &&
       validSigningSecret(env.RUNTIME_SIGNING_SECRET) &&
       validVaultKey(env.VAULT_MASTER_KEY) &&
-      modelProxyAdmissionReady(env),
+      inferenceReady,
     );
     const runtimeTarget: DeploymentRuntimeTarget = {
       ...target,
       admissionOpen,
-      ...(admissionOpen ? {} : { message: "Crabbox, signing, vault, or enabled model-proxy secrets are not configured" }),
+      ...(admissionOpen ? {} : { message: "Crabbox, signing, vault, or inference secrets are not configured" }),
     };
     const provider = new CrabboxChildCoreProvider({
       baseUrl: env.CRABBOX_URL,
@@ -117,6 +138,7 @@ export class CrabhelmControlPlaneService {
         },
         policies: state.store<PolicyTemplate>("policies-v1", 1_000),
         transaction: state.transaction,
+        ...(clawRouter ? { clawRouter: clawRouter.fleetPolicy() } : {}),
       },
     );
     this.#governance = new GovernanceRegistry({
@@ -140,12 +162,29 @@ export class CrabhelmControlPlaneService {
           provider,
         },
       }),
+      clawRouter ? { inference: clawRouter } : {},
     );
     this.#runtime = {
       mode: admissionOpen ? "crabbox" : "unconfigured",
       defaultTarget: target.id,
       targets: [runtimeTarget],
       githubImport: false,
+      inference: clawRouter
+        ? {
+            kind: "clawrouter",
+            defaultModel: clawRouter.fleetPolicy().defaultModel,
+            baseUrl: clawRouter.fleetPolicy().baseUrl,
+            tenantId: clawRouter.fleetPolicy().tenantId,
+            allowedProviders: clawRouter.fleetPolicy().allowedProviders,
+            metadataOnly: true,
+          }
+        : routedInference
+          ? {
+              kind: "clawrouter",
+              defaultModel: "clawrouter/unconfigured/unconfigured",
+              metadataOnly: true,
+            }
+          : { kind: "direct", defaultModel: "openai/gpt-5.5", metadataOnly: true },
     };
   }
 
@@ -183,6 +222,65 @@ export class CrabhelmControlPlaneService {
 
   async managedSpec(clawId: string): Promise<Response> {
     return this.#governanceController.managedSpec(clawId);
+  }
+
+  async bootstrapInference(clawId: string): Promise<{
+    model: string;
+    router: ClawRecord["desired"]["inference"]["router"];
+    credentialsGeneration: number;
+  }> {
+    const claw = await this.#registry.get(clawId);
+    return {
+      model: claw.desired.inference.model,
+      router: claw.desired.inference.router,
+      credentialsGeneration: clawCredentialsGeneration(claw),
+    };
+  }
+
+  async inferenceCredentials(clawId: string, credentialsGeneration: number): Promise<Array<[string, string]>> {
+    const claw = await this.#registry.get(clawId);
+    if (this.#clawRouter) return this.#clawRouter.credentials(claw, credentialsGeneration);
+    if (claw.desired.inference.router.kind !== "direct" || credentialsGeneration !== clawCredentialsGeneration(claw)) {
+      throw new Error("inference credential request does not match desired state");
+    }
+    const key = this.#env.OPENAI_API_KEY?.trim();
+    if (!key) throw new Error("direct inference credential is unavailable");
+    return [["OPENAI_API_KEY", key]];
+  }
+
+  async prometheusMetrics(): Promise<Response> {
+    const claws = (await this.#registry.list()).filter((claw) => claw.observed.phase !== "deleted");
+    const phases = ["requested", "provisioning", "enrolling", "ready", "disabled", "deleting", "attention"];
+    const router = claws.map((claw) => claw.observed.inference).filter((value) => value?.kind === "clawrouter");
+    const usage = router.flatMap((value) => value?.usage ? [value.usage] : []);
+    const lines = [
+      "# HELP crabhelm_claws Current claws by lifecycle phase.",
+      "# TYPE crabhelm_claws gauge",
+      ...phases.map((phase) => `crabhelm_claws{phase="${phase}"} ${claws.filter((claw) => claw.observed.phase === phase).length}`),
+      "# HELP crabhelm_gateways_ready Claws with healthy gateway readiness.",
+      "# TYPE crabhelm_gateways_ready gauge",
+      `crabhelm_gateways_ready ${claws.filter((claw) => claw.observed.gatewayVersion && claw.observed.health === "healthy").length}`,
+      "# HELP crabhelm_clawrouter_routes_verified Claws with live inference proof through desired ClawRouter configuration.",
+      "# TYPE crabhelm_clawrouter_routes_verified gauge",
+      `crabhelm_clawrouter_routes_verified ${router.filter((value) => value?.routeVerified).length}`,
+      "# HELP crabhelm_clawrouter_usage_requests Bounded aggregate request count reported by ClawRouter.",
+      "# TYPE crabhelm_clawrouter_usage_requests gauge",
+      `crabhelm_clawrouter_usage_requests ${usage.reduce((sum, value) => sum + value.requestCount, 0)}`,
+      "# HELP crabhelm_clawrouter_usage_tokens Bounded aggregate token count reported by ClawRouter.",
+      "# TYPE crabhelm_clawrouter_usage_tokens gauge",
+      `crabhelm_clawrouter_usage_tokens ${usage.reduce((sum, value) => sum + value.totalTokens, 0)}`,
+      "# HELP crabhelm_clawrouter_usage_cost_micros Bounded aggregate model cost in microdollars reported by ClawRouter.",
+      "# TYPE crabhelm_clawrouter_usage_cost_micros gauge",
+      `crabhelm_clawrouter_usage_cost_micros ${usage.reduce((sum, value) => sum + value.actualCostMicros, 0)}`,
+      "",
+    ];
+    return new Response(lines.join("\n"), {
+      headers: {
+        "content-type": "text/plain; version=0.0.4; charset=utf-8",
+        "cache-control": "no-store, max-age=0",
+        "x-content-type-options": "nosniff",
+      },
+    });
   }
 
   async resolveAccessIdentity(identity: { subject: string; email: string; roles: Array<"administrator" | "member">; groups: string[] }): Promise<{ principalId: string; roles: Array<"administrator" | "member"> }> {

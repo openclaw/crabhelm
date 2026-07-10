@@ -99,6 +99,7 @@ export default definePluginEntry({
     const runtime: CrabhelmRuntime = {
       ...deployment.runtime,
       githubImport: Boolean(githubSource),
+      inference: { kind: "direct", defaultModel: "openai/gpt-5.5", metadataOnly: true },
     };
     const assertCanCreate = (target = runtime.defaultTarget) => {
       const configured = runtime.targets.find((item) => item.id === target);
@@ -342,7 +343,7 @@ export default definePluginEntry({
 
 function resolveProvider(config: CrabhelmConfig["deployment"], nodeControl: OpenClawNodeControl): {
   provider: ChildCoreProvider;
-  runtime: Omit<CrabhelmRuntime, "githubImport">;
+  runtime: Omit<CrabhelmRuntime, "githubImport" | "inference">;
 } {
   const routed: Record<string, { profile: string; region?: string; provider: ChildCoreProvider }> = {};
   const targets = config.targets.map((target) => {

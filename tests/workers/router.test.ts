@@ -74,13 +74,14 @@ describe("worker router in workerd", () => {
     }
   });
 
-  it("routes model traffic through the Worker only on the runtime host", async () => {
+  it("does not expose the retired Crabhelm-owned model proxy", async () => {
     const response = await SELF.fetch(`${RUNTIME}/model/v1/models`);
-    expect(response.status).toBe(503);
-    expect(response.headers.get("content-type")).toContain("application/json");
-    expect(await response.json()).toMatchObject({
-      error: { type: "crabhelm_model_proxy" },
-    });
+    expect(response.status).toBe(404);
+  });
+
+  it("keeps Prometheus disabled unless explicitly configured", async () => {
+    const response = await SELF.fetch(`${RUNTIME}/metrics`);
+    expect(response.status).toBe(404);
   });
 
   it("requires a bootstrap bearer for appliance delivery on the runtime host", async () => {

@@ -163,9 +163,12 @@ for (const rawLine of body.split(/\r?\n/)) {
   const match = line.match(/^(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=/);
   if (match) keys.add(match[1]);
 }
-for (const required of ["OPENAI_API_KEY", "CRABHELM_CONTROL_URL", "CRABHELM_RUNTIME_TOKEN", "CRABHELM_CHILD_ID"]) {
+for (const required of ["CRABHELM_CONTROL_URL", "CRABHELM_RUNTIME_TOKEN", "CRABHELM_CHILD_ID"]) {
   if (!keys.has(required)) process.exit(2);
 }
+const routed = keys.has("CLAWROUTER_API_KEY");
+if (routed === keys.has("OPENAI_API_KEY")) process.exit(2);
+if (routed !== keys.has("CRABHELM_ROUTER_BASE_URL")) process.exit(2);
 if (keys.has("SLACK_BOT_TOKEN") || keys.has("SLACK_APP_TOKEN")) process.exit(2);
 NODE
 

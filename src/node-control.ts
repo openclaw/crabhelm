@@ -388,6 +388,9 @@ export class OpenClawNodeControl {
           desired: {
             model: claw.desired.inference.model,
             fallbackModels: claw.desired.inference.fallbackModels,
+            ...(claw.desired.inference.router.kind === "clawrouter"
+              ? { routerBaseUrl: claw.desired.inference.router.baseUrl }
+              : {}),
             slackEnabled: claw.desired.channels.slack.enabled,
             dmPolicy: claw.desired.access.dmPolicy,
             groupPolicy: claw.desired.access.groupPolicy,
@@ -737,6 +740,7 @@ type ChildStatusPayload = {
 type ManagedDesired = {
   model: string;
   fallbackModels: string[];
+  routerBaseUrl?: string;
   slackEnabled: boolean;
   dmPolicy: "pairing" | "allowlist" | "disabled";
   groupPolicy: "allowlist" | "disabled";
@@ -792,7 +796,7 @@ async function probeLocalGateway(config: Record<string, unknown>): Promise<boole
 function parseManagedDesired(value: unknown): ManagedDesired {
   const input = asRecord(value);
   const model = requireString(input.model, "desired.model", 220);
-  if (!/^[a-z0-9][a-z0-9_.-]*\/[a-zA-Z0-9][a-zA-Z0-9_.:\-]{0,199}$/.test(model)) {
+  if (!/^[a-z0-9][a-z0-9_.-]*(?:\/[a-zA-Z0-9][a-zA-Z0-9_.:\-]{0,199})+$/.test(model)) {
     throw new Error("desired.model must use provider/model form");
   }
   const fallbackModels = Array.isArray(input.fallbackModels)
@@ -811,9 +815,20 @@ function parseManagedDesired(value: unknown): ManagedDesired {
   if (!(logLevel === "error" || logLevel === "warn" || logLevel === "info" || logLevel === "debug")) {
     throw new Error("desired.logLevel is invalid");
   }
+  const routerBaseUrl = typeof input.routerBaseUrl === "string" ? input.routerBaseUrl.trim() : undefined;
+  if (routerBaseUrl) {
+    const url = new URL(routerBaseUrl);
+    if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
+      throw new Error("desired.routerBaseUrl must be an exact HTTPS origin");
+    }
+  }
+  if (model.startsWith("clawrouter/") !== Boolean(routerBaseUrl)) {
+    throw new Error("desired.model and desired.routerBaseUrl must select ClawRouter together");
+  }
   return {
     model,
     fallbackModels,
+    ...(routerBaseUrl ? { routerBaseUrl } : {}),
     slackEnabled: input.slackEnabled,
     dmPolicy,
     groupPolicy,
@@ -891,6 +906,9 @@ function readManagedState(config: Record<string, unknown>): ManagedDesired {
   const diagnostics = asRecord(config.diagnostics);
   const diagnosticsOtel = asRecord(diagnostics.otel);
   const plugins = asRecord(config.plugins);
+  const providers = asRecord(asRecord(config.models).providers);
+  const clawRouterEntry = asRecord(asRecord(plugins.entries).clawrouter);
+  const clawRouterAllowed = Array.isArray(plugins.allow) && plugins.allow.includes("clawrouter");
   const diagnosticsEntry = asRecord(asRecord(plugins.entries)["diagnostics-otel"]);
   const diagnosticsAllowed = Array.isArray(plugins.allow) && plugins.allow.includes("diagnostics-otel");
   return {
@@ -898,6 +916,9 @@ function readManagedState(config: Record<string, unknown>): ManagedDesired {
     fallbackModels: Array.isArray(fallbacks)
       ? fallbacks.filter((item): item is string => typeof item === "string")
       : [],
+    ...(clawRouterAllowed && clawRouterEntry.enabled === true && typeof asRecord(providers.clawrouter).baseUrl === "string"
+      ? { routerBaseUrl: String(asRecord(providers.clawrouter).baseUrl) }
+      : {}),
     slackEnabled: hasSlack && slack.enabled !== false,
     dmPolicy:
       slack.dmPolicy === "allowlist" || slack.dmPolicy === "disabled"
@@ -939,7 +960,20 @@ function applyManagedDesired(config: Record<string, unknown>, desired: ManagedDe
   slack.groupPolicy = desired.groupPolicy;
   ensureRecord(config, "logging").level = desired.logLevel;
   const plugins = ensureRecord(config, "plugins");
-  plugins.allow = ["crabhelm", "slack", ...(desired.otel.enabled ? ["diagnostics-otel"] : [])];
+  plugins.allow = [
+    "crabhelm",
+    "slack",
+    ...(desired.routerBaseUrl ? ["clawrouter"] : []),
+    ...(desired.otel.enabled ? ["diagnostics-otel"] : []),
+  ];
+  const clawRouterEntry = ensureRecord(ensureRecord(plugins, "entries"), "clawrouter");
+  clawRouterEntry.enabled = Boolean(desired.routerBaseUrl);
+  const modelProviders = ensureRecord(ensureRecord(config, "models"), "providers");
+  if (desired.routerBaseUrl) {
+    ensureRecord(modelProviders, "clawrouter").baseUrl = desired.routerBaseUrl;
+  } else {
+    delete modelProviders.clawrouter;
+  }
   const diagnosticsEntry = ensureRecord(ensureRecord(plugins, "entries"), "diagnostics-otel");
   diagnosticsEntry.enabled = desired.otel.enabled;
   const diagnostics = ensureRecord(config, "diagnostics");

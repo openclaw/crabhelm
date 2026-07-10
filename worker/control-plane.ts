@@ -41,6 +41,18 @@ export class CrabhelmControlPlane extends DurableObject<Env> {
     return this.#service.managedSpec(clawId);
   }
 
+  bootstrapInference(clawId: string) {
+    return this.#service.bootstrapInference(clawId);
+  }
+
+  inferenceCredentials(clawId: string, credentialsGeneration: number) {
+    return this.#service.inferenceCredentials(clawId, credentialsGeneration);
+  }
+
+  prometheusMetrics() {
+    return this.#service.prometheusMetrics();
+  }
+
   resolveAccessIdentity(identity: AccessIdentity): Promise<{
     principalId: string;
     roles: Array<"administrator" | "member">;

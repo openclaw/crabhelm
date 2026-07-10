@@ -5,7 +5,7 @@ interface Env {
   INVOCATION_SIGNING_SECRET: string;
   RUNTIME_SIGNING_SECRET: string;
   VAULT_MASTER_KEY: string;
-  OPENAI_API_KEY: string;
+  OPENAI_API_KEY?: string;
   SLACK_BOT_TOKEN?: string;
   SLACK_APP_TOKEN?: string;
   SLACK_SIGNING_SECRET: string;
@@ -17,9 +17,17 @@ interface Env {
   CF_ACCESS_ADMIN_GROUPS?: string;
   CRABHELM_PROBE_EMAIL: string;
   RUNTIME_URL: string;
-  // Edge model proxy secret (draft). Only required when the CRABHELM_MODEL_PROXY
-  // Worker var is "on"; delivered via `wrangler secret put`.
-  MODEL_SIGNING_SECRET?: string;
+  CRABHELM_CLAWROUTER?: "on" | "off";
+  CLAWROUTER_BASE_URL?: string;
+  CLAWROUTER_TENANT_ID?: string;
+  CLAWROUTER_ALLOWED_PROVIDERS?: string;
+  CLAWROUTER_DEFAULT_MODEL?: string;
+  CLAWROUTER_ADMIN_TOKEN?: string;
+  CLAWROUTER_CREDENTIAL_SECRET?: string;
+  CLAWROUTER_ACCESS_CLIENT_ID?: string;
+  CLAWROUTER_ACCESS_CLIENT_SECRET?: string;
+  CRABHELM_PROMETHEUS?: "on" | "off";
+  METRICS_BEARER_TOKEN?: string;
 }
 
 declare namespace Cloudflare {
@@ -30,7 +38,7 @@ declare namespace Cloudflare {
     INVOCATION_SIGNING_SECRET: string;
     RUNTIME_SIGNING_SECRET: string;
     VAULT_MASTER_KEY: string;
-    OPENAI_API_KEY: string;
+    OPENAI_API_KEY?: string;
     SLACK_BOT_TOKEN?: string;
     SLACK_APP_TOKEN?: string;
     CF_ACCESS_TEAM_DOMAIN: string;
@@ -38,5 +46,11 @@ declare namespace Cloudflare {
     CF_ACCESS_ADMIN_EMAILS: string;
     CF_ACCESS_ADMIN_GROUPS?: string;
     CRABHELM_PROBE_EMAIL: string;
+    CRABHELM_CLAWROUTER?: "on" | "off";
+    CLAWROUTER_BASE_URL?: string;
+    CLAWROUTER_TENANT_ID?: string;
+    CLAWROUTER_ALLOWED_PROVIDERS?: string;
+    CLAWROUTER_DEFAULT_MODEL?: string;
+    CRABHELM_PROMETHEUS?: "on" | "off";
   }
 }

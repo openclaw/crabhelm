@@ -22,6 +22,14 @@ export type CrabhelmRuntime = {
   defaultTarget: string;
   targets: DeploymentRuntimeTarget[];
   githubImport: boolean;
+  inference: {
+    kind: "direct" | "clawrouter";
+    defaultModel: string;
+    metadataOnly: true;
+    baseUrl?: string;
+    tenantId?: string;
+    allowedProviders?: string[];
+  };
 };
 
 export type CrabhelmConfig = {

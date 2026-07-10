@@ -67,8 +67,8 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
       CRABHELM_RUNTIME_BRIDGE: runtimeBridge,
       CRABHELM_RUNTIME_BRIDGE_SHA256: runtimeBridgeDigest,
       CRABHELM_RELEASE_ID: `${"b".repeat(64)}.${"c".repeat(64)}.${"d".repeat(64)}`,
-      CRABHELM_MODEL: "openai/gpt-5.4-mini",
-      CRABHELM_MODEL_BASE_URL: "https://crabhelm-runtime.example.test/model/v1",
+      CRABHELM_MODEL: "clawrouter/openai/gpt-5.5",
+      CRABHELM_ROUTER_BASE_URL: "https://clawrouter.example.test",
       CRABHELM_SLACK_ENABLED: "true",
       OPENCLAW_GATEWAY_TOKEN: "blocked",
       OPENCLAW_GATEWAY_PASSWORD: "blocked",
@@ -80,6 +80,8 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
   assert.match(calls, /config set plugins\.allow/);
   assert.match(calls, /plugins\.allow .*crabhelm.*slack/);
   assert.match(calls, /plugins\.allow .*diagnostics-otel/);
+  assert.match(calls, /plugins\.allow .*clawrouter/);
+  assert.match(calls, /plugins\.entries\.clawrouter\.enabled true/);
   assert.match(calls, /plugins\.entries\.diagnostics-otel\.enabled true/);
   assert.match(calls, /diagnostics\.otel .*https:\/\/otel\.example\.test\/collect/);
   assert.match(calls, /tracesEndpoint.*https:\/\/otel\.example\.test\/collect/);
@@ -87,8 +89,9 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
   assert.match(calls, /captureContent.*enabled.*false/);
   assert.match(calls, /config set logging\.level info/);
   assert.match(calls, /channels\.slack\.mode socket/);
-  assert.match(calls, /agents\.defaults\.model\.primary openai\/gpt-5\.4-mini/);
-  assert.match(calls, /config set models\.providers\.openai\.baseUrl https:\/\/crabhelm-runtime\.example\.test\/model\/v1/);
+  assert.match(calls, /agents\.defaults\.model\.primary clawrouter\/openai\/gpt-5\.5/);
+  assert.match(calls, /config set models\.providers\.clawrouter\.baseUrl https:\/\/clawrouter\.example\.test/);
+  assert.match(calls, /config unset models\.providers\.openai\.baseUrl/);
   assert.match(calls, /agents\.defaults\.workspace .*\/state\/workspace/);
   assert.match(calls, /channels\.slack\.enabled true/);
   assert.match(calls, /channels\.slack\.appToken .*SLACK_APP_TOKEN/);

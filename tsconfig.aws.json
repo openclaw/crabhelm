@@ -18,7 +18,6 @@
     "worker/control-plane-service.ts",
     "worker/governance-controller.ts",
     "worker/http-service.ts",
-    "worker/model-proxy.ts",
     "worker/security.ts",
     "worker/slack.ts",
     "worker/slack-delivery.ts",

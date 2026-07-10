@@ -22,6 +22,7 @@ const testReleaseMarker = `${"a".repeat(64)}.${"c".repeat(64)}.${testNodeId}`;
 const testSigningKey = ["crabhelm", "bootstrap", "test", "signing", "material"].join("-");
 const differentSigningKey = ["different", "bootstrap", "test", "signing", "material"].join("-");
 const rotatedDirectCredential = ["OPENAI_API_KEY", "rotated-epoch-secret"].join("=");
+const rotatedRouterCredential = ["CLAWROUTER_API_KEY", "rotated-key"].join("=");
 
 test("Cloudflare workspace bootstrap binds child identity, model, and channel state", async () => {
   const claw = createClawRecord({
@@ -146,6 +147,26 @@ test("live inference probe is valid shell", async () => {
   assert.match(bootstrapStatusCommand(), /\[b\]ootstrap-child\.sh/u);
 });
 
+test("live inference proof checks the exact ClawRouter base before the model turn", async () => {
+  const command = inferenceProbeCommand(
+    "clawrouter/openai/gpt-5.5",
+    testReleaseMarker,
+    testNodeId,
+    "CRABHELM_ROUTER_INFERENCE",
+    2,
+    "a".repeat(64),
+    true,
+    "https://clawrouter.example.test",
+  );
+  assert.match(command, /config get models\.providers\.clawrouter\.baseUrl/u);
+  assert.match(command, /clawrouter\.example\.test/u);
+  assert.match(command, /clawrouter\/openai\/gpt-5\.5/u);
+  assert.ok(
+    command.indexOf("config get models.providers.clawrouter.baseUrl") < command.indexOf("--agent main"),
+  );
+  await run("/bin/bash", ["-n", "-c", command]);
+});
+
 test("terminal evidence is bound to a fresh inspection label", async () => {
   const label = "CRABHELM_deadbeef";
   const status = bootstrapStatusCommand("", label);
@@ -231,7 +252,7 @@ while (($#)); do
 done
 case "$url" in
   */bundle.tgz) cp ${JSON.stringify(path.join(fixtures, "bundle.tgz"))} "$dest" ;;
-  */credentials.env) printf '%s\\n' ${JSON.stringify(rotatedDirectCredential)} >"$dest" ;;
+  */credentials.env*) printf '%s\\n' ${JSON.stringify(rotatedDirectCredential)} >"$dest" ;;
   */managed-spec.json*) printf '{}\\n' >"$dest" ;;
   *) exit 22 ;;
 esac
@@ -392,7 +413,7 @@ test("generated installer re-fetches credentials and records the epoch marker", 
     path.join(fixtures, "bundle", "guest-install.sh"),
     `#!/usr/bin/env bash
 set -euo pipefail
-printf 'gen=%s release=%s base=%s model=%s credentials=%s\\n' "$CRABHELM_CREDENTIALS_GENERATION" "$CRABHELM_RELEASE_ID" "$CRABHELM_MODEL_BASE_URL" "$CRABHELM_MODEL" "$(head -n 1 "$CRABHELM_CREDENTIAL_FILE")" >>"$CRABHELM_TEST_LOG"
+printf 'gen=%s release=%s base=%s model=%s credentials=%s\\n' "$CRABHELM_CREDENTIALS_GENERATION" "$CRABHELM_RELEASE_ID" "$CRABHELM_ROUTER_BASE_URL" "$CRABHELM_MODEL" "$(head -n 1 "$CRABHELM_CREDENTIAL_FILE")" >>"$CRABHELM_TEST_LOG"
 `,
     { mode: 0o755 },
   );
@@ -416,7 +437,7 @@ while (($#)); do
 done
 case "$url" in
   */bundle.tgz) cp ${JSON.stringify(path.join(fixtures, "bundle.tgz"))} "$dest" ;;
-  */credentials.env) printf '%s\\n' ${JSON.stringify(rotatedDirectCredential)} >"$dest" ;;
+  */credentials.env*) printf '%s\\n' ${JSON.stringify(rotatedRouterCredential)} >"$dest" ;;
   */managed-spec.json*) printf '{}\\n' >"$dest" ;;
   *) exit 22 ;;
 esac
@@ -440,11 +461,11 @@ esac
     releaseId: "e".repeat(64),
     nodeSha256: "f".repeat(64),
     childId: "child-id",
-    model: "openai/gpt-5.5",
+    model: "clawrouter/openai/gpt-5.5",
     slack: "false",
     credentialsGeneration: 4,
     policyHash: "a".repeat(64),
-    modelBaseUrl: "https://crabhelm-runtime.example.test/model/v1",
+    routerBaseUrl: "https://clawrouter.example.test",
     egressLockdown: "off",
     egressPersistenceRoot: root,
   });
@@ -465,7 +486,7 @@ esac
   });
   assert.equal(
     await readFile(guestLog, "utf8"),
-    `gen=4 release=${"e".repeat(64)}.${archiveId}.${"f".repeat(64)} base=https://crabhelm-runtime.example.test/model/v1 model=openai/gpt-5.5 credentials=${rotatedDirectCredential}\n`,
+    `gen=4 release=${"e".repeat(64)}.${archiveId}.${"f".repeat(64)} base=https://clawrouter.example.test model=clawrouter/openai/gpt-5.5 credentials=${rotatedRouterCredential}\n`,
   );
   const marker = path.join(home, ".openclaw", "crabhelm-credentials-generation");
   assert.equal(await readFile(marker, "utf8"), "c4\n");

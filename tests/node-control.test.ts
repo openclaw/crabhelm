@@ -190,6 +190,65 @@ test("child apply command performs managed-field compare-and-swap", async () => 
   assert.equal((config.diagnostics as { enabled: boolean }).enabled, false);
 });
 
+test("child apply owns the ClawRouter model and origin as one managed setting", async () => {
+  const config: Record<string, unknown> = {
+    agents: { defaults: { model: "openai/gpt-5.5" } },
+    plugins: { allow: ["crabhelm", "slack"] },
+  };
+  const handlers = new Map<string, (params?: string | null) => Promise<string>>();
+  registerChildCommands(
+    {
+      runtime: registrationRuntime(config),
+      registerNodeHostCommand(command) {
+        handlers.set(command.command, command.handle);
+      },
+      registerNodeInvokePolicy() {},
+    },
+    "child-1",
+  );
+  const status = JSON.parse(
+    await handlers.get(childStatusCommand)?.(JSON.stringify({ clawId: "child-1" })) ?? "{}",
+  );
+  const apply = handlers.get(childApplyCommand);
+  assert.ok(apply);
+  const desired = {
+    model: "clawrouter/openai/gpt-5.5",
+    routerBaseUrl: "https://clawrouter.example.test",
+    fallbackModels: [],
+    slackEnabled: false,
+    dmPolicy: "pairing",
+    groupPolicy: "allowlist",
+    logLevel: "info",
+  };
+  const applied = JSON.parse(await apply(JSON.stringify({
+    clawId: "child-1",
+    generation: 2,
+    desiredHash: "routed-hash",
+    expectedManagedHash: status.managedHash,
+    desired,
+  })));
+  assert.equal(applied.ok, true);
+  assert.deepEqual((config.plugins as { allow: string[] }).allow, ["crabhelm", "slack", "clawrouter"]);
+  assert.equal(
+    ((config.plugins as { entries: { clawrouter: { enabled: boolean } } }).entries.clawrouter.enabled),
+    true,
+  );
+  assert.equal(
+    (((config.models as { providers: { clawrouter: { baseUrl: string } } }).providers.clawrouter.baseUrl)),
+    "https://clawrouter.example.test",
+  );
+  await assert.rejects(
+    apply(JSON.stringify({
+      clawId: "child-1",
+      generation: 3,
+      desiredHash: "missing-origin",
+      expectedManagedHash: "unused",
+      desired: { ...desired, routerBaseUrl: undefined },
+    })),
+    /must select ClawRouter together/u,
+  );
+});
+
 test("child ingress command disables and restores existing channel states", async () => {
   const config: Record<string, unknown> = {
     channels: {

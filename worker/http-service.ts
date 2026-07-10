@@ -2,10 +2,9 @@ import { bootstrapInstallScript, bootstrapTokenClaims, normalizeEgressLockdownMo
 import { signClaims, verifyClaims } from "./security.js";
 import type { GovernanceAuditEvent, RuntimeClaims, RuntimeTicketClaims, SessionClaims } from "../src/governance-types.js";
 import { verifyAccessIdentity, type AccessIdentity } from "./access.js";
-import { handleModelProxy, modelCredentialEntries, modelProxyEnabled } from "./model-proxy.js";
 import { handleSlackRequest } from "./slack.js";
 import { standaloneBootstrapHashFor } from "../src/domain.js";
-import type { ObservabilityPolicy } from "../src/types.js";
+import type { InferenceRouter, ObservabilityPolicy } from "../src/types.js";
 
 const childIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const unsafeMutationMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
@@ -38,6 +37,22 @@ export async function handleCrabhelmRequest(
     if (url.pathname === "/healthz") {
       return Response.json({ ok: true, service: "crabhelm", runtime: options.runtimeLabel });
     }
+    if (url.pathname === "/metrics") {
+      if (!isRuntimeHost(url, env) || env.CRABHELM_PROMETHEUS !== "on") {
+        return new Response("not found", { status: 404 });
+      }
+      if (request.method !== "GET") return new Response("method not allowed", { status: 405 });
+      if (!await metricsAuthorized(request, env.METRICS_BEARER_TOKEN)) {
+        return new Response("metrics authentication required", {
+          status: 401,
+          headers: { "www-authenticate": "Bearer", "cache-control": "no-store" },
+        });
+      }
+      return env.CONTROL_PLANE.getByName("openclaw-org").prometheusMetrics();
+    }
+    if (url.pathname === "/model" || url.pathname.startsWith("/model/")) {
+      return new Response("not found", { status: 404 });
+    }
     if (url.pathname === "/slack/events" || url.pathname === "/slack/interactions") {
       if (!isRuntimeHost(url, env)) return new Response("not found", { status: 404 });
       return handleSlackRequest(request, env, ctx);
@@ -49,10 +64,6 @@ export async function handleCrabhelmRequest(
     if (url.pathname === "/api/runtime/ticket") {
       if (!isRuntimeHost(url, env)) return new Response("not found", { status: 404 });
       return handleRuntimeTicket(request, env);
-    }
-    if (url.pathname.startsWith("/model/")) {
-      if (!isRuntimeHost(url, env)) return new Response("not found", { status: 404 });
-      return handleModelProxy(request, env, url);
     }
     if (url.pathname.startsWith("/api/runtime/")) {
       if (!isRuntimeHost(url, env)) return new Response("not found", { status: 404 });
@@ -117,15 +128,27 @@ async function handleBootstrap(request: Request, env: Env, url: URL): Promise<Re
     return new Response("unauthorized", { status: 401, headers: { "cache-control": "no-store" } });
   }
   const headers = { "cache-control": "no-store, max-age=0", "x-content-type-options": "nosniff" };
-  const model = url.searchParams.get("model") ?? "openai/gpt-5.5";
+  let desired;
+  try {
+    desired = await env.CONTROL_PLANE.getByName("openclaw-org").bootstrapInference(childId);
+  } catch {
+    return new Response("bootstrap desired state unavailable", { status: 409, headers });
+  }
+  const model = url.searchParams.get("model") ?? desired.model;
   const slack = url.searchParams.get("slack") ?? "false";
   const policyHash = url.searchParams.get("policyHash") ?? "";
-  const credentials = url.searchParams.get("credentials") ?? "1";
-  if (!/^[a-z0-9][a-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(model)) {
+  const credentials = url.searchParams.get("credentials") ?? String(desired.credentialsGeneration);
+  if (!/^[a-z0-9][a-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._:-]*)+$/u.test(model)) {
     return new Response("invalid model", { status: 400, headers });
   }
   if (slack !== "true" && slack !== "false") {
     return new Response("invalid Slack desired state", { status: 400, headers });
+  }
+  if (model !== desired.model) {
+    return new Response("managed inference model changed", { status: 409, headers });
+  }
+  if (!/^[1-9][0-9]{0,8}$/u.test(credentials) || Number(credentials) !== desired.credentialsGeneration) {
+    return new Response("managed credentials generation changed", { status: 409, headers });
   }
   if (file === "bundle.tgz") {
     const object = await env.APPLIANCES.get(`releases/${release.archiveId}.tgz`);
@@ -141,21 +164,30 @@ async function handleBootstrap(request: Request, env: Env, url: URL): Promise<Re
     const response = await env.CONTROL_PLANE.getByName("openclaw-org").managedSpec(childId);
     if (!response.ok) return response;
     const spec = await response.json() as { observability?: ObservabilityPolicy };
-    if (!spec.observability || standaloneBootstrapHashFor(model, spec.observability) !== policyHash) {
+    if (
+      !spec.observability ||
+      standaloneBootstrapHashFor(model, spec.observability, desired.router) !== policyHash
+    ) {
       return new Response("managed policy changed", { status: 409, headers });
     }
     return Response.json(spec, { headers });
   }
   if (file === "credentials.env") {
+    let modelEntries: Array<[string, string]>;
+    try {
+      const entries = await env.CONTROL_PLANE.getByName("openclaw-org").inferenceCredentials(
+        childId,
+        Number(credentials),
+      );
+      modelEntries = validateInferenceCredentialEntries(entries, desired.router);
+    } catch {
+      return new Response("inference credential unavailable", { status: 503, headers });
+    }
     const runtimeToken = await signClaims<RuntimeClaims>(env.RUNTIME_SIGNING_SECRET, {
       typ: "runtime", aud: "crabhelm-runtime", clawId: childId, runtimeId: `crabbox:${childId}`,
     }, 10 * 60);
     const claims = await verifyClaims<RuntimeClaims>(env.RUNTIME_SIGNING_SECRET, runtimeToken, { typ: "runtime", aud: "crabhelm-runtime" });
     await env.CLAW_COORDINATOR.getByName(childId).registerRuntimeRefresh({ jti: claims.jti, expiresAt: claims.exp * 1000 });
-    // Model access: with the edge proxy enabled the child receives a per-claw,
-    // audience-bound model token plus a base URL pointing at the control plane, and
-    // never the raw provider key. With it off (default) delivery is unchanged.
-    const modelEntries = await modelCredentialEntries(env, childId);
     const values = [
       ...modelEntries.map(([key, value]) => `${key}=${shellValue(value)}`),
       `CRABHELM_CONTROL_URL=${shellValue(env.RUNTIME_URL)}`,
@@ -169,9 +201,6 @@ async function handleBootstrap(request: Request, env: Env, url: URL): Promise<Re
   if (!/^[0-9a-f]{64}$/u.test(policyHash)) {
     return new Response("invalid managed policy hash", { status: 400, headers });
   }
-  if (!/^[1-9][0-9]{0,8}$/u.test(credentials)) {
-    return new Response("invalid credentials generation", { status: 400, headers });
-  }
   const script = bootstrapInstallScript({
     base: `${url.origin}/bootstrap/${encodeURIComponent(childId)}`,
     archiveId: release.archiveId,
@@ -183,9 +212,7 @@ async function handleBootstrap(request: Request, env: Env, url: URL): Promise<Re
     credentialsGeneration: Number(credentials),
     policyHash,
     egressLockdown: normalizeEgressLockdownMode(env.CRABHELM_EGRESS_LOCKDOWN),
-    ...(modelProxyEnabled(env)
-      ? { modelBaseUrl: `${new URL(env.RUNTIME_URL).origin}/model/v1` }
-      : {}),
+    ...(desired.router.kind === "clawrouter" ? { routerBaseUrl: desired.router.baseUrl } : {}),
   });
   return new Response(script, {
     headers: { ...headers, "content-type": "text/x-shellscript; charset=utf-8" },
@@ -298,4 +325,57 @@ function bearer(request: Request): string | undefined {
 
 function shellValue(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function validateInferenceCredentialEntries(
+  value: unknown,
+  router: InferenceRouter,
+): Array<[string, string]> {
+  if (!Array.isArray(value)) throw new Error("invalid inference credential projection");
+  const entries = value.map((entry) => {
+    if (
+      !Array.isArray(entry) || entry.length !== 2 ||
+      entry.some((item) => typeof item !== "string" || /[\r\n\u0000]/u.test(item) || item.length > 16_384)
+    ) {
+      throw new Error("invalid inference credential projection");
+    }
+    return [entry[0], entry[1]] as [string, string];
+  });
+  const keys = new Set(entries.map(([key]) => key));
+  if (keys.size !== entries.length) throw new Error("invalid inference credential projection");
+  if (router.kind === "direct") {
+    if (entries.length !== 1 || entries[0]?.[0] !== "OPENAI_API_KEY" || !entries[0][1]) {
+      throw new Error("invalid direct inference credential projection");
+    }
+    return entries;
+  }
+  const values = Object.fromEntries(entries);
+  const prefix = `clawrouter-live-${router.credentialId}-`;
+  if (
+    entries.length !== 2 ||
+    !keys.has("CLAWROUTER_API_KEY") ||
+    !keys.has("CRABHELM_ROUTER_BASE_URL") ||
+    values.CRABHELM_ROUTER_BASE_URL !== router.baseUrl ||
+    !values.CLAWROUTER_API_KEY?.startsWith(prefix) ||
+    !/^[A-Za-z0-9_-]{8,}$/u.test(values.CLAWROUTER_API_KEY.slice(prefix.length))
+  ) {
+    throw new Error("invalid ClawRouter credential projection");
+  }
+  return entries;
+}
+
+async function metricsAuthorized(request: Request, expected: string | undefined): Promise<boolean> {
+  const candidate = bearer(request);
+  if (!candidate || !expected || new TextEncoder().encode(expected).byteLength < 32) return false;
+  const [actualDigest, expectedDigest] = await Promise.all([
+    crypto.subtle.digest("SHA-256", new TextEncoder().encode(candidate)),
+    crypto.subtle.digest("SHA-256", new TextEncoder().encode(expected)),
+  ]);
+  const actual = new Uint8Array(actualDigest);
+  const wanted = new Uint8Array(expectedDigest);
+  let difference = actual.byteLength ^ wanted.byteLength;
+  for (let index = 0; index < Math.max(actual.byteLength, wanted.byteLength); index += 1) {
+    difference |= (actual[index] ?? 0) ^ (wanted[index] ?? 0);
+  }
+  return difference === 0;
 }
