@@ -70,7 +70,7 @@ Create the JSON secret outside CloudFormation so secret values never enter stack
 }
 ```
 
-With `SlackMode=off`, omit both keys entirely. The task definition does not inject them, Slack event and interaction paths return 404 at the ALB and application boundaries, and `/api/state` reports Slack as not configured. Do not create inert or placeholder Slack credentials.
+With `SlackMode=off`, omit both keys entirely. The task definition does not inject them, Slack event and interaction paths return 404 at the ALB and application boundaries, pending Slack deliveries terminate without an outbound request even if stale credentials remain, and `/api/state` reports Slack as not configured. Do not create inert or placeholder Slack credentials.
 
 For direct inference (`ClawRouterMode=off`), add:
 

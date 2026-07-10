@@ -46,6 +46,30 @@ function nextClose(socket: WebSocket): Promise<CloseEvent> {
   });
 }
 
+function messageStream(socket: WebSocket): { next(): Promise<Record<string, unknown>> } {
+  const queued: Array<Record<string, unknown>> = [];
+  const waiting: Array<(message: Record<string, unknown>) => void> = [];
+  socket.addEventListener("message", (event: MessageEvent) => {
+    const message = JSON.parse(typeof event.data === "string" ? event.data : "") as Record<string, unknown>;
+    const resolve = waiting.shift();
+    if (resolve) resolve(message);
+    else queued.push(message);
+  });
+  return {
+    next() {
+      const message = queued.shift();
+      if (message) return Promise.resolve(message);
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("timed out waiting for a runtime message")), 5_000);
+        waiting.push((value) => {
+          clearTimeout(timer);
+          resolve(value);
+        });
+      });
+    },
+  };
+}
+
 describe("runtime bridge reconnect in workerd", () => {
   it("replaces a stale socket for the same runtime instead of rejecting the new bridge", async () => {
     const first = await connect("runtime-a", "refresh-1");
@@ -93,5 +117,61 @@ describe("runtime bridge reconnect in workerd", () => {
       new Request("https://coordinator.internal/api/runtime/connect", { headers: { upgrade: "websocket" } }),
     );
     expect(response.status).toBe(401);
+  });
+
+  it("terminates queued Slack delivery when explicit off mode overrides stale credentials", async () => {
+    const coordinator = env.CLAW_COORDINATOR.getByName(CLAW_ID);
+    const socket = await connect("runtime-slack-off", "refresh-slack-off");
+    const messages = messageStream(socket);
+    expect(await messages.next()).toMatchObject({ type: "runtime.ready", clawId: CLAW_ID });
+
+    const jobId = crypto.randomUUID();
+    await coordinator.enqueueTurn({
+      id: jobId,
+      eventId: `event-${jobId}`,
+      clawId: CLAW_ID,
+      requesterId: "principal:member",
+      personaId: "persona:main",
+      prompt: "queued Slack-off request",
+      turnToken: "turn",
+      source: {
+        surface: "slack",
+        workspaceId: "T12345678",
+        channelId: "C12345678",
+        threadTs: "1234567890.123456",
+      },
+      expiresAt: Date.now() + 60_000,
+    });
+    expect(await messages.next()).toMatchObject({ type: "job.available" });
+
+    socket.send(JSON.stringify({ type: "job.claim" }));
+    expect(await messages.next()).toMatchObject({ type: "job.retry" });
+    socket.send(JSON.stringify({ type: "job.claim" }));
+    let offered = false;
+    for (let index = 0; index < 10; index++) {
+      const message = await messages.next();
+      if (message.type === "job.turn.ready") {
+        expect(message.id).toBe(jobId);
+        offered = true;
+        break;
+      }
+    }
+    expect(offered).toBe(true);
+
+    socket.send(JSON.stringify({ type: "job.started", id: jobId }));
+    expect(await messages.next()).toMatchObject({ type: "job.started.ack", id: jobId });
+    socket.send(JSON.stringify({
+      type: "job.complete",
+      id: jobId,
+      ok: true,
+      output: "must not be posted",
+    }));
+    expect(await messages.next()).toMatchObject({ type: "job.ack", id: jobId });
+    expect(await coordinator.jobStatus(jobId)).toMatchObject({
+      status: "completed",
+      deliveryStatus: "failed",
+    });
+    expect((await coordinator.runtimeStatus()).awaitingDelivery).toBe(0);
+    socket.close(1000, "test complete");
   });
 });

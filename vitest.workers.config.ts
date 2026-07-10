@@ -11,6 +11,12 @@ export default defineConfig({
       // deployment config; miniflare simulates the stateful ones.
       wrangler: { configPath: "./wrangler.jsonc" },
       miniflare: {
+        // Any unexpected external request becomes a retryable failure. The
+        // Slack-off delivery test therefore stays pending if it leaks a post.
+        outboundService: () => new Response(
+          JSON.stringify({ ok: false, error: "transient" }),
+          { status: 503, headers: { "content-type": "application/json" } },
+        ),
         // Test-only signing material so the control-plane admission gate can
         // open where a test needs it. These never match production secrets.
         bindings: {
@@ -19,6 +25,8 @@ export default defineConfig({
           INVOCATION_SIGNING_SECRET: "x".repeat(48),
           RUNTIME_SIGNING_SECRET: "x".repeat(48),
           VAULT_MASTER_KEY: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY",
+          CRABHELM_SLACK: "off",
+          SLACK_BOT_TOKEN: "stale",
         },
       },
     }),

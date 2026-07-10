@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { RuntimeClaims } from "../src/governance-types.js";
 import { decryptTurnPayload, encryptTurnPayload } from "./turn-envelope.js";
 import { slackDeliveryRetryable } from "./slack-delivery.js";
+import { slackIngressEnabled } from "./slack-config.js";
 import { signClaims, verifyClaims } from "./security.js";
 
 type GrantRegistration = { invocationId: string; jti: string; argumentsDigest: string; expiresAt: number };
@@ -516,8 +517,15 @@ export class CrabhelmClawCoordinator extends DurableObject<Env> {
 
   async #deliver(job: JobRow): Promise<void> {
     const source = JSON.parse(job.source_json) as SlackTurnSource;
-    if (source.surface !== "slack" || !this.env.SLACK_BOT_TOKEN?.trim()) {
-      this.ctx.storage.sql.exec("UPDATE turn_jobs SET delivery_status = 'failed' WHERE id = ?", job.id);
+    if (
+      !slackIngressEnabled(this.env) ||
+      source.surface !== "slack" ||
+      !this.env.SLACK_BOT_TOKEN?.trim()
+    ) {
+      this.ctx.storage.sql.exec(
+        "UPDATE turn_jobs SET delivery_status = 'failed', payload_envelope = NULL, response_envelope = NULL WHERE id = ?",
+        job.id,
+      );
       return;
     }
     try {
