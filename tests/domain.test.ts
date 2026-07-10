@@ -23,6 +23,7 @@ test("creates an independent child-core desired state with safe defaults", () =>
   assert.equal(claw.desired.observability.logLevel, "info");
   assert.equal(claw.desired.observability.otel.enabled, false);
   assert.equal(claw.desired.observability.otel.serviceName, "crabhelm-ada-s-maintainer-claw");
+  assert.deepEqual(claw.desired.inference.router, { kind: "direct" });
   assert.equal(claw.observed.controlLink.status, "pending");
   assert.equal(claw.observed.controlLink.transport, "openclaw-node");
   assert.equal(claw.observed.controlLink.command, "crabhelm.child.status");
@@ -190,5 +191,53 @@ test("rejects non provider/model inference identifiers", () => {
         inference: { model: "gpt-5.5" },
       }),
     /provider\/model/,
+  );
+});
+
+test("creates per-claw ClawRouter desired state from fleet policy", () => {
+  const claw = createClawRecord({
+    name: "Routed",
+    owner: { subject: "manual:routed", label: "Routed", source: "manual" },
+    inference: {
+      model: "clawrouter/openai/gpt-5.5",
+      fallbackModels: ["clawrouter/anthropic/claude-sonnet-4.6"],
+    },
+  }, new Date(), {
+    clawRouter: {
+      baseUrl: "https://clawrouter.example.test",
+      tenantId: "fakeco",
+      allowedProviders: ["anthropic", "openai"],
+      defaultModel: "clawrouter/openai/gpt-5.5",
+    },
+  });
+  assert.equal(claw.desired.inference.provider, "clawrouter");
+  assert.equal(claw.desired.inference.authRef?.startsWith("clawrouter:crabhelm_"), true);
+  assert.deepEqual(claw.desired.inference.router, {
+    kind: "clawrouter",
+    baseUrl: "https://clawrouter.example.test",
+    tenantId: "fakeco",
+    policyId: `crabhelm_${claw.id.replaceAll("-", "")}`,
+    credentialId: `crabhelm_${claw.id.replaceAll("-", "")}`,
+    allowedProviders: ["anthropic", "openai"],
+    providers: ["anthropic", "openai"],
+  });
+  assert.throws(
+    () => updateClawRecord(claw, { inference: { model: "clawrouter/google/gemini-2.5-pro" } }),
+    /outside the fleet ClawRouter allowlist/u,
+  );
+  assert.throws(
+    () => createClawRecord({
+      name: "Direct mismatch",
+      owner: { subject: "manual:direct", label: "Direct", source: "manual" },
+      inference: { model: "openai/gpt-5.5" },
+    }, new Date(), {
+      clawRouter: {
+        baseUrl: "https://clawrouter.example.test",
+        tenantId: "fakeco",
+        allowedProviders: ["openai"],
+        defaultModel: "clawrouter/openai/gpt-5.5",
+      },
+    }),
+    /require clawrouter\/provider\/model/u,
   );
 });

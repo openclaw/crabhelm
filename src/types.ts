@@ -37,7 +37,29 @@ export type InferencePolicy = {
   fallbackModels: string[];
   authRef?: string;
   monthlyBudgetUsd?: number;
+  router: InferenceRouter;
 };
+
+export type InferenceRouter =
+  | { kind: "direct" }
+  | {
+      kind: "clawrouter";
+      baseUrl: string;
+      tenantId: string;
+      policyId: string;
+      credentialId: string;
+      allowedProviders: string[];
+      providers: string[];
+    };
+
+export type ClawRouterFleetPolicy = {
+  baseUrl: string;
+  tenantId: string;
+  allowedProviders: string[];
+  defaultModel: string;
+};
+
+export type InferencePolicyInput = Partial<Omit<InferencePolicy, "router">>;
 
 export type SlackPolicy = {
   enabled: boolean;
@@ -198,6 +220,39 @@ export type ChildOperationalProbes = {
   };
 };
 
+export type InferenceUsageSummary = {
+  requestCount: number;
+  successCount: number;
+  errorCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  actualCostMicros: number;
+};
+
+export type InferenceObservation = {
+  kind: "clawrouter";
+  checkedAt: string;
+  baseUrl: string;
+  model: string;
+  providers: string[];
+  policyId: string;
+  credentialId: string;
+  credentialsGeneration: number;
+  policyActive: boolean;
+  credentialActive: boolean;
+  routerHealthy: boolean;
+  catalogReady: boolean;
+  routeVerified: boolean;
+  budget: {
+    configured: boolean;
+    limitMicros?: number;
+    spentMicros?: number;
+    remainingMicros?: number;
+  };
+  usage?: InferenceUsageSummary;
+};
+
 export type ClawObserved = {
   generation: number;
   phase: ClawPhase;
@@ -208,6 +263,7 @@ export type ClawObserved = {
   gatewayVersion?: string;
   configHash?: string;
   lastSeenAt?: string;
+  inference?: InferenceObservation;
   probes?: ChildOperationalProbes;
   deletion?: DeletionState;
   userAccess?: {
@@ -235,7 +291,7 @@ export type CreateClawInput = {
   templateId?: string;
   templateVersion?: number;
   deployment?: DeploymentInput;
-  inference?: Partial<InferencePolicy>;
+  inference?: InferencePolicyInput;
   slack?: Partial<SlackPolicy>;
   access?: Partial<AccessPolicy>;
   observability?: Partial<Omit<ObservabilityPolicy, "metadataOnly" | "otel">> & {
@@ -247,7 +303,7 @@ export type UpdateClawInput = Partial<
   Pick<ClawDesired, "name" | "templateId" | "templateVersion" | "owner">
 > & {
   deployment?: DeploymentInput;
-  inference?: Partial<InferencePolicy>;
+  inference?: InferencePolicyInput;
   slack?: Partial<SlackPolicy>;
   access?: Partial<AccessPolicy>;
   observability?: Partial<Omit<ObservabilityPolicy, "metadataOnly" | "otel">> & {

@@ -14,10 +14,12 @@ test("registry backfills disabled OpenTelemetry defaults on legacy claw records"
   });
   const legacy = structuredClone(current) as ClawRecord;
   delete (legacy.desired.observability as Partial<ClawRecord["desired"]["observability"]>).otel;
+  delete (legacy.desired.inference as Partial<ClawRecord["desired"]["inference"]>).router;
   await claws.register(legacy.id, legacy);
 
   const restored = await registry.get(legacy.id);
   assert.deepEqual(restored.desired.observability.otel, current.desired.observability.otel);
+  assert.deepEqual(restored.desired.inference.router, { kind: "direct" });
   assert.equal(childPolicyHash(restored), childPolicyHash(current));
   assert.deepEqual((await registry.list())[0]?.desired.observability.otel, current.desired.observability.otel);
 });

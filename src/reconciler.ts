@@ -6,9 +6,20 @@ import {
   type CrabhelmOperationalErrorCode,
 } from "./errors.js";
 import { isRegistryWriteConflict, type CrabhelmRegistry } from "./registry.js";
-import type { AuditEvent, ClawObserved, ClawRecord } from "./types.js";
+import type {
+  AuditEvent,
+  ClawObserved,
+  ClawRecord,
+  InferenceObservation,
+  InspectResult,
+  ProvisionResult,
+} from "./types.js";
 
 const defaultDrainQuietPeriodMs = 5_000;
+
+export type InferenceControl = {
+  reconcile(claw: ClawRecord): Promise<InferenceObservation>;
+};
 
 export class CrabhelmReconciler {
   readonly #registry: CrabhelmRegistry;
@@ -16,17 +27,19 @@ export class CrabhelmReconciler {
   readonly #clawTails = new Map<string, Promise<void>>();
   readonly #drainQuietPeriodMs: number;
   readonly #now: () => Date;
+  readonly #inference?: InferenceControl;
   #running = false;
 
   constructor(
     registry: CrabhelmRegistry,
     provider: ChildCoreProvider,
-    options: { drainQuietPeriodMs?: number; now?: () => Date } = {},
+    options: { drainQuietPeriodMs?: number; now?: () => Date; inference?: InferenceControl } = {},
   ) {
     this.#registry = registry;
     this.#provider = provider;
     this.#drainQuietPeriodMs = options.drainQuietPeriodMs ?? defaultDrainQuietPeriodMs;
     this.#now = options.now ?? (() => new Date());
+    this.#inference = options.inference;
     if (!Number.isFinite(this.#drainQuietPeriodMs) || this.#drainQuietPeriodMs < 0) {
       throw new Error("drain quiet period must be a non-negative number");
     }
@@ -64,6 +77,10 @@ export class CrabhelmReconciler {
     let claw = await this.#registry.get(id);
     try {
       if (claw.observed.phase === "deleted") return claw;
+      const inference = await this.#inference?.reconcile(claw);
+      if (inference) {
+        claw = { ...claw, observed: { ...claw.observed, inference } };
+      }
       if (claw.observed.deletion) {
         const attemptAt = this.#now().toISOString();
         if (claw.observed.deletion.stage === "disable") {
@@ -216,22 +233,27 @@ export class CrabhelmReconciler {
           message: "Creating one isolated child workspace",
         });
         const result = await this.#provider.provision(claw);
+        const resultInference = inferenceResult(inference, result);
+        const resultReady = result.phase === "ready" && (!inference || resultInference?.routeVerified === true);
         const now = this.#now().toISOString();
         return await this.#writeObserved(
           claw,
           {
-            generation: result.phase === "ready" ? claw.desired.generation : 0,
-            phase: result.phase,
-            message: result.message,
-            health: result.health,
+            generation: resultReady ? claw.desired.generation : 0,
+            phase: result.phase === "ready" && !resultReady ? "attention" : result.phase,
+            message: result.phase === "ready" && !resultReady
+              ? "ClawRouter configuration is present but live routed inference proof is missing"
+              : result.message,
+            health: result.phase === "ready" && !resultReady ? "degraded" : result.health,
             lifecycle: result.lifecycle,
             controlLink: result.controlLink ?? claw.observed.controlLink,
             gatewayVersion: result.gatewayVersion,
             configHash: result.configHash,
             probes: result.probes,
-            lastSeenAt: result.phase === "ready" ? now : undefined,
+            ...(resultInference ? { inference: resultInference } : {}),
+            lastSeenAt: resultReady ? now : undefined,
           },
-          result.phase === "ready"
+          resultReady
             ? {
                 actor: "crabhelm-reconciler",
                 action: "claw.create",
@@ -269,16 +291,21 @@ export class CrabhelmReconciler {
         );
       }
       const ready = result.phase === "ready" && result.health === "healthy";
+      const resultInference = inferenceResult(inference, result);
+      const routedReady = ready && (!inference || resultInference?.routeVerified === true);
       const policyApplied = result.configHash === childPolicyHash(claw);
       const observed: ClawObserved = {
         ...claw.observed,
         ...result,
-        generation: ready || policyApplied ? claw.desired.generation : claw.observed.generation,
-        phase: result.phase ?? claw.observed.phase,
-        message: result.message ?? claw.observed.message,
-        health: result.health ?? claw.observed.health,
+        generation: routedReady || policyApplied ? claw.desired.generation : claw.observed.generation,
+        phase: ready && !routedReady ? "attention" : result.phase ?? claw.observed.phase,
+        message: ready && !routedReady
+          ? "ClawRouter configuration is present but live routed inference proof is missing"
+          : result.message ?? claw.observed.message,
+        health: ready && !routedReady ? "degraded" : result.health ?? claw.observed.health,
         controlLink: result.controlLink ?? claw.observed.controlLink,
         lastSeenAt: result.lastSeenAt ?? claw.observed.lastSeenAt,
+        ...(resultInference ? { inference: resultInference } : {}),
       };
       return await this.#writeObserved(claw, observed);
     } catch (error) {
@@ -357,6 +384,21 @@ export class CrabhelmReconciler {
       expectedRevision: claw.revision,
     });
   }
+}
+
+function inferenceResult(
+  inference: InferenceObservation | undefined,
+  result: ProvisionResult | InspectResult,
+): InferenceObservation | undefined {
+  if (!inference) return undefined;
+  const model = result.probes?.model;
+  const routeVerified =
+    inference.routerHealthy &&
+    inference.catalogReady &&
+    model?.liveInferenceProbe === true &&
+    model.configuredModel === inference.model &&
+    model.resolvedModel === inference.model;
+  return { ...inference, routeVerified };
 }
 
 function safeReconcileFailure(
