@@ -12,6 +12,8 @@ An installation selects either the reference Cloudflare backend or the AWS backe
 
 The backends are separate fleet boundaries. They do not form an active-active pair, replicate state, share runtime sockets, or reuse signing material. The AWS desired task count remains one until distributed coordinator ownership and cross-task socket routing are implemented.
 
+The disposable AWS FakeCo contract is a locked, manually invoked deployment profile. It requires protected `main`, separate deploy/teardown GitHub Environments and exact OIDC subjects, external digest-pinned ECR, bounded workload and CloudFormation roles, deterministic tags, and standard stack deletion with a retained-resource manifest. It never treats `ProvisionService=false` as a repository bootstrap and never accepts secret values as foundation inputs.
+
 ## Interaction models
 
 - **Personal agent:** one user's persona; requester authority by default.

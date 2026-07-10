@@ -43,7 +43,9 @@ The AWS backend runs the portable HTTP and control-plane services as one long-li
 
 PostgreSQL on RDS stores organization state and per-claw coordinator records. Transactions, advisory locks, conditional updates, and delivery leases replace Durable Object transaction and alarm semantics. Private S3 buckets store appliances, encrypted OAuth envelopes, and audit archives; SQS carries audit events to the archive poller.
 
-The ECS service intentionally has a desired count of one. Deployment stops the old task before starting its replacement, and runtime bridges reconnect after the socket closes. More than one task is unsupported until coordinator ownership, cross-task signaling, and socket routing are distributed. See the [AWS deployment guide](../deploy/aws/README.md).
+The ECS service intentionally has a desired count of one. Deployment stops the old task before starting its replacement, and runtime bridges reconnect after the socket closes. More than one task is unsupported until coordinator ownership, cross-task signaling, and socket routing are distributed. The workload execution and task roles require an account-foundation permissions boundary and controlled IAM path; image, log, secret, S3, and SQS permissions are scoped to the exact runtime calls.
+
+The locked FakeCo deployment profile is an operator layer over the canonical template. It validates one account/Region, external digest-pinned ECR, exact GitHub OIDC and CloudFormation role identities, deterministic tags, bounded RDS/log retention, and live-template-bound standard-only teardown. Account organization, identity, trust, boundary policy, service role, secrets/KMS, artifact bucket, ECR, ACM/DNS, and cost controls remain outside the application stack. The profile preserves a single NAT and is deliberately non-HA; a free S3 gateway endpoint removes application S3 and regional ECR layer traffic from the NAT path. See the [AWS deployment guide](../deploy/aws/README.md).
 
 ## ClawRouter inference boundary
 

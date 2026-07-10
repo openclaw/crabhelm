@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "stackDeletionMode": "STANDARD",
+  "resources": [
+    {
+      "logicalId": "DatabaseCredentials",
+      "type": "AWS::SecretsManager::Secret",
+      "disposition": "retain",
+      "reason": "Database recovery credential remains for the retained final snapshot."
+    },
+    {
+      "logicalId": "Database",
+      "type": "AWS::RDS::DBInstance",
+      "disposition": "snapshot",
+      "reason": "CloudFormation creates a final database snapshot on standard stack deletion."
+    },
+    {
+      "logicalId": "AppliancesBucket",
+      "type": "AWS::S3::Bucket",
+      "disposition": "retain",
+      "reason": "Digest-pinned appliance evidence is retained for explicit review and disposal."
+    },
+    {
+      "logicalId": "OAuthVaultBucket",
+      "type": "AWS::S3::Bucket",
+      "disposition": "retain",
+      "reason": "Encrypted OAuth vault data is retained for explicit review and disposal."
+    },
+    {
+      "logicalId": "AuditArchiveBucket",
+      "type": "AWS::S3::Bucket",
+      "disposition": "retain",
+      "reason": "Metadata-only audit records are retained for explicit review and disposal."
+    },
+    {
+      "logicalId": "AppliancesBucketPolicy",
+      "type": "AWS::S3::BucketPolicy",
+      "disposition": "retain",
+      "reason": "The retained appliance bucket keeps its deny-insecure-transport policy."
+    },
+    {
+      "logicalId": "OAuthVaultBucketPolicy",
+      "type": "AWS::S3::BucketPolicy",
+      "disposition": "retain",
+      "reason": "The retained vault bucket keeps its deny-insecure-transport policy."
+    },
+    {
+      "logicalId": "AuditArchiveBucketPolicy",
+      "type": "AWS::S3::BucketPolicy",
+      "disposition": "retain",
+      "reason": "The retained audit bucket keeps its deny-insecure-transport policy."
+    },
+    {
+      "logicalId": "AuditQueue",
+      "type": "AWS::SQS::Queue",
+      "disposition": "retain",
+      "reason": "Undelivered audit metadata remains available for explicit review and disposal."
+    },
+    {
+      "logicalId": "AuditDeadLetterQueue",
+      "type": "AWS::SQS::Queue",
+      "disposition": "retain",
+      "reason": "Failed audit metadata remains available for explicit review and disposal."
+    },
+    {
+      "logicalId": "LogGroup",
+      "type": "AWS::Logs::LogGroup",
+      "disposition": "retain",
+      "reason": "Seven-day operational logs remain until their configured expiration."
+    }
+  ]
+}

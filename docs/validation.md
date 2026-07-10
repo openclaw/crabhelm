@@ -6,6 +6,7 @@ Live evidence is separate from unit and simulator evidence. Detailed production 
 | --- | --- | --- |
 | Cloudflare reference control plane | Configured console and runtime hosts; organization and per-claw Durable Objects; alarm reconciliation | Live |
 | AWS control plane | Singleton ECS/Fargate service behind an HTTPS ALB; ALB OIDC assertion verification; native runtime WebSockets; PostgreSQL state; private S3 stores; SQS audit delivery | Implemented + automated; deployment-specific live proof required |
+| FakeCo AWS foundation | Locked account/Region renderer; exact deploy/teardown OIDC subjects; permissions boundary and role path; external ECR digest/XOR and digest-bound Linux/AMD64 config proof; bounded storage/log retention; deterministic tags; live-template-bound exact-set standard-only retained-resource teardown plan; no secret reads | Implemented + automated; GitHub Environments and AWS prerequisites not created |
 | Identity-aware console | Cloudflare Access JWT issuer, audience, signature, and expiry verified before principal resolution; AWS verifies the ALB assertion signature, signer ARN, OIDC client, issuer, and expiry, then maps configured emails and groups to the administrator role | Cloudflare live; AWS automated |
 | Private appliance | Digest-pinned archive under top-level `bundle/` in private R2 or S3; archive and manifest digests enforced before bootstrap | Cloudflare live; AWS automated |
 | Real placement | Crabbox-created workspace with provider resource evidence; no simulator selected in production | Live |
@@ -35,9 +36,11 @@ AWS implementation checks:
 ```bash
 pnpm exec tsgo -p tsconfig.aws.json --noEmit
 node --import tsx --test tests/aws/*.test.ts
-aws cloudformation validate-template \
-  --template-body file://deploy/aws/template.yaml
+pnpm aws:fakeco:validate
+ruby -e 'require "psych"; Psych.parse_file(ARGV[0])' deploy/aws/template.yaml
 ```
+
+The template is larger than CloudFormation's direct `TemplateBody` limit. Generic deployments and the FakeCo workflow use an account-owned encrypted template bucket; do not replace that with an unscoped bucket or inline upload. The workflow's CloudFormation change set remains the authoritative service-side template validation.
 
 PostgreSQL integration coverage runs when `CRABHELM_TEST_POSTGRES_URL` identifies an isolated test database. Before treating an AWS installation as production-ready, also complete the stack, DNS, OIDC, appliance-upload, health, runtime-reconnect, and lifecycle checks in the [AWS deployment guide](../deploy/aws/README.md). Never point those checks at a Cloudflare installation's state or secrets.
 
@@ -45,4 +48,4 @@ Authenticated state for the existing direct-provider reference proof must show t
 
 ## Production proof publication policy
 
-The current live validation record confirms the reference Cloudflare Worker deployment, digest-pinned appliance, ready direct-provider claw, authenticated runtime reconnect, exact Slack probe delivery, credential refresh, and administrator access. It does not claim a live ClawRouter or AWS FakeCo deployment. Each AWS/ClawRouter installation requires its own equivalent live record; automated and template validation are not substitutes. Public documentation intentionally omits deployment IDs, resource IDs, job IDs, exact artifact digests, and administrator identities.
+The current live validation record confirms the reference Cloudflare Worker deployment, digest-pinned appliance, ready direct-provider claw, authenticated runtime reconnect, exact Slack probe delivery, credential refresh, and administrator access. It does not claim a live ClawRouter or AWS FakeCo deployment. The FakeCo foundation is local/automated proof only until its account prerequisites, protected GitHub Environments, manual workflow, DNS, and full routed lifecycle are live-validated. Each AWS/ClawRouter installation requires its own equivalent live record; automated and template validation are not substitutes. Public documentation intentionally omits deployment IDs, resource IDs, job IDs, exact artifact digests, and administrator identities.

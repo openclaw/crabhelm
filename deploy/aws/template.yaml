@@ -12,9 +12,15 @@ Metadata:
         Parameters:
           - CreateEcrRepository
           - EcrRepositoryName
+          - ExistingEcrRepositoryArn
           - ImageUri
           - ImageTag
           - ProvisionService
+      - Label:
+          default: Workload IAM
+        Parameters:
+          - WorkloadPermissionsBoundaryArn
+          - WorkloadRolePath
       - Label:
           default: HTTPS ingress
         Parameters:
@@ -63,6 +69,10 @@ Metadata:
           - DatabaseName
           - DatabaseInstanceClass
           - DatabaseAllocatedStorage
+          - DatabaseStorageAutoscaling
+          - DatabaseMaxAllocatedStorage
+          - DatabaseBackupRetentionDays
+          - DatabaseLogExports
           - DatabaseMultiAz
           - DatabaseDeletionProtection
           - PostgresMajorVersion
@@ -86,10 +96,17 @@ Parameters:
     AllowedPattern: "^[a-z0-9]+(?:[._/-][a-z0-9]+)*$"
     Description: Repository used when CreateEcrRepository is true.
 
+  ExistingEcrRepositoryArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:(aws|aws-us-gov):ecr:[a-z0-9-]+:[0-9]{12}:repository/[a-z0-9]+(?:[._/-][a-z0-9]+)*$"
+    Description: Exact existing ECR repository ARN used by an external ImageUri.
+
   ImageUri:
     Type: String
     Default: ""
-    Description: Full immutable container image URI when using an existing repository.
+    AllowedPattern: "^$|^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com/[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$"
+    Description: Digest-pinned ECR image URI when using an existing repository.
 
   ImageTag:
     Type: String
@@ -104,6 +121,18 @@ Parameters:
     Description: >-
       Create the ECS service. Set false on the first stack-owned-ECR deployment,
       push the image, then update to true.
+
+  WorkloadPermissionsBoundaryArn:
+    Type: String
+    AllowedPattern: "^arn:(aws|aws-us-gov):iam::[0-9]{12}:policy/[A-Za-z0-9+=,.@_/-]+$"
+    Description: Required account-foundation permissions boundary for both ECS workload roles.
+
+  WorkloadRolePath:
+    Type: String
+    Default: /openclaw/crabhelm/
+    AllowedPattern: "^/[A-Za-z0-9+=,.@_-]+(?:/[A-Za-z0-9+=,.@_-]+)*/$"
+    MaxLength: 512
+    Description: Controlled IAM path for both ECS workload roles.
 
   CertificateArn:
     Type: String
@@ -315,6 +344,31 @@ Parameters:
     MinValue: 20
     MaxValue: 500
 
+  DatabaseStorageAutoscaling:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Set false to omit MaxAllocatedStorage and disable RDS storage autoscaling.
+
+  DatabaseMaxAllocatedStorage:
+    Type: Number
+    Default: 1024
+    MinValue: 20
+    MaxValue: 1024
+    Description: RDS autoscaling ceiling when DatabaseStorageAutoscaling is true.
+
+  DatabaseBackupRetentionDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 35
+
+  DatabaseLogExports:
+    Type: String
+    Default: "on"
+    AllowedValues: ["on", "off"]
+    Description: Export PostgreSQL and upgrade logs. FakeCo disables exports to avoid unbounded RDS log groups.
+
   DatabaseMultiAz:
     Type: String
     Default: "true"
@@ -349,12 +403,18 @@ Parameters:
     Description: Serve metadata-only Prometheus metrics on the runtime host with bearer authentication.
 
 Rules:
-  ImageSourceRequired:
+  ImageSourceExclusive:
     Assertions:
       - Assert: !Or
-          - !Equals [!Ref CreateEcrRepository, "true"]
-          - !Not [!Equals [!Ref ImageUri, ""]]
-        AssertDescription: Set ImageUri or set CreateEcrRepository to true.
+          - !And
+            - !Equals [!Ref CreateEcrRepository, "true"]
+            - !Equals [!Ref ImageUri, ""]
+            - !Equals [!Ref ExistingEcrRepositoryArn, ""]
+          - !And
+            - !Equals [!Ref CreateEcrRepository, "false"]
+            - !Not [!Equals [!Ref ImageUri, ""]]
+            - !Not [!Equals [!Ref ExistingEcrRepositoryArn, ""]]
+        AssertDescription: "Choose exactly one image source: stack ECR, or an existing ECR repository ARN plus digest ImageUri."
 
   DistinctHosts:
     Assertions:
@@ -393,6 +453,8 @@ Conditions:
     - !Equals [!Ref ClawRouterAccessServiceToken, "on"]
   UsePrometheus: !Equals [!Ref PrometheusMode, "on"]
   UseDatabaseMultiAz: !Equals [!Ref DatabaseMultiAz, "true"]
+  EnableDatabaseStorageAutoscaling: !Equals [!Ref DatabaseStorageAutoscaling, "true"]
+  ExportDatabaseLogs: !Equals [!Ref DatabaseLogExports, "on"]
   ProtectDatabase: !Equals [!Ref DatabaseDeletionProtection, "true"]
   ProtectLoadBalancer: !Equals [!Ref LoadBalancerDeletionProtection, "true"]
   UseApplicationSecretKmsKey:
@@ -566,6 +628,43 @@ Resources:
       RouteTableId: !Ref ApplicationRouteTable
       SubnetId: !Ref ApplicationSubnetB
 
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ReadAppliancesVaultAndEcrLayers
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource:
+              - !Sub ${AppliancesBucket.Arn}/releases/*
+              - !Sub ${OAuthVaultBucket.Arn}/*
+              - !Sub arn:${AWS::Partition}:s3:::prod-${AWS::Region}-starport-layer-bucket/*
+          - Sid: WriteVaultAndAudit
+            Effect: Allow
+            Principal: "*"
+            Action: s3:PutObject
+            Resource:
+              - !Sub ${OAuthVaultBucket.Arn}/*
+              - !Sub ${AuditArchiveBucket.Arn}/*
+          - Sid: DeleteVaultObjects
+            Effect: Allow
+            Principal: "*"
+            Action: s3:DeleteObject
+            Resource: !Sub ${OAuthVaultBucket.Arn}/*
+      RouteTableIds:
+        - !Ref ApplicationRouteTable
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-s3
+        - Key: Project
+          Value: crabhelm
+      VpcEndpointType: Gateway
+      VpcId: !Ref Vpc
+
   DatabaseRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -730,7 +829,7 @@ Resources:
       AllocatedStorage: !Ref DatabaseAllocatedStorage
       AllowMajorVersionUpgrade: false
       AutoMinorVersionUpgrade: true
-      BackupRetentionPeriod: 7
+      BackupRetentionPeriod: !Ref DatabaseBackupRetentionDays
       CopyTagsToSnapshot: true
       DBInstanceClass: !Ref DatabaseInstanceClass
       DBName: !Ref DatabaseName
@@ -738,14 +837,18 @@ Resources:
       DBSubnetGroupName: !Ref DatabaseSubnetGroup
       DeleteAutomatedBackups: false
       DeletionProtection: !If [ProtectDatabase, true, false]
-      EnableCloudwatchLogsExports:
-        - postgresql
-        - upgrade
+      EnableCloudwatchLogsExports: !If
+        - ExportDatabaseLogs
+        - [postgresql, upgrade]
+        - !Ref AWS::NoValue
       Engine: postgres
       EngineVersion: !Ref PostgresMajorVersion
       MasterUsername: !Sub "{{resolve:secretsmanager:${DatabaseCredentials}:SecretString:username}}"
       MasterUserPassword: !Sub "{{resolve:secretsmanager:${DatabaseCredentials}:SecretString:password}}"
-      MaxAllocatedStorage: 1024
+      MaxAllocatedStorage: !If
+        - EnableDatabaseStorageAutoscaling
+        - !Ref DatabaseMaxAllocatedStorage
+        - !Ref AWS::NoValue
       MultiAZ: !If [UseDatabaseMultiAz, true, false]
       NetworkType: IPV4
       Port: 5432
@@ -1032,14 +1135,35 @@ Resources:
             Principal:
               Service: ecs-tasks.amazonaws.com
             Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Path: !Ref WorkloadRolePath
+      PermissionsBoundary: !Ref WorkloadPermissionsBoundaryArn
       Policies:
-        - PolicyName: read-runtime-secrets
+        - PolicyName: pull-image-write-logs-read-runtime-secrets
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - Effect: Allow
+              - Sid: AuthenticateEcr
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: PullImage
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource: !If
+                  - CreateRepository
+                  - !GetAtt ContainerRepository.Arn
+                  - !Ref ExistingEcrRepositoryArn
+              - Sid: WriteContainerLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub ${LogGroup.Arn}:*
+              - Sid: ReadRuntimeSecrets
+                Effect: Allow
                 Action: secretsmanager:GetSecretValue
                 Resource:
                   - !Ref ApplicationSecretArn
@@ -1068,51 +1192,32 @@ Resources:
             Principal:
               Service: ecs-tasks.amazonaws.com
             Action: sts:AssumeRole
+      Path: !Ref WorkloadRolePath
+      PermissionsBoundary: !Ref WorkloadPermissionsBoundaryArn
       Policies:
         - PolicyName: crabhelm-data-plane
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - Sid: ListPrivateBuckets
-                Effect: Allow
-                Action:
-                  - s3:GetBucketLocation
-                  - s3:ListBucket
-                  - s3:ListBucketMultipartUploads
-                Resource:
-                  - !GetAtt AppliancesBucket.Arn
-                  - !GetAtt OAuthVaultBucket.Arn
-                  - !GetAtt AuditArchiveBucket.Arn
               - Sid: ReadAppliances
                 Effect: Allow
-                Action:
-                  - s3:GetObject
-                  - s3:GetObjectVersion
+                Action: s3:GetObject
                 Resource: !Sub ${AppliancesBucket.Arn}/releases/*
               - Sid: ManageEncryptedVault
                 Effect: Allow
                 Action:
-                  - s3:AbortMultipartUpload
                   - s3:DeleteObject
                   - s3:GetObject
-                  - s3:GetObjectVersion
-                  - s3:ListMultipartUploadParts
                   - s3:PutObject
                 Resource: !Sub ${OAuthVaultBucket.Arn}/*
               - Sid: WriteAuditArchive
                 Effect: Allow
-                Action:
-                  - s3:AbortMultipartUpload
-                  - s3:ListMultipartUploadParts
-                  - s3:PutObject
+                Action: s3:PutObject
                 Resource: !Sub ${AuditArchiveBucket.Arn}/*
               - Sid: ProcessAuditQueue
                 Effect: Allow
                 Action:
-                  - sqs:ChangeMessageVisibility
                   - sqs:DeleteMessage
-                  - sqs:GetQueueAttributes
-                  - sqs:GetQueueUrl
                   - sqs:ReceiveMessage
                   - sqs:SendMessage
                 Resource: !GetAtt AuditQueue.Arn
