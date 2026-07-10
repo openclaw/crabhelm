@@ -146,10 +146,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t parameter_overrides < <(
-            node deploy/aws/fakeco/foundation.mjs parameter-overrides \
-              --rendered "$RUNNER_TEMP/fakeco-rendered.json"
-          )
+          umask 077
+          parameters_file="$RUNNER_TEMP/fakeco-parameter-overrides.txt"
+          node deploy/aws/fakeco/foundation.mjs parameter-overrides \
+            --rendered "$RUNNER_TEMP/fakeco-rendered.json" >"$parameters_file"
+          mapfile -t parameter_overrides <"$parameters_file"
+          [[ "${#parameter_overrides[@]}" -gt 0 ]]
           aws cloudformation deploy \
             --stack-name crabhelm-fakeco \
             --template-file deploy/aws/template.yaml \

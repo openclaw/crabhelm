@@ -185,8 +185,6 @@ test("FakeCo image preflight accepts only unambiguous Linux AMD64 artifacts", as
     kind: "single",
     os: "linux",
     architecture: "amd64",
-    selectedDigest: topDigest,
-    configDigest,
   });
 
   await writeFile(configPath, `${configBytes}\n`, "utf8");
@@ -198,6 +196,7 @@ test("FakeCo image preflight accepts only unambiguous Linux AMD64 artifacts", as
   ]);
   assert.notEqual(changedConfig.status, 0);
   assert.match(changedConfig.stderr, /container image config digest/u);
+  assert.doesNotMatch(changedConfig.stderr, /sha256:/u);
 
   const armConfigBytes = JSON.stringify({ os: "linux", architecture: "arm64" });
   const armConfigDigest = `sha256:${createHash("sha256").update(armConfigBytes).digest("hex")}`;
@@ -268,7 +267,6 @@ test("FakeCo image preflight accepts only unambiguous Linux AMD64 artifacts", as
     kind: "index",
     os: "linux",
     architecture: "amd64",
-    selectedDigest: childDigest,
   });
 
   const dockerIndexMediaType = "application/vnd.docker.distribution.manifest.list.v2+json";
@@ -292,7 +290,12 @@ test("FakeCo image preflight accepts only unambiguous Linux AMD64 artifacts", as
     "--ecr-response", responsePath,
   ]);
   assert.equal(dockerIndexVerified.status, 0, dockerIndexVerified.stderr);
-  assert.equal(JSON.parse(dockerIndexVerified.stdout).selectedDigest, childDigest);
+  assert.deepEqual(JSON.parse(dockerIndexVerified.stdout), {
+    ok: true,
+    kind: "index",
+    os: "linux",
+    architecture: "amd64",
+  });
 
   const invalidIndexes: Array<[string, unknown, RegExp]> = [
     [
@@ -343,6 +346,7 @@ test("FakeCo image preflight accepts only unambiguous Linux AMD64 artifacts", as
   ]);
   assert.notEqual(wrongDigest.status, 0);
   assert.match(wrongDigest.stderr, /ECR image digest/u);
+  assert.doesNotMatch(wrongDigest.stderr, /sha256:/u);
 });
 
 test("FakeCo teardown plan is standard-only and inventories retained resources", async (t) => {
@@ -358,7 +362,9 @@ test("FakeCo teardown plan is standard-only and inventories retained resources",
   const retention = JSON.parse(await readFile(retentionPath, "utf8")) as RetentionManifest;
   const stackPath = path.join(directory, "stack.json");
   const resourcesPath = path.join(directory, "resources.json");
+  const liveTemplatePath = path.join(directory, "live-template.json");
   const planPath = path.join(directory, "plan.json");
+  const template = await readFile(path.join(repositoryRoot, "deploy/aws/template.yaml"), "utf8");
   await writeFile(stackPath, JSON.stringify(stackDescription(rendered)), "utf8");
   await writeFile(resourcesPath, JSON.stringify({
     StackResources: retention.resources.map((entry) => ({
@@ -367,27 +373,53 @@ test("FakeCo teardown plan is standard-only and inventories retained resources",
       ResourceType: entry.type,
     })),
   }), "utf8");
+  await writeFile(liveTemplatePath, JSON.stringify({ TemplateBody: template }), "utf8");
 
   const result = runFoundation([
     "teardown-plan",
     "--rendered", renderedPath,
     "--stack", stackPath,
     "--resources", resourcesPath,
+    "--template", path.join(repositoryRoot, "deploy/aws/template.yaml"),
+    "--live-template-response", liveTemplatePath,
     "--output", planPath,
   ]);
   assert.equal(result.status, 0, result.stderr);
   const plan = JSON.parse(await readFile(planPath, "utf8")) as {
     deletion: { mode: string; force: boolean; command: string[] };
+    retentionContract: { algorithm: string; resourceCount: number; liveTemplateVerified: boolean };
     retainedResources: Array<{ logicalId: string; physicalId: string }>;
     externalPrerequisites: Array<{ kind: string; disposition: string }>;
   };
   assert.equal(plan.deletion.mode, "STANDARD");
   assert.equal(plan.deletion.force, false);
   assert.ok(plan.deletion.command.includes("STANDARD"));
+  assert.equal(plan.retentionContract.algorithm, "sha256");
+  assert.equal(plan.retentionContract.resourceCount, retention.resources.length);
+  assert.equal(plan.retentionContract.liveTemplateVerified, true);
   assert.equal(plan.retainedResources.length, retention.resources.length);
   assert.ok(plan.retainedResources.some((entry) => entry.logicalId === "Database"));
   assert.ok(plan.externalPrerequisites.some((entry) =>
     entry.kind === "ecr-repository" && entry.disposition === "account-foundation-owned"));
+
+  const driftedTemplatePath = path.join(directory, "drifted-live-template.json");
+  await writeFile(driftedTemplatePath, JSON.stringify({
+    TemplateBody: template.replace(
+      "  Database:\n    Type: AWS::RDS::DBInstance\n    DeletionPolicy: Snapshot",
+      "  Database:\n    Type: AWS::RDS::DBInstance\n    DeletionPolicy: Delete",
+    ),
+  }), "utf8");
+  const drifted = runFoundation([
+    "teardown-plan",
+    "--rendered", renderedPath,
+    "--stack", stackPath,
+    "--resources", resourcesPath,
+    "--template", path.join(repositoryRoot, "deploy/aws/template.yaml"),
+    "--live-template-response", driftedTemplatePath,
+    "--output", path.join(directory, "drifted-plan.json"),
+  ]);
+  assert.notEqual(drifted.status, 0);
+  assert.match(drifted.stderr, /live retention contract differs for Database/u);
 });
 
 test("FakeCo workflows are manual, protected-main, isolated, pinned, and secret-read free", async () => {
@@ -413,6 +445,9 @@ test("FakeCo workflows are manual, protected-main, isolated, pinned, and secret-
   }
   assert.match(deploy, /environment: fakeco/u);
   assert.match(deploy, /--parameter-overrides "\$\{parameter_overrides\[@\]\}"/u);
+  assert.match(deploy, /parameter-overrides[\s\S]*>"\$parameters_file"/u);
+  assert.match(deploy, /mapfile -t parameter_overrides <"\$parameters_file"/u);
+  assert.doesNotMatch(deploy, /mapfile[^\n]*< <\(/u);
   assert.match(deploy, /--tags Environment=fakeco ManagedBy=github-actions Project=crabhelm/u);
   assert.match(deploy, /ecr batch-get-image/u);
   assert.match(deploy, /ecr get-download-url-for-layer/u);
@@ -422,6 +457,9 @@ test("FakeCo workflows are manual, protected-main, isolated, pinned, and secret-
   assert.match(teardown, /CONFIRM_STACK_NAME: \$\{\{ inputs\.confirm_stack_name \}\}/u);
   assert.doesNotMatch(teardown, /\[\[ "\$\{\{ inputs\./u);
   assert.match(teardown, /--deletion-mode STANDARD/u);
+  assert.match(teardown, /cloudformation get-template/u);
+  assert.match(teardown, /--live-template-response/u);
+  assert.doesNotMatch(teardown, /upload-artifact|retention-days/u);
   assert.doesNotMatch(teardown, /FORCE_DELETE_STACK|--retain-resources/u);
 });
 

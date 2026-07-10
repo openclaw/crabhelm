@@ -39,7 +39,7 @@ Create and review these outside this repository before enabling either workflow:
 8. The application secret and customer-managed KMS key. The workflow receives only their ARNs and calls `DescribeSecret`/`DescribeKey`; it never reads a secret value.
 9. ACM certificate, external DNS, ALB OIDC client, Crabbox target, ClawRouter installation, audit-alert SNS topic, and digest-pinned post-overlay OpenClaw appliance.
 
-The deploy GitHub role needs only OIDC session admission, metadata reads for the named prerequisites, `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the exact repository, writes to the exact CloudFormation artifact-bucket prefix, CloudFormation change-set/stack operations for `crabhelm-fakeco`, and `iam:PassRole` for the exact CloudFormation service role. The teardown role needs stack/resource reads, standard stack deletion, and the same exact `iam:PassRole`; it does not need create/update permissions. The CloudFormation service role owns stack mutation and must constrain workload IAM creation to the fixed path and require the named permissions boundary.
+The deploy GitHub role needs only OIDC session admission, metadata reads for the named prerequisites, `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` on the exact repository, writes to the exact CloudFormation artifact-bucket prefix, CloudFormation change-set/stack operations for `crabhelm-fakeco`, and `iam:PassRole` for the exact CloudFormation service role. The teardown role needs stack/resource reads including `cloudformation:GetTemplate`, standard stack deletion, and the same exact `iam:PassRole`; it does not need create/update permissions. The CloudFormation service role owns stack mutation and must constrain workload IAM creation to the fixed path and require the named permissions boundary.
 
 The application secret format remains the one documented in the parent [AWS guide](../README.md). Secret values never belong in GitHub variables, workflow inputs, rendered parameter files, stack parameters, logs, or teardown artifacts.
 
@@ -121,7 +121,7 @@ After deployment it verifies observed parameters, tags, service role, outputs, s
 
 ## Manual teardown
 
-[`teardown-fakeco.yml`](../../../.github/workflows/teardown-fakeco.yml) requires the literal stack name `crabhelm-fakeco`, the separately protected `fakeco-teardown` Environment, and the same concurrency lock as deployment. Before deletion it verifies the live stack against the locked profile and uploads a names/ARNs/IDs-only teardown plan built from [`retained-resources.json`](retained-resources.json).
+[`teardown-fakeco.yml`](../../../.github/workflows/teardown-fakeco.yml) requires the literal stack name `crabhelm-fakeco`, the separately protected `fakeco-teardown` Environment, and the same concurrency lock as deployment. Immediately before deletion it verifies the live stack against the locked profile, fetches the live original template, and cryptographically compares every retained resource block with the reviewed template and [`retained-resources.json`](retained-resources.json). A retention-policy or retained-resource drift stops deletion. If a reviewed template changes a retained block, deploy that template successfully before teardown.
 
 Deletion uses only:
 
@@ -139,4 +139,4 @@ Standard stack deletion deliberately leaves or creates:
 - source and dead-letter audit queues;
 - the seven-day ECS log group.
 
-The plan records their logical and physical IDs before deletion. External ECR, template bucket, IAM/OIDC resources, boundary, service role, application secret/KMS key, ACM/DNS, budgets, and anomaly monitoring are account-foundation-owned and untouched. Retained-data disposal, legal retention decisions, account closure, and data-deletion requests are outside this repository.
+The plan records their logical and physical IDs before deletion. Because that inventory contains private deployment metadata, the workflow keeps it in mode-`0600` runner-temporary storage and never uploads or prints it; an operator can generate the same plan locally through the documented CLI when an approved private copy is required. External ECR, template bucket, IAM/OIDC resources, boundary, service role, application secret/KMS key, ACM/DNS, budgets, and anomaly monitoring are account-foundation-owned and untouched. Retained-data disposal, legal retention decisions, account closure, and data-deletion requests are outside this repository.

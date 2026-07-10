@@ -130,7 +130,12 @@ async function main() {
             architecture: "amd64",
             selectedDigest: inspection.selectedDigest,
           };
-      printJson({ ok: true, ...result });
+      printJson({
+        ok: true,
+        kind: result.kind,
+        os: result.os,
+        architecture: result.architecture,
+      });
       return;
     }
     case "teardown-plan": {
@@ -150,7 +155,29 @@ async function main() {
         options.retention ?? defaultRetainedResourcesPath,
         "retained resource manifest",
       );
-      const plan = buildTeardownPlan(profile, rendered, stack, resources, retention);
+      const template = await readBoundedText(
+        requireOption(options, "template"),
+        "reviewed CloudFormation template",
+        2 * 1024 * 1024,
+      );
+      const liveTemplateResponse = await readBoundedJson(
+        requireOption(options, "live-template-response"),
+        "live CloudFormation template response",
+        2 * 1024 * 1024,
+      );
+      const retentionContract = verifyRetentionContract(
+        retention,
+        template,
+        liveTemplateResponse,
+      );
+      const plan = buildTeardownPlan(
+        profile,
+        rendered,
+        stack,
+        resources,
+        retention,
+        retentionContract,
+      );
       const output = requireOption(options, "output");
       await writePrivateJson(output, plan);
       printJson({
@@ -434,25 +461,27 @@ function verifyStack(rendered, expectedParameters, document) {
   }
 }
 
-function buildTeardownPlan(profile, rendered, stack, resourcesDocument, retention) {
+function buildTeardownPlan(
+  profile,
+  rendered,
+  stack,
+  resourcesDocument,
+  retention,
+  retentionContract,
+) {
   if (rendered.phase !== "teardown") {
     throw new Error("teardown-plan requires a teardown-phase render");
   }
   verifyRendered(profile, rendered, stack);
-  requireObject(retention, "retained resource manifest");
-  assertEqual(retention.schemaVersion, 1, "retention schemaVersion");
-  assertEqual(retention.stackDeletionMode, "STANDARD", "stack deletion mode");
-  if (!Array.isArray(retention.resources) || retention.resources.length === 0) {
-    throw new Error("retained resource manifest is empty");
-  }
+  const retentionResources = validateRetentionManifest(retention);
+  requireObject(retentionContract, "retention contract proof");
   const stackResources = resourcesDocument?.StackResources;
   if (!Array.isArray(stackResources)) throw new Error("stack resources document is invalid");
   if (stackResources.some((resource) => resource.LogicalResourceId === "ContainerRepository")) {
     throw new Error("FakeCo stack unexpectedly owns an ECR repository");
   }
   const observed = new Map(stackResources.map((resource) => [resource.LogicalResourceId, resource]));
-  const retainedResources = retention.resources.map((entry) => {
-    requireObject(entry, `retained resource ${String(entry?.logicalId ?? "unknown")}`);
+  const retainedResources = retentionResources.map((entry) => {
     const resource = observed.get(entry.logicalId);
     if (!resource) throw new Error(`retained resource ${entry.logicalId} is absent from the stack`);
     assertEqual(resource.ResourceType, entry.type, `retained resource type ${entry.logicalId}`);
@@ -518,6 +547,7 @@ function buildTeardownPlan(profile, rendered, stack, resourcesDocument, retentio
         "STANDARD",
       ],
     },
+    retentionContract,
     retainedResources,
     externalPrerequisites,
     outOfScope: [
@@ -528,6 +558,132 @@ function buildTeardownPlan(profile, rendered, stack, resourcesDocument, retentio
       "ECR, ACM, DNS, budget, and anomaly-monitoring deletion",
     ],
   };
+}
+
+function validateRetentionManifest(retention) {
+  requireObject(retention, "retained resource manifest");
+  assertEqual(retention.schemaVersion, 1, "retention schemaVersion");
+  assertEqual(retention.stackDeletionMode, "STANDARD", "stack deletion mode");
+  if (!Array.isArray(retention.resources) || retention.resources.length === 0) {
+    throw new Error("retained resource manifest is empty");
+  }
+  const logicalIds = new Set();
+  for (const entry of retention.resources) {
+    requireObject(entry, `retained resource ${String(entry?.logicalId ?? "unknown")}`);
+    if (!/^[A-Za-z][A-Za-z0-9]+$/u.test(entry.logicalId ?? "")) {
+      throw new Error("retained resource logical id is invalid");
+    }
+    if (logicalIds.has(entry.logicalId)) {
+      throw new Error(`retained resource ${entry.logicalId} is duplicated`);
+    }
+    logicalIds.add(entry.logicalId);
+    if (typeof entry.type !== "string" || !entry.type.startsWith("AWS::")) {
+      throw new Error(`retained resource ${entry.logicalId} type is invalid`);
+    }
+    if (!new Set(["retain", "snapshot"]).has(entry.disposition)) {
+      throw new Error(`retained resource ${entry.logicalId} has an invalid disposition`);
+    }
+  }
+  return retention.resources;
+}
+
+function verifyRetentionContract(retention, reviewedTemplate, liveTemplateResponse) {
+  const retentionResources = validateRetentionManifest(retention);
+  requireObject(liveTemplateResponse, "live CloudFormation template response");
+  const liveTemplate = liveTemplateResponse.TemplateBody;
+  if (typeof liveTemplate !== "string" || liveTemplate.length === 0) {
+    throw new Error("live CloudFormation template response has no template body");
+  }
+  const reviewedBlocks = extractResourceBlocks(reviewedTemplate, "reviewed template");
+  const liveBlocks = extractResourceBlocks(liveTemplate, "live template");
+  const contractHash = createHash("sha256");
+  const sortedResources = [...retentionResources]
+    .sort((left, right) => left.logicalId.localeCompare(right.logicalId));
+  for (const entry of sortedResources) {
+    const reviewedBlock = reviewedBlocks.get(entry.logicalId);
+    const liveBlock = liveBlocks.get(entry.logicalId);
+    if (!reviewedBlock || !liveBlock) {
+      throw new Error(`retention contract resource ${entry.logicalId} is missing`);
+    }
+    const expectedDeletionPolicy = entry.disposition === "snapshot"
+      ? "Snapshot"
+      : "RetainExceptOnCreate";
+    const expectedUpdateReplacePolicy = entry.disposition === "snapshot"
+      ? "Snapshot"
+      : "Retain";
+    assertEqual(
+      topLevelResourceField(reviewedBlock, "Type", entry.logicalId),
+      entry.type,
+      `reviewed retention resource type ${entry.logicalId}`,
+    );
+    assertEqual(
+      topLevelResourceField(reviewedBlock, "DeletionPolicy", entry.logicalId),
+      expectedDeletionPolicy,
+      `reviewed deletion policy ${entry.logicalId}`,
+    );
+    assertEqual(
+      topLevelResourceField(reviewedBlock, "UpdateReplacePolicy", entry.logicalId),
+      expectedUpdateReplacePolicy,
+      `reviewed update-replace policy ${entry.logicalId}`,
+    );
+    const reviewedDigest = createHash("sha256").update(reviewedBlock).digest("hex");
+    const liveDigest = createHash("sha256").update(liveBlock).digest("hex");
+    if (liveDigest !== reviewedDigest) {
+      throw new Error(`live retention contract differs for ${entry.logicalId}`);
+    }
+    contractHash.update(entry.logicalId).update("\0").update(reviewedBlock).update("\0");
+  }
+  return {
+    algorithm: "sha256",
+    digest: contractHash.digest("hex"),
+    resourceCount: sortedResources.length,
+    liveTemplateVerified: true,
+  };
+}
+
+function extractResourceBlocks(template, label) {
+  if (typeof template !== "string" || template.length === 0) {
+    throw new Error(`${label} is empty`);
+  }
+  const lines = template.replace(/\r\n?/gu, "\n").split("\n");
+  const resourcesIndexes = lines
+    .map((line, index) => line === "Resources:" ? index : -1)
+    .filter((index) => index >= 0);
+  if (resourcesIndexes.length !== 1) {
+    throw new Error(`${label} must contain one top-level Resources section`);
+  }
+  const blocks = new Map();
+  for (let index = resourcesIndexes[0] + 1; index < lines.length;) {
+    if (/^[A-Za-z][A-Za-z0-9]*:/u.test(lines[index] ?? "")) break;
+    const resource = /^  ([A-Za-z][A-Za-z0-9]+):\s*$/u.exec(lines[index] ?? "");
+    if (!resource) {
+      index += 1;
+      continue;
+    }
+    let end = index + 1;
+    while (end < lines.length) {
+      if (/^[A-Za-z][A-Za-z0-9]*:/u.test(lines[end] ?? "") ||
+          /^  [A-Za-z][A-Za-z0-9]+:\s*$/u.test(lines[end] ?? "")) {
+        break;
+      }
+      end += 1;
+    }
+    const logicalId = resource[1];
+    if (blocks.has(logicalId)) throw new Error(`${label} duplicates resource ${logicalId}`);
+    const block = `${lines.slice(index, end).map((line) => line.trimEnd()).join("\n").trimEnd()}\n`;
+    blocks.set(logicalId, block);
+    index = end;
+  }
+  return blocks;
+}
+
+function topLevelResourceField(block, field, logicalId) {
+  const expression = new RegExp(`^    ${field}:\\s*([^#\\r\\n]+?)\\s*$`, "gmu");
+  const matches = [...block.matchAll(expression)];
+  if (matches.length !== 1) {
+    throw new Error(`retention resource ${logicalId} must have one ${field}`);
+  }
+  return matches[0][1].trim();
 }
 
 function inspectEcrManifest(profile, rendered, response) {
@@ -546,9 +702,9 @@ function inspectEcrManifest(profile, rendered, response) {
   const imageUri = parameters.get("ImageUri");
   const expectedDigest = imageUri.slice(imageUri.lastIndexOf("@") + 1);
   const expectedRepository = rendered.target.ecrRepositoryArn.split(":repository/")[1];
-  assertEqual(image.registryId, rendered.target.accountId, "ECR image registry account");
-  assertEqual(image.repositoryName, expectedRepository, "ECR image repository");
-  assertEqual(image.imageId.imageDigest, expectedDigest, "ECR image digest");
+  assertOpaqueEqual(image.registryId, rendered.target.accountId, "ECR image registry account");
+  assertOpaqueEqual(image.repositoryName, expectedRepository, "ECR image repository");
+  assertOpaqueEqual(image.imageId.imageDigest, expectedDigest, "ECR image digest");
   if (typeof image.imageManifest !== "string" || image.imageManifest.length > 5 * 1024 * 1024) {
     throw new Error("ECR image manifest must be bounded JSON text");
   }
@@ -618,7 +774,7 @@ function inspectEcrManifest(profile, rendered, response) {
 
 function verifySingleImageConfig(inspection, document) {
   const actualDigest = `sha256:${createHash("sha256").update(document.bytes).digest("hex")}`;
-  assertEqual(actualDigest, inspection.configDigest, "container image config digest");
+  assertOpaqueEqual(actualDigest, inspection.configDigest, "container image config digest");
   const config = document.value;
   requireObject(config, "container image config");
   if (config.os !== "linux" || config.architecture !== "amd64") {
@@ -891,6 +1047,21 @@ async function readBoundedJsonDocument(filePath, label, maximumBytes) {
   }
 }
 
+async function readBoundedText(filePath, label, maximumBytes) {
+  let bytes;
+  try {
+    bytes = await readFile(filePath);
+  } catch (error) {
+    throw new Error(`${label} could not be read: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (bytes.byteLength > maximumBytes) {
+    throw new Error(`${label} exceeds its size limit`);
+  }
+  const value = bytes.toString("utf8");
+  if (value.includes("\ufffd")) throw new Error(`${label} is not valid UTF-8 text`);
+  return value;
+}
+
 async function writePrivateJson(filePath, value) {
   const text = `${JSON.stringify(value, null, 2)}\n`;
   await writeFile(filePath, text, { encoding: "utf8", mode: 0o600 });
@@ -910,6 +1081,12 @@ function assertSingleLine(value, label) {
 function assertEqual(actual, expected, label) {
   if (actual !== expected) {
     throw new Error(`${label} must equal ${JSON.stringify(expected)}`);
+  }
+}
+
+function assertOpaqueEqual(actual, expected, label) {
+  if (actual !== expected) {
+    throw new Error(`${label} does not match the rendered FakeCo selection`);
   }
 }
 

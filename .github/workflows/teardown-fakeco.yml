@@ -85,10 +85,11 @@ jobs:
           role-to-assume: ${{ vars.FAKECO_GITHUB_ROLE_ARN }}
           unset-current-credentials: true
 
-      - name: Build retained-resource teardown plan
+      - name: Verify retention contract and delete stack
         shell: bash
         run: |
           set -euo pipefail
+          umask 077
           actual_account="$(aws sts get-caller-identity --query Account --output text)"
           [[ "$actual_account" == "$FAKECO_AWS_ACCOUNT_ID" ]]
           aws cloudformation describe-stacks \
@@ -97,24 +98,17 @@ jobs:
           aws cloudformation describe-stack-resources \
             --stack-name crabhelm-fakeco \
             --output json >"$RUNNER_TEMP/fakeco-resources.json"
+          aws cloudformation get-template \
+            --stack-name crabhelm-fakeco \
+            --template-stage Original \
+            --output json >"$RUNNER_TEMP/fakeco-live-template.json"
           node deploy/aws/fakeco/foundation.mjs teardown-plan \
             --rendered "$RUNNER_TEMP/fakeco-rendered.json" \
             --stack "$RUNNER_TEMP/fakeco-stack.json" \
             --resources "$RUNNER_TEMP/fakeco-resources.json" \
+            --template deploy/aws/template.yaml \
+            --live-template-response "$RUNNER_TEMP/fakeco-live-template.json" \
             --output "$RUNNER_TEMP/fakeco-teardown-plan.json"
-
-      - name: Preserve teardown plan
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: fakeco-teardown-plan-${{ github.run_id }}
-          path: ${{ runner.temp }}/fakeco-teardown-plan.json
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Delete stack in standard mode
-        shell: bash
-        run: |
-          set -euo pipefail
           aws cloudformation delete-stack \
             --stack-name crabhelm-fakeco \
             --role-arn "$FAKECO_CLOUDFORMATION_SERVICE_ROLE_ARN" \
@@ -125,5 +119,6 @@ jobs:
             '### FakeCo stack deleted' \
             '- CloudFormation deletion mode: STANDARD' \
             '- no force-delete fallback' \
-            '- retained-resource plan uploaded before deletion' \
+            '- live retention contract verified before deletion' \
+            '- resource inventory remained on the ephemeral runner' \
             '- external account-foundation resources untouched' >>"$GITHUB_STEP_SUMMARY"
