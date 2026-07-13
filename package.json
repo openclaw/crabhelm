@@ -56,7 +56,7 @@
     "README.md",
     "openclaw.plugin.json"
   ],
-  "packageManager": "pnpm@11.2.2",
+  "packageManager": "pnpm@11.11.0",
   "openclaw": {
     "extensions": [
       "./dist/index.js"
