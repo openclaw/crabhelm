@@ -84,7 +84,12 @@ if (
   manifest.crabhelm?.file !== expected.crabhelmFile ||
   manifest.bootstrap?.file !== expected.bootstrapFile || manifest.guestInstall?.file !== expected.guestInstallFile ||
   manifest.runtimeBridge?.file !== expected.runtimeBridgeFile ||
-  manifest.openclaw?.version !== "2026.6.11" || manifest.slack?.version !== "2026.6.11" || manifest.otel?.version !== "2026.6.11" ||
+  manifest.openclaw?.version !== "2026.7.1" ||
+  manifest.openclaw?.sourceCommit !== "2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4" ||
+  !Array.isArray(manifest.openclaw?.backports) || manifest.openclaw.backports.length !== 2 ||
+  manifest.openclaw.backports[0] !== "6db586a388c639796e312811b4d9801ca6ce1806" ||
+  manifest.openclaw.backports[1] !== "ef110e9a0f42e5c99d56f0126e7e42c4284865aa" ||
+  manifest.slack?.version !== "2026.7.1" || manifest.otel?.version !== "2026.7.1" ||
   typeof manifest.crabhelm?.version !== "string" || !manifest.crabhelm.version ||
   !sha.test(manifest.node?.sha256) || !sha.test(manifest.openclaw?.sha256) || !sha.test(manifest.slack?.sha256) || !sha.test(manifest.otel?.sha256) ||
   !sha.test(manifest.crabhelm?.sha256) ||

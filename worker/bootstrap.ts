@@ -199,7 +199,7 @@ export class CrabboxWorkspaceBootstrap {
       return {
         ready: true,
         message: "OpenClaw Gateway and live inference probe are healthy",
-        gatewayVersion: "2026.6.11",
+        gatewayVersion: "2026.7.1",
       };
     }
     return {
@@ -781,11 +781,11 @@ export function inferenceProbeCommand(
   const modelProbeOutput = "/tmp/crabhelm-model-probe.json";
   const modelProbeError = "/tmp/crabhelm-model-probe.err";
   const runtimeLauncher = `${home}/.local/share/crabhelm/runtime/start-runtime-bridge.sh`;
-  const openclawCli = `${home}/.local/share/crabhelm/openclaw-2026.6.11/bin/openclaw`;
+  const openclawCli = `${home}/.local/share/crabhelm/openclaw-2026.7.1/bin/openclaw`;
   const nodeBinary = `${home}/.local/share/crabhelm/node-v22.23.1-${nodeId}-linux-x64/bin/node`;
   const quotePath = (value: string) => systemManaged ? shellQuote(value) : `"${value}"`;
   const agentCommand = systemManaged
-    ? `sudo -n -u crabhelm-agent /usr/bin/env HOME=${home} OPENCLAW_STATE_DIR=${home}/.openclaw PATH=${home}/.local/share/crabhelm/node-v22.23.1-${nodeId}-linux-x64/bin:${home}/.local/share/crabhelm/openclaw-2026.6.11/bin:/usr/local/bin:/usr/bin:/bin`
+    ? `sudo -n -u crabhelm-agent /usr/bin/env HOME=${home} OPENCLAW_STATE_DIR=${home}/.openclaw PATH=${home}/.local/share/crabhelm/node-v22.23.1-${nodeId}-linux-x64/bin:${home}/.local/share/crabhelm/openclaw-2026.7.1/bin:/usr/local/bin:/usr/bin:/bin`
     : "/usr/bin/env";
   const restartCommand = systemManaged
     ? "sudo -n /usr/bin/systemctl restart crabhelm-agent.service"
@@ -850,7 +850,7 @@ export function inferenceProbeCommand(
     "    probe_result=GATEWAY_FAILED",
     ...(routerBaseUrl
       ? [
-          `  elif ! timeout -k 10 90 "\${agent_command[@]}" "$openclaw_cli" models status --probe --probe-provider clawrouter --probe-max-tokens 8 --json >${modelProbeOutput} 2>${modelProbeError}; then`,
+          `  elif ! timeout -k 10 90 "\${agent_command[@]}" "$openclaw_cli" models status --probe --probe-provider clawrouter --probe-max-tokens 16 --json >${modelProbeOutput} 2>${modelProbeError}; then`,
           "    probe_result=MODEL_PROBE_FAILED",
           `  elif ! chmod 0644 ${modelProbeOutput} ${modelProbeError} || ! "\${agent_command[@]}" "$node_binary" --input-type=commonjs -e ${shellQuote(validateModelProbe)} ${modelProbeOutput}; then`,
           "    probe_result=MODEL_PROBE_FAILED",
@@ -1268,7 +1268,7 @@ mv -f "$marker_temporary" "$marker_dir/crabhelm-credentials-generation"`;
   const agentHome = "/var/lib/crabhelm-agent";
   const stateDir = `${agentHome}/.openclaw`;
   const nodeBin = `${agentHome}/.local/share/crabhelm/node-v22.23.1-${options.nodeSha256}-linux-x64/bin`;
-  const openclawBin = `${agentHome}/.local/share/crabhelm/openclaw-2026.6.11/bin`;
+  const openclawBin = `${agentHome}/.local/share/crabhelm/openclaw-2026.7.1/bin`;
   const readyId = `${options.releaseId}.${options.archiveId}.${options.nodeSha256}:${options.policyHash}`;
   const egressDependencies = options.egressLockdown === "required"
     ? "Requires=crabhelm-egress.service\nAfter=crabhelm-egress.service network-online.target"
