@@ -17,6 +17,10 @@ repo_root="$(cd -- "$script_dir/../.." && pwd -P)"
 source "$script_dir/profile.conf"
 profile="${profile:?profile.conf must set profile}"
 openclaw_version="${openclaw_version:?profile.conf must set openclaw_version}"
+openclaw_source_commit="${openclaw_source_commit:?profile.conf must set openclaw_source_commit}"
+openclaw_backport_commit="${openclaw_backport_commit:?profile.conf must set openclaw_backport_commit}"
+openclaw_migration_backport_commit="${openclaw_migration_backport_commit:?profile.conf must set openclaw_migration_backport_commit}"
+openclaw_tarball_sha256="${openclaw_tarball_sha256:?profile.conf must set openclaw_tarball_sha256}"
 slack_plugin_version="${slack_plugin_version:?profile.conf must set slack_plugin_version}"
 otel_plugin_version="${otel_plugin_version:?profile.conf must set otel_plugin_version}"
 node_version="${node_version:?profile.conf must set node_version}"
@@ -77,6 +81,10 @@ command -v node >/dev/null || die "node is required"
 command -v npm >/dev/null || die "npm is required"
 command -v sha256sum >/dev/null || die "sha256sum is required"
 command -v tar >/dev/null || die "tar is required"
+[[ "$openclaw_tarball_sha256" =~ ^[0-9a-f]{64}$ ]] || die "profile OpenClaw tarball digest is invalid"
+openclaw_sha256="$(sha256sum "$openclaw_source")"
+openclaw_sha256="${openclaw_sha256%% *}"
+[[ "$openclaw_sha256" = "$openclaw_tarball_sha256" ]] || die "OpenClaw tarball does not match the reviewed profile digest"
 
 if [[ -e "$output" || -L "$output" ]]; then
   [[ -d "$output" && ! -L "$output" ]] || die "output must be a normal directory"
@@ -104,16 +112,22 @@ process.stdin.on("end", () => {
 install -m 0400 "$node_source" "$artifacts/node-linux-x64.tar.xz"
 
 package_json="$(tar -xOf "$openclaw_source" package/package.json 2>/dev/null)" || die "OpenClaw tarball has no package/package.json"
-reported_version="$(node -e '
+node -e '
 const chunks = [];
 process.stdin.on("data", (chunk) => chunks.push(chunk));
 process.stdin.on("end", () => {
   const value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  if (value.name !== "openclaw" || typeof value.version !== "string") process.exit(2);
-  process.stdout.write(value.version);
+  const [expectedVersion, expectedSourceCommit, expectedBackportCommit, expectedMigrationBackportCommit] = process.argv.slice(1);
+  if (
+    value.name !== "openclaw" || value.version !== expectedVersion ||
+    value.crabhelmAppliance?.sourceCommit !== expectedSourceCommit ||
+    !Array.isArray(value.crabhelmAppliance?.backports) ||
+    value.crabhelmAppliance.backports.length !== 2 ||
+    value.crabhelmAppliance.backports[0] !== expectedBackportCommit ||
+    value.crabhelmAppliance.backports[1] !== expectedMigrationBackportCommit
+  ) process.exit(2);
 });
-' <<<"$package_json")" || die "OpenClaw package metadata is invalid"
-[[ "$reported_version" = "$openclaw_version" ]] || die "OpenClaw tarball must contain version $openclaw_version"
+' "$openclaw_version" "$openclaw_source_commit" "$openclaw_backport_commit" "$openclaw_migration_backport_commit" <<<"$package_json" || die "OpenClaw tarball must contain the reviewed version and source provenance"
 
 slack_package_json="$(tar -xOf "$slack_source" package/package.json 2>/dev/null)" || die "Slack plugin tarball has no package/package.json"
 reported_slack_version="$(node -e '
@@ -151,13 +165,14 @@ cleanup_slack_repack() {
 trap cleanup_slack_repack EXIT
 tar -xzf "$slack_source" -C "$slack_repack" --no-same-owner
 [[ -z "$(find "$slack_repack/package" -type l -print -quit)" ]] || die "Slack plugin tarball must not contain symlinks"
-node - "$slack_repack/package/package.json" "$slack_source_sha256" <<'NODE'
+node - "$slack_repack/package/package.json" "$slack_source_sha256" "$slack_plugin_version" <<'NODE'
 const { access, readFile, writeFile } = await import("node:fs/promises");
 const path = await import("node:path");
 const file = process.argv[2];
 const sourceSha256 = process.argv[3];
+const expectedVersion = process.argv[4];
 const value = JSON.parse(await readFile(file, "utf8"));
-if (value.name !== "@openclaw/slack" || value.version !== "2026.6.11") process.exit(2);
+if (value.name !== "@openclaw/slack" || value.version !== expectedVersion) process.exit(2);
 for (const dependency of Object.keys(value.dependencies ?? {})) {
   await access(path.join(path.dirname(file), "node_modules", ...dependency.split("/"), "package.json"));
 }
@@ -204,13 +219,14 @@ cleanup_otel_repack() {
 trap cleanup_otel_repack EXIT
 tar -xzf "$otel_source" -C "$otel_repack" --no-same-owner
 [[ -z "$(find "$otel_repack/package" -type l -print -quit)" ]] || die "OpenTelemetry plugin tarball must not contain symlinks"
-node - "$otel_repack/package/package.json" "$otel_source_sha256" <<'NODE'
+node - "$otel_repack/package/package.json" "$otel_source_sha256" "$otel_plugin_version" <<'NODE'
 const { readFile, writeFile } = await import("node:fs/promises");
 const path = await import("node:path");
 const file = process.argv[2];
 const sourceSha256 = process.argv[3];
+const expectedVersion = process.argv[4];
 const value = JSON.parse(await readFile(file, "utf8"));
-if (value.name !== "@openclaw/diagnostics-otel" || value.version !== "2026.6.11") process.exit(2);
+if (value.name !== "@openclaw/diagnostics-otel" || value.version !== expectedVersion) process.exit(2);
 const packageRoot = path.dirname(file);
 const visited = new Set();
 const pending = [{ directory: packageRoot, metadata: value }];
@@ -255,8 +271,6 @@ install -m 0500 "$repo_root/deploy/bootstrap-child.sh" "$output/bootstrap-child.
 install -m 0500 "$script_dir/guest-install.sh" "$output/guest-install.sh"
 install -m 0400 "$repo_root/deploy/runtime-bridge.mjs" "$output/runtime-bridge.mjs"
 
-openclaw_sha256="$(sha256sum "$artifacts/openclaw.tgz")"
-openclaw_sha256="${openclaw_sha256%% *}"
 node_sha256="$(sha256sum "$artifacts/node-linux-x64.tar.xz")"
 node_sha256="${node_sha256%% *}"
 slack_sha256="$(sha256sum "$artifacts/slack.tgz")"
@@ -273,13 +287,13 @@ runtime_bridge_sha256="$(sha256sum "$output/runtime-bridge.mjs")"
 runtime_bridge_sha256="${runtime_bridge_sha256%% *}"
 
 crabhelm_version="$(node -p 'require(process.argv[1]).version' "$repo_root/package.json")"
-node - "$output/manifest.json" "$node_version" "$node_sha256" "$openclaw_version" "$openclaw_sha256" "$slack_plugin_version" "$slack_sha256" "$otel_plugin_version" "$otel_sha256" "$crabhelm_version" "$crabhelm_sha256" "$bootstrap_sha256" "$guest_install_sha256" "$runtime_bridge_sha256" <<'NODE'
-const [file, nodeVersion, nodeSha256, openclawVersion, openclawSha256, slackVersion, slackSha256, otelVersion, otelSha256, crabhelmVersion, crabhelmSha256, bootstrapSha256, guestInstallSha256, runtimeBridgeSha256] = process.argv.slice(2);
+node - "$output/manifest.json" "$node_version" "$node_sha256" "$openclaw_version" "$openclaw_source_commit" "$openclaw_backport_commit" "$openclaw_migration_backport_commit" "$openclaw_sha256" "$slack_plugin_version" "$slack_sha256" "$otel_plugin_version" "$otel_sha256" "$crabhelm_version" "$crabhelm_sha256" "$bootstrap_sha256" "$guest_install_sha256" "$runtime_bridge_sha256" <<'NODE'
+const [file, nodeVersion, nodeSha256, openclawVersion, openclawSourceCommit, openclawBackportCommit, openclawMigrationBackportCommit, openclawSha256, slackVersion, slackSha256, otelVersion, otelSha256, crabhelmVersion, crabhelmSha256, bootstrapSha256, guestInstallSha256, runtimeBridgeSha256] = process.argv.slice(2);
 const manifest = {
   schemaVersion: 1,
   profile: "openclaw-core",
   node: { file: "artifacts/node-linux-x64.tar.xz", version: nodeVersion, platform: "linux", arch: "x64", sha256: nodeSha256 },
-  openclaw: { file: "artifacts/openclaw.tgz", version: openclawVersion, sha256: openclawSha256 },
+  openclaw: { file: "artifacts/openclaw.tgz", version: openclawVersion, sourceCommit: openclawSourceCommit, backports: [openclawBackportCommit, openclawMigrationBackportCommit], sha256: openclawSha256 },
   slack: { file: "artifacts/slack.tgz", version: slackVersion, sha256: slackSha256 },
   otel: { file: "artifacts/diagnostics-otel.tgz", version: otelVersion, sha256: otelSha256 },
   crabhelm: { file: "artifacts/crabhelm.tgz", version: crabhelmVersion, sha256: crabhelmSha256 },
@@ -296,6 +310,10 @@ printf '%s\n' "bundle=$output"
 printf '%s\n' "profile=$profile"
 printf '%s\n' "node_version=$node_version"
 printf '%s\n' "openclaw_version=$openclaw_version"
+printf '%s\n' "openclaw_source_commit=$openclaw_source_commit"
+printf '%s\n' "openclaw_backport_commit=$openclaw_backport_commit"
+printf '%s\n' "openclaw_migration_backport_commit=$openclaw_migration_backport_commit"
+printf '%s\n' "openclaw_tarball_sha256=$openclaw_tarball_sha256"
 printf '%s\n' "slack_plugin_version=$slack_plugin_version"
 printf '%s\n' "otel_plugin_version=$otel_plugin_version"
 printf '%s\n' "manifest_sha256=$manifest_sha256"

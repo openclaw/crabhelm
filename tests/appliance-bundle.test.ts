@@ -1,16 +1,32 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
 const run = promisify(execFile);
-const builder = path.resolve("deploy/crabbox-profile/build-bundle.sh");
+const builderSource = path.resolve("deploy/crabbox-profile/build-bundle.sh");
+const guestInstallSource = path.resolve("deploy/crabbox-profile/guest-install.sh");
+const profileSource = path.resolve("deploy/crabbox-profile/profile.conf");
+const openclawSourceCommit = "2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4";
+const openclawBackportCommit = "6db586a388c639796e312811b4d9801ca6ce1806";
+const openclawMigrationBackportCommit = "ef110e9a0f42e5c99d56f0126e7e42c4284865aa";
 
-test("appliance builder pins artifacts and guest install verifies the bundle before bootstrap", async () => {
+function openclawMetadata(version = "2026.7.1") {
+  return {
+    name: "openclaw",
+    version,
+    crabhelmAppliance: {
+      sourceCommit: openclawSourceCommit,
+      backports: [openclawBackportCommit, openclawMigrationBackportCommit],
+    },
+  };
+}
+
+test("appliance builder pins artifacts and guest install verifies the bundle before bootstrap", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "crabhelm-appliance-"));
   const source = path.join(root, "source");
   const packageDir = path.join(source, "package");
@@ -24,23 +40,25 @@ test("appliance builder pins artifacts and guest install verifies the bundle bef
   await mkdir(packageDir, { recursive: true });
   await writeFile(
     path.join(packageDir, "package.json"),
-    `${JSON.stringify({ name: "openclaw", version: "2026.6.11" })}\n`,
+    `${JSON.stringify(openclawMetadata())}\n`,
   );
   await run("tar", ["-czf", openclawTarball, "-C", source, "package"]);
   await mkdir(path.join(slackSource, "package"), { recursive: true });
   await writeFile(
     path.join(slackSource, "package", "package.json"),
-    `${JSON.stringify({ name: "@openclaw/slack", version: "2026.6.11" })}\n`,
+    `${JSON.stringify({ name: "@openclaw/slack", version: "2026.7.1" })}\n`,
   );
   await run("tar", ["-czf", slackTarball, "-C", slackSource, "package"]);
   await mkdir(path.join(otelSource, "package"), { recursive: true });
   await writeFile(
     path.join(otelSource, "package", "package.json"),
-    `${JSON.stringify({ name: "@openclaw/diagnostics-otel", version: "2026.6.11" })}\n`,
+    `${JSON.stringify({ name: "@openclaw/diagnostics-otel", version: "2026.7.1" })}\n`,
   );
   await run("tar", ["-czf", otelTarball, "-C", otelSource, "package"]);
+  const builder = await createTestBuilder(openclawTarball);
+  t.after(builder.cleanup);
 
-  const built = await run(builder, [
+  const built = await run(builder.path, [
     "--node-tarball",
     nodeTarball,
     "--openclaw-tarball",
@@ -57,12 +75,17 @@ test("appliance builder pins artifacts and guest install verifies the bundle bef
   assert.match(built.stdout, /profile=openclaw-core/);
   const manifestBytes = await readFile(path.join(output, "manifest.json"));
   const manifest = JSON.parse(manifestBytes.toString("utf8"));
-  assert.equal(manifest.openclaw.version, "2026.6.11");
+  assert.equal(manifest.openclaw.version, "2026.7.1");
+  assert.equal(manifest.openclaw.sourceCommit, openclawSourceCommit);
+  assert.deepEqual(manifest.openclaw.backports, [
+    openclawBackportCommit,
+    openclawMigrationBackportCommit,
+  ]);
   assert.equal(manifest.node.version, "22.23.1");
   assert.equal(manifest.node.platform, "linux");
   assert.equal(manifest.node.arch, "x64");
-  assert.equal(manifest.slack.version, "2026.6.11");
-  assert.equal(manifest.otel.version, "2026.6.11");
+  assert.equal(manifest.slack.version, "2026.7.1");
+  assert.equal(manifest.otel.version, "2026.7.1");
   assert.equal(manifest.crabhelm.version, "0.0.0");
   assert.equal(manifest.openclaw.sha256, digest(await readFile(path.join(output, manifest.openclaw.file))));
   assert.equal(manifest.slack.sha256, digest(await readFile(path.join(output, manifest.slack.file))));
@@ -189,7 +212,7 @@ printf '\n' >>"${log}"
 `);
   await executable(path.join(bin, "openclaw"), `#!/usr/bin/env bash
 if [[ "\${1:-}" = --version ]]; then
-  printf '%s\n' 'OpenClaw 2026.6.11 (test)'
+  printf '%s\n' 'OpenClaw 2026.7.1 (test)'
   exit 0
 fi
 credential=absent
@@ -264,7 +287,31 @@ printf '\n' >>"${log}"
   assert.equal(await readFile(log, "utf8"), retryCalls);
 });
 
-test("appliance builder rejects a different OpenClaw version", async () => {
+test("appliance builder rejects OpenClaw bytes outside the reviewed profile digest", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "crabhelm-appliance-digest-"));
+  const nodeTarball = path.join(root, "node.tar.xz");
+  const openclawTarball = path.join(root, "openclaw.tgz");
+  const slackTarball = path.join(root, "slack.tgz");
+  const otelTarball = path.join(root, "diagnostics-otel.tgz");
+  await Promise.all([
+    writeFile(nodeTarball, "not a node archive\n"),
+    writeFile(openclawTarball, "unreviewed OpenClaw bytes\n"),
+    writeFile(slackTarball, "not a Slack archive\n"),
+    writeFile(otelTarball, "not an OTel archive\n"),
+  ]);
+  await assert.rejects(
+    run(builderSource, [
+      "--node-tarball", nodeTarball,
+      "--openclaw-tarball", openclawTarball,
+      "--slack-tarball", slackTarball,
+      "--otel-tarball", otelTarball,
+      "--output", path.join(root, "bundle"),
+    ]),
+    /OpenClaw tarball does not match the reviewed profile digest/,
+  );
+});
+
+test("appliance builder rejects a different OpenClaw version", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "crabhelm-appliance-version-"));
   const source = path.join(root, "source");
   const packageDir = path.join(source, "package");
@@ -277,23 +324,25 @@ test("appliance builder rejects a different OpenClaw version", async () => {
   await mkdir(packageDir, { recursive: true });
   await writeFile(
     path.join(packageDir, "package.json"),
-    `${JSON.stringify({ name: "openclaw", version: "2099.1.0" })}\n`,
+    `${JSON.stringify(openclawMetadata("2099.1.0"))}\n`,
   );
   await run("tar", ["-czf", openclawTarball, "-C", source, "package"]);
   await mkdir(path.join(slackSource, "package"), { recursive: true });
   await writeFile(
     path.join(slackSource, "package", "package.json"),
-    `${JSON.stringify({ name: "@openclaw/slack", version: "2026.6.11" })}\n`,
+    `${JSON.stringify({ name: "@openclaw/slack", version: "2026.7.1" })}\n`,
   );
   await run("tar", ["-czf", slackTarball, "-C", slackSource, "package"]);
   await mkdir(path.join(otelSource, "package"), { recursive: true });
   await writeFile(
     path.join(otelSource, "package", "package.json"),
-    `${JSON.stringify({ name: "@openclaw/diagnostics-otel", version: "2026.6.11" })}\n`,
+    `${JSON.stringify({ name: "@openclaw/diagnostics-otel", version: "2026.7.1" })}\n`,
   );
   await run("tar", ["-czf", otelTarball, "-C", otelSource, "package"]);
+  const builder = await createTestBuilder(openclawTarball);
+  t.after(builder.cleanup);
   await assert.rejects(
-    run(builder, [
+    run(builder.path, [
       "--node-tarball",
       nodeTarball,
       "--openclaw-tarball",
@@ -305,11 +354,11 @@ test("appliance builder rejects a different OpenClaw version", async () => {
       "--output",
       path.join(root, "bundle"),
     ]),
-    /must contain version 2026\.6\.11/,
+    /must contain the reviewed version and source provenance/,
   );
 });
 
-test("appliance builder rejects missing transitive OTel dependencies", async () => {
+test("appliance builder rejects missing transitive OTel dependencies", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "crabhelm-appliance-otel-deps-"));
   const openclawSource = path.join(root, "openclaw-source", "package");
   const slackSource = path.join(root, "slack-source", "package");
@@ -321,16 +370,18 @@ test("appliance builder rejects missing transitive OTel dependencies", async () 
   await mkdir(openclawSource, { recursive: true });
   await mkdir(slackSource, { recursive: true });
   await mkdir(path.join(otelSource, "node_modules", "otel-direct"), { recursive: true });
-  await writeFile(path.join(openclawSource, "package.json"), `${JSON.stringify({ name: "openclaw", version: "2026.6.11" })}\n`);
-  await writeFile(path.join(slackSource, "package.json"), `${JSON.stringify({ name: "@openclaw/slack", version: "2026.6.11" })}\n`);
-  await writeFile(path.join(otelSource, "package.json"), `${JSON.stringify({ name: "@openclaw/diagnostics-otel", version: "2026.6.11", dependencies: { "otel-direct": "1.0.0" } })}\n`);
+  await writeFile(path.join(openclawSource, "package.json"), `${JSON.stringify(openclawMetadata())}\n`);
+  await writeFile(path.join(slackSource, "package.json"), `${JSON.stringify({ name: "@openclaw/slack", version: "2026.7.1" })}\n`);
+  await writeFile(path.join(otelSource, "package.json"), `${JSON.stringify({ name: "@openclaw/diagnostics-otel", version: "2026.7.1", dependencies: { "otel-direct": "1.0.0" } })}\n`);
   await writeFile(path.join(otelSource, "node_modules", "otel-direct", "package.json"), `${JSON.stringify({ name: "otel-direct", version: "1.0.0", dependencies: { "otel-missing": "1.0.0" } })}\n`);
   await run("tar", ["-czf", openclawTarball, "-C", path.dirname(openclawSource), "package"]);
   await run("tar", ["-czf", slackTarball, "-C", path.dirname(slackSource), "package"]);
   await run("tar", ["-czf", otelTarball, "-C", path.dirname(otelSource), "package"]);
+  const builder = await createTestBuilder(openclawTarball);
+  t.after(builder.cleanup);
 
   await assert.rejects(
-    run(builder, [
+    run(builder.path, [
       "--node-tarball", nodeTarball,
       "--openclaw-tarball", openclawTarball,
       "--slack-tarball", slackTarball,
@@ -340,6 +391,24 @@ test("appliance builder rejects missing transitive OTel dependencies", async () 
     /missing embedded runtime dependency: otel-missing/,
   );
 });
+
+async function createTestBuilder(openclawTarball: string): Promise<{ path: string; cleanup: () => Promise<void> }> {
+  const scriptDir = await mkdtemp(path.join(path.resolve("deploy"), ".crabhelm-appliance-test-"));
+  const builder = path.join(scriptDir, "build-bundle.sh");
+  await copyFile(builderSource, builder);
+  await copyFile(guestInstallSource, path.join(scriptDir, "guest-install.sh"));
+  const profile = await readFile(profileSource, "utf8");
+  const openclawSha256 = digest(await readFile(openclawTarball));
+  await writeFile(
+    path.join(scriptDir, "profile.conf"),
+    profile.replace(/^openclaw_tarball_sha256=.*$/mu, `openclaw_tarball_sha256=${openclawSha256}`),
+  );
+  await chmod(builder, 0o500);
+  return {
+    path: builder,
+    cleanup: () => rm(scriptDir, { recursive: true, force: true }),
+  };
+}
 
 async function createNodeFixture(root: string): Promise<string> {
   const nodeRoot = path.join(root, "node-v22.23.1-linux-x64");
