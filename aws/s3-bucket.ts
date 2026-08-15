@@ -45,6 +45,8 @@ export type S3BucketOptions = {
   kmsKeyId?: string;
 };
 
+const maxConsumedObjectBytes = 32 * 1024;
+
 /** Minimal R2Bucket-compatible adapter used by the portable control plane. */
 export class AwsS3Bucket {
   readonly #client: S3Client;
@@ -179,11 +181,19 @@ async function consumeBody(body: ReadableStream<Uint8Array>): Promise<ArrayBuffe
   const chunks: Uint8Array[] = [];
   let size = 0;
   const reader = body.getReader();
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    size += value.byteLength;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxConsumedObjectBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error("object body exceeds the read limit");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* cancel() already released the lock */ }
   }
   const bytes = new Uint8Array(size);
   let offset = 0;

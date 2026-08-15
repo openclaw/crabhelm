@@ -35,6 +35,21 @@ test("S3 adapter preserves bodies and metadata", async () => {
   assert.equal(client.lastPut?.ServerSideEncryption, "aws:kms");
 });
 
+test("S3 adapter caps object body reads used by vault get", async () => {
+  const client = new FakeS3Client();
+  const bucket = new AwsS3Bucket(client as unknown as S3Client, "test-bucket");
+  const huge = "x".repeat(64 * 1024);
+  await bucket.put("oauth/conn.json", huge, {
+    httpMetadata: { contentType: "application/json" },
+  });
+  const object = await bucket.get("oauth/conn.json");
+  assert.ok(object);
+  await assert.rejects(() => object.text(), /read limit/u);
+  const streamed = await bucket.get("oauth/conn.json");
+  assert.ok(streamed);
+  assert.equal(await new Response(streamed.body).text(), huge);
+});
+
 test("SQS adapter serializes JSON and audit consumer reports partial failures", async () => {
   const client = new FakeSqsClient();
   const queue = new AwsSqsQueue(client as unknown as SQSClient, "https://sqs.example/test");
