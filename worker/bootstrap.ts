@@ -562,6 +562,8 @@ async function captureTerminalSection(
   });
 }
 
+const handshakeTimeoutMs = 15_000;
+
 async function cloudflareTerminalDialer(
   attachUrl: string,
   brokerToken: string,
@@ -569,13 +571,23 @@ async function cloudflareTerminalDialer(
   const url = new URL(attachUrl);
   if (url.protocol !== "wss:") throw new Error("Crabbox terminal URL must use WSS");
   url.protocol = "https:";
-  const response = await fetch(url, {
-    headers: { authorization: `Bearer ${brokerToken}`, upgrade: "websocket" },
-  }) as Response & { webSocket?: WorkerWebSocket };
-  const socket = response.webSocket;
-  if (response.status !== 101 || !socket) throw new Error(`Crabbox terminal upgrade failed (HTTP ${response.status})`);
-  socket.accept();
-  return socket;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), handshakeTimeoutMs);
+  try {
+    const response = await fetch(url, {
+      headers: { authorization: `Bearer ${brokerToken}`, upgrade: "websocket" },
+      signal: controller.signal,
+    }) as Response & { webSocket?: WorkerWebSocket };
+    const socket = response.webSocket;
+    if (response.status !== 101 || !socket) throw new Error(`Crabbox terminal upgrade failed (HTTP ${response.status})`);
+    socket.accept();
+    return socket;
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error("Crabbox terminal handshake timed out");
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function terminalInferenceFailure(

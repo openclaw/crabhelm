@@ -508,3 +508,38 @@ test("live inference proof is re-keyed by managed policy", async () => {
   assert.ok(changed.includes(`'v5:${testReleaseMarker}:p${second}:openai/gpt-5.5'`));
   await run("/bin/bash", ["-n", "-c", changed]);
 });
+
+test("Cloudflare terminal upgrade fetch carries a handshake abort signal", async (t) => {
+  const seen: Array<AbortSignal | null | undefined> = [];
+  const original = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    seen.push(init?.signal);
+    return new Response(null, { status: 504 });
+  }) as typeof fetch;
+
+  const claw = createClawRecord({
+    name: "Terminal child",
+    owner: { subject: "github:terminal", label: "@terminal", source: "github" },
+  });
+  const bootstrap = new CrabboxWorkspaceBootstrap({
+    brokerToken: "broker-test-token",
+    publicUrl: "https://crabhelm.example.test",
+    releaseId: "a".repeat(64),
+    archiveId: "c".repeat(64),
+    nodeId: "e".repeat(64),
+    signingSecret: testSigningKey,
+  });
+
+  await assert.rejects(
+    () => bootstrap.runtimeDiagnostics(claw, {
+      status: "ready",
+      attachUrl: "wss://crabbox.example.test/attach",
+    }),
+    /terminal upgrade failed/u,
+  );
+  assert.equal(seen.length, 1);
+  assert.ok(seen[0] instanceof AbortSignal);
+});
