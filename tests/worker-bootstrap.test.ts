@@ -509,15 +509,18 @@ test("live inference proof is re-keyed by managed policy", async () => {
   await run("/bin/bash", ["-n", "-c", changed]);
 });
 
-test("Cloudflare terminal upgrade fetch carries a handshake abort signal", async (t) => {
+test("Cloudflare terminal upgrade aborts a hung handshake after 15 seconds", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const seen: Array<AbortSignal | null | undefined> = [];
   const original = globalThis.fetch;
   t.after(() => {
     globalThis.fetch = original;
   });
-  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+  globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit) => {
     seen.push(init?.signal);
-    return new Response(null, { status: 504 });
+    return new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+    });
   }) as typeof fetch;
 
   const claw = createClawRecord({
@@ -533,13 +536,14 @@ test("Cloudflare terminal upgrade fetch carries a handshake abort signal", async
     signingSecret: testSigningKey,
   });
 
-  await assert.rejects(
-    () => bootstrap.runtimeDiagnostics(claw, {
-      status: "ready",
-      attachUrl: "wss://crabbox.example.test/attach",
-    }),
-    /terminal upgrade failed/u,
-  );
+  const diagnostics = bootstrap.runtimeDiagnostics(claw, {
+    status: "ready",
+    attachUrl: "wss://crabbox.example.test/attach",
+  });
+  t.mock.timers.tick(15_000);
+
+  await assert.rejects(diagnostics, /terminal handshake timed out/u);
   assert.equal(seen.length, 1);
   assert.ok(seen[0] instanceof AbortSignal);
+  assert.equal(seen[0].aborted, true);
 });
