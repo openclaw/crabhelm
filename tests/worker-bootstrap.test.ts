@@ -508,3 +508,42 @@ test("live inference proof is re-keyed by managed policy", async () => {
   assert.ok(changed.includes(`'v5:${testReleaseMarker}:p${second}:openai/gpt-5.5'`));
   await run("/bin/bash", ["-n", "-c", changed]);
 });
+
+test("Cloudflare terminal upgrade aborts a hung handshake after 15 seconds", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const seen: Array<AbortSignal | null | undefined> = [];
+  const original = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+  globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit) => {
+    seen.push(init?.signal);
+    return new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+    });
+  }) as typeof fetch;
+
+  const claw = createClawRecord({
+    name: "Terminal child",
+    owner: { subject: "github:terminal", label: "@terminal", source: "github" },
+  });
+  const bootstrap = new CrabboxWorkspaceBootstrap({
+    brokerToken: "broker-test-token",
+    publicUrl: "https://crabhelm.example.test",
+    releaseId: "a".repeat(64),
+    archiveId: "c".repeat(64),
+    nodeId: "e".repeat(64),
+    signingSecret: testSigningKey,
+  });
+
+  const diagnostics = bootstrap.runtimeDiagnostics(claw, {
+    status: "ready",
+    attachUrl: "wss://crabbox.example.test/attach",
+  });
+  t.mock.timers.tick(15_000);
+
+  await assert.rejects(diagnostics, /terminal handshake timed out/u);
+  assert.equal(seen.length, 1);
+  assert.ok(seen[0] instanceof AbortSignal);
+  assert.equal(seen[0].aborted, true);
+});
