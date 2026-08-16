@@ -9,6 +9,7 @@ import { AuditQueuePoller } from "../../aws/audit-poller.js";
 import { LocalAssetsFetcher } from "../../aws/local-assets.js";
 import { AwsS3Bucket } from "../../aws/s3-bucket.js";
 import { archiveAuditBatch, AwsSqsQueue } from "../../aws/sqs-queue.js";
+import { OAuthVault } from "../../worker/vault.js";
 
 test("S3 adapter preserves bodies and metadata", async () => {
   const client = new FakeS3Client();
@@ -33,6 +34,24 @@ test("S3 adapter preserves bodies and metadata", async () => {
   await bucket.delete("objects/one.txt");
   assert.equal(await bucket.get("objects/one.txt"), null);
   assert.equal(client.lastPut?.ServerSideEncryption, "aws:kms");
+});
+
+test("vault caps S3 credential reads without capping the general bucket adapter", async () => {
+  const client = new FakeS3Client();
+  const bucket = new AwsS3Bucket(client as unknown as S3Client, "test-bucket");
+  const huge = "x".repeat(64 * 1024);
+  await bucket.put("oauth/conn.json", huge);
+
+  const object = await bucket.get("oauth/conn.json");
+  assert.ok(object);
+  assert.equal(await object.text(), huge);
+
+  const masterKey = Buffer.alloc(32, 7).toString("base64url");
+  const vault = new OAuthVault(bucket, masterKey);
+  await assert.rejects(
+    () => vault.get("oauth/conn.json", "conn", "principal", "github"),
+    /envelope is too large/u,
+  );
 });
 
 test("SQS adapter serializes JSON and audit consumer reports partial failures", async () => {

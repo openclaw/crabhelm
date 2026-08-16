@@ -1,17 +1,32 @@
 type Envelope = { v: 1; iv: string; ciphertext: string; createdAt: string };
+type VaultObject = {
+  readonly size: number;
+  text(): Promise<string>;
+  readonly body?: ReadableStream<Uint8Array>;
+};
+type VaultBucket = {
+  get(key: string): Promise<VaultObject | null>;
+  put(key: string, value: string, options?: {
+    httpMetadata?: { contentType?: string };
+    customMetadata?: Record<string, string>;
+  }): Promise<unknown>;
+  delete(key: string): Promise<unknown>;
+};
 const encoder = new TextEncoder();
+const maxSecretBytes = 16 * 1024;
+const maxEnvelopeBytes = 32 * 1024;
 
 export class OAuthVault {
-  readonly #bucket: R2Bucket;
+  readonly #bucket: VaultBucket;
   readonly #masterKey: string;
 
-  constructor(bucket: R2Bucket, masterKey: string) {
+  constructor(bucket: VaultBucket, masterKey: string) {
     this.#bucket = bucket;
     this.#masterKey = masterKey;
   }
 
   async put(connectionId: string, principalId: string, provider: string, secret: string): Promise<string> {
-    if (!secret || encoder.encode(secret).byteLength > 16 * 1024) throw new Error("OAuth secret is invalid");
+    if (!secret || encoder.encode(secret).byteLength > maxSecretBytes) throw new Error("OAuth secret is invalid");
     const key = vaultKey(connectionId);
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv: source(iv), additionalData: source(aad(connectionId, principalId, provider)) }, await this.#key(), source(encoder.encode(secret)));
@@ -24,7 +39,8 @@ export class OAuthVault {
     if (vaultObjectKey !== vaultKey(connectionId)) throw new Error("vault key does not match connection");
     const object = await this.#bucket.get(vaultObjectKey);
     if (!object) throw new Error("OAuth credential is unavailable");
-    const envelope = JSON.parse(await object.text()) as Envelope;
+    if (object.size > maxEnvelopeBytes) throw new Error("OAuth credential envelope is too large");
+    const envelope = JSON.parse(await readCappedText(object, maxEnvelopeBytes)) as Envelope;
     if (envelope.v !== 1) throw new Error("OAuth credential envelope is unsupported");
     try {
       const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: source(decode(envelope.iv)), additionalData: source(aad(connectionId, principalId, provider)) }, await this.#key(), source(decode(envelope.ciphertext)));
@@ -49,3 +65,42 @@ function decode(value: string): Uint8Array {
   return new Uint8Array(Buffer.from(value, "base64url"));
 }
 function source(value: Uint8Array): ArrayBuffer { return Uint8Array.from(value).buffer; }
+
+async function readCappedText(
+  object: { text(): Promise<string>; body?: ReadableStream<Uint8Array> },
+  maxBytes: number,
+): Promise<string> {
+  if (object.body) {
+    return new TextDecoder().decode(await readCappedBytes(object.body, maxBytes));
+  }
+  const text = await object.text();
+  if (encoder.encode(text).byteLength > maxBytes) throw new Error("OAuth credential envelope is too large");
+  return text;
+}
+
+async function readCappedBytes(body: ReadableStream<Uint8Array>, maxBytes: number): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  const reader = body.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error("OAuth credential envelope is too large");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* cancel() already released the lock */ }
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
