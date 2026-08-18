@@ -2,6 +2,7 @@ import { jsonResult, type AnyAgentTool } from "openclaw/plugin-sdk/core";
 import { Type } from "typebox";
 import { lstat, readFile } from "node:fs/promises";
 import path from "node:path";
+import { boundedJson, providerError, waitForConfirmation } from "./governed-confirmation.js";
 
 const parameters = Type.Object({
   capability: Type.Union([
@@ -22,8 +23,7 @@ type Params = {
 };
 
 type TurnContext = { jobId: string; turnToken: string };
-type JsonObject = Record<string, unknown>;
-type IssuedInvocation = JsonObject & {
+type IssuedInvocation = Record<string, unknown> & {
   confirmationRequired?: boolean;
   confirmation?: { id?: string };
   grant?: string;
@@ -37,7 +37,7 @@ export function createGovernedGithubTool(stateDir: string): AnyAgentTool {
     label: "Governed GitHub",
     description: "Read repository or issue metadata, or post a confirmed issue comment, using the requester's connected GitHub identity. Credentials never enter this runtime.",
     parameters,
-    async execute(_toolCallId, raw) {
+    async execute(_toolCallId, raw, signal?: AbortSignal) {
       const params = raw as Params;
       const context = await readTurnContext(stateDir);
       const controlUrl = runtimeUrl();
@@ -48,7 +48,7 @@ export function createGovernedGithubTool(stateDir: string): AnyAgentTool {
       let issued = await issue(controlUrl, context.turnToken, input);
       if (issued.confirmationRequired && issued.confirmation?.id) {
         const confirmationId = issued.confirmation.id;
-        const status = await waitForConfirmation(controlUrl, context.turnToken, confirmationId);
+        const status = await waitForConfirmation(controlUrl, context.turnToken, confirmationId, signal);
         if (status !== "approved") return jsonResult({ ok: false, confirmation: status, message: `Requester ${status} the GitHub action.` });
         issued = await issue(controlUrl, context.turnToken, { ...input, confirmationId });
       }
@@ -80,21 +80,6 @@ async function issue(controlUrl: string, turnToken: string, input: Record<string
   return result as IssuedInvocation;
 }
 
-async function waitForConfirmation(controlUrl: string, turnToken: string, id: string): Promise<string> {
-  const deadline = Date.now() + 9 * 60 * 1000;
-  while (Date.now() < deadline) {
-    const response = await fetch(new URL(`/api/runtime/confirmations/${encodeURIComponent(id)}`, controlUrl), {
-      signal: AbortSignal.timeout(15_000),
-      headers: { authorization: `Bearer ${turnToken}` },
-    });
-    const result = await boundedJson(response);
-    if (!response.ok) throw new Error(providerError(result, response.status));
-    if (result.status !== "pending") return String(result.status);
-    await new Promise((resolve) => setTimeout(resolve, 2_000));
-  }
-  return "expired";
-}
-
 async function readTurnContext(stateDir: string): Promise<TurnContext> {
   const file = path.join(stateDir, "crabhelm-current-turn.json");
   const info = await lstat(file);
@@ -115,16 +100,3 @@ function runtimeUrl(): string {
 function requiredIssue(value: number | undefined): number { if (!Number.isInteger(value) || Number(value) < 1) throw new Error("issueNumber is required"); return Number(value); }
 function requiredBody(value: string | undefined): string { const body = value?.trim(); if (!body) throw new Error("comment body is required"); return body; }
 function currentUid(): number { if (typeof process.getuid !== "function") throw new Error("runtime user identity is unavailable"); return process.getuid(); }
-
-async function boundedJson(response: Response): Promise<JsonObject> {
-  const length = Number(response.headers.get("content-length") ?? 0);
-  if (length > 128 * 1024) throw new Error("Crabhelm response is too large");
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength > 128 * 1024) throw new Error("Crabhelm response is too large");
-  try { return JSON.parse(new TextDecoder().decode(bytes)) as JsonObject; }
-  catch { throw new Error(`Crabhelm returned invalid JSON (${response.status})`); }
-}
-
-function providerError(value: JsonObject, status: number): string {
-  return typeof value.error === "string" ? value.error.slice(0, 300) : `Crabhelm request failed (${status})`;
-}
