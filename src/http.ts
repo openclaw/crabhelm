@@ -470,10 +470,10 @@ function requireTarget(
   const id = typeof value === "string" && value.trim() ? value.trim() : runtime.defaultTarget;
   const target = runtime.targets.find((item) => item.id === id);
   if (!target) throw requestError(`deployment target ${id} is not configured`);
-  assertCanCreate?.(id);
   if (!target.admissionOpen) {
     throw requestError(target.message ?? `deployment target ${id} is unavailable`);
   }
+  assertCanCreate?.(id);
   return target;
 }
 

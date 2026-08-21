@@ -98,9 +98,14 @@ test("partial runtime admits available targets and rejects unavailable placement
       defaultDeployment: { target: "west", profile: "openclaw-core", region: "us-west" },
     },
   );
+  const admissionChecks: string[] = [];
   const handler = createCrabhelmApiHandler({
     registry,
     reconciler: new CrabhelmReconciler(registry, new SimulatorChildCoreProvider()),
+    assertCanCreate(target) {
+      admissionChecks.push(target ?? "");
+      if (target === "europe") throw new Error("private admission failure");
+    },
     runtime: {
       mode: "partial",
       defaultTarget: "west",
@@ -131,6 +136,7 @@ test("partial runtime admits available targets and rejects unavailable placement
     });
     assert.equal(blocked.status, 422);
     assert.deepEqual(await blocked.json(), { error: "Europe target token is unavailable" });
+    assert.deepEqual(admissionChecks, []);
 
     const admitted = await fetch(base, {
       method: "POST",
@@ -148,6 +154,7 @@ test("partial runtime admits available targets and rejects unavailable placement
       profile: "openclaw-core",
       region: "us-west",
     });
+    assert.deepEqual(admissionChecks, ["west"]);
     assert.equal((await registry.list()).length, 1);
   } finally {
     await new Promise<void>((resolve, reject) =>
