@@ -138,6 +138,35 @@ test("partial runtime admits available targets and rejects unavailable placement
     assert.deepEqual(await blocked.json(), { error: "Europe target token is unavailable" });
     assert.deepEqual(admissionChecks, []);
 
+    const invalid = await fetch(base, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "",
+        owner: { subject: "manual:invalid", label: "Invalid", source: "manual" },
+        deployment: { target: "west" },
+      }),
+    });
+    assert.equal(invalid.status, 422);
+    assert.deepEqual(await invalid.json(), { error: "name must be between 1 and 80 characters" });
+    assert.deepEqual(admissionChecks, ["west"]);
+
+    const invalidEndpoint = await fetch(base, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "Invalid endpoint",
+        owner: { subject: "manual:invalid", label: "Invalid", source: "manual" },
+        deployment: { target: "west" },
+        observability: { otel: { endpoint: "not a URL" } },
+      }),
+    });
+    assert.equal(invalidEndpoint.status, 422);
+    assert.deepEqual(await invalidEndpoint.json(), {
+      error: "OpenTelemetry endpoint must be an HTTPS URL without credentials, query, or fragment",
+    });
+    assert.deepEqual(admissionChecks, ["west", "west"]);
+
     const admitted = await fetch(base, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -154,7 +183,7 @@ test("partial runtime admits available targets and rejects unavailable placement
       profile: "openclaw-core",
       region: "us-west",
     });
-    assert.deepEqual(admissionChecks, ["west"]);
+    assert.deepEqual(admissionChecks, ["west", "west", "west"]);
     assert.equal((await registry.list()).length, 1);
   } finally {
     await new Promise<void>((resolve, reject) =>

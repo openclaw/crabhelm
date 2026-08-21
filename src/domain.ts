@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { requestError } from "./errors.js";
 import type {
   AccessPolicy,
   ClawRouterFleetPolicy,
@@ -39,11 +40,11 @@ export function slugify(value: string): string {
 
 function requireText(value: unknown, label: string, max: number): string {
   if (typeof value !== "string") {
-    throw new Error(`${label} is required`);
+    throw requestError(`${label} is required`);
   }
   const clean = value.trim();
   if (!clean || clean.length > max) {
-    throw new Error(`${label} must be between 1 and ${max} characters`);
+    throw requestError(`${label} must be between 1 and ${max} characters`);
   }
   return clean;
 }
@@ -51,11 +52,11 @@ function requireText(value: unknown, label: string, max: number): string {
 function normalizeOwner(owner: OwnerRef): OwnerRef {
   const subject = requireText(owner?.subject, "owner subject", 200);
   if (!subjectPattern.test(subject)) {
-    throw new Error("owner subject contains unsupported characters");
+    throw requestError("owner subject contains unsupported characters");
   }
   const source = owner?.source;
   if (source !== "github" && source !== "slack" && source !== "email" && source !== "manual") {
-    throw new Error("owner source must be github, slack, email, or manual");
+    throw requestError("owner source must be github, slack, email, or manual");
   }
   return {
     subject,
@@ -81,7 +82,7 @@ function normalizeModels(
     if (routedSyntax
       ? !clawRouterModelPattern.test(value)
       : value.startsWith("clawrouter/") || !directModelPattern.test(value)) {
-      throw new Error(routedSyntax
+      throw requestError(routedSyntax
         ? `ClawRouter fleets require clawrouter/provider/model form: ${value}`
         : `model must use provider/model form: ${value}`);
     }
@@ -90,7 +91,7 @@ function normalizeModels(
   if (input?.provider !== undefined) {
     const requestedProvider = requireText(input.provider, "inference provider", 80);
     if (requestedProvider !== modelProvider) {
-      throw new Error(`inference provider ${requestedProvider} does not match model ${model}`);
+      throw requestError(`inference provider ${requestedProvider} does not match model ${model}`);
     }
   }
   const monthlyBudgetUsd = input?.monthlyBudgetUsd;
@@ -98,7 +99,7 @@ function normalizeModels(
     monthlyBudgetUsd !== undefined &&
     (!Number.isFinite(monthlyBudgetUsd) || monthlyBudgetUsd < 0 || monthlyBudgetUsd > 1_000_000)
   ) {
-    throw new Error("monthly budget must be between 0 and 1000000 USD");
+    throw requestError("monthly budget must be between 0 and 1000000 USD");
   }
   let router: InferenceRouter = { kind: "direct" };
   let authRef = input?.authRef
@@ -107,14 +108,14 @@ function normalizeModels(
   if (clawRouter) {
     const models = [model, ...fallbackModels];
     if (models.some((value) => !value.startsWith("clawrouter/"))) {
-      throw new Error("ClawRouter fleets require clawrouter/provider/model references");
+      throw requestError("ClawRouter fleets require clawrouter/provider/model references");
     }
     const providers = [...new Set(models.map((value) => clawRouter.modelProviders[value] ?? ""))].sort();
     if (providers.includes("")) {
-      throw new Error("every ClawRouter model requires an explicit fleet model-to-provider mapping");
+      throw requestError("every ClawRouter model requires an explicit fleet model-to-provider mapping");
     }
     if (providers.some((provider) => !clawRouter.allowedProviders.includes(provider))) {
-      throw new Error("inference model provider is outside the fleet ClawRouter allowlist");
+      throw requestError("inference model provider is outside the fleet ClawRouter allowlist");
     }
     const credentialId = clawRouterCredentialId(clawId);
     router = {
@@ -144,14 +145,16 @@ function normalizeModels(
 
 function clawRouterCredentialId(clawId: string): string {
   const compact = clawId.replaceAll("-", "").toLowerCase();
-  if (!/^[0-9a-f]{32}$/u.test(compact)) throw new Error("claw id is invalid for ClawRouter identity");
+  if (!/^[0-9a-f]{32}$/u.test(compact)) {
+    throw requestError("claw id is invalid for ClawRouter identity");
+  }
   return `crabhelm_${compact}`;
 }
 
 function normalizeSlack(input: Partial<SlackPolicy> | undefined, slug: string): SlackPolicy {
   const mode = input?.mode ?? "socket";
   if (mode !== "relay" && mode !== "socket" && mode !== "http") {
-    throw new Error("Slack mode must be relay, socket, or http");
+    throw requestError("Slack mode must be relay, socket, or http");
   }
   return {
     enabled: input?.enabled ?? false,
@@ -173,10 +176,10 @@ function normalizeAccess(input?: Partial<AccessPolicy>): AccessPolicy {
   const dmPolicy = input?.dmPolicy ?? "pairing";
   const groupPolicy = input?.groupPolicy ?? "allowlist";
   if (!(["pairing", "allowlist", "disabled"] as const).includes(dmPolicy)) {
-    throw new Error("DM policy must be pairing, allowlist, or disabled");
+    throw requestError("DM policy must be pairing, allowlist, or disabled");
   }
   if (!(["allowlist", "disabled"] as const).includes(groupPolicy)) {
-    throw new Error("group policy must be allowlist or disabled");
+    throw requestError("group policy must be allowlist or disabled");
   }
   return { dmPolicy, groupPolicy };
 }
@@ -187,11 +190,11 @@ function normalizeObservability(
 ): ObservabilityPolicy {
   const logLevel = input?.logLevel ?? "info";
   if (!(["error", "warn", "info", "debug"] as const).includes(logLevel)) {
-    throw new Error("log level must be error, warn, info, or debug");
+    throw requestError("log level must be error, warn, info, or debug");
   }
   const retentionDays = input?.retentionDays ?? 30;
   if (!Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 365) {
-    throw new Error("retention must be between 1 and 365 days");
+    throw requestError("retention must be between 1 and 365 days");
   }
   for (const [field, value] of [
     ["enabled", input?.otel?.enabled],
@@ -199,41 +202,46 @@ function normalizeObservability(
     ["metrics", input?.otel?.metrics],
   ] as const) {
     if (value !== undefined && typeof value !== "boolean") {
-      throw new Error(`OpenTelemetry ${field} must be a boolean`);
+      throw requestError(`OpenTelemetry ${field} must be a boolean`);
     }
   }
   const rawEndpoint = input?.otel?.endpoint;
   if (rawEndpoint !== undefined && typeof rawEndpoint !== "string") {
-    throw new Error("OpenTelemetry endpoint must be a string");
+    throw requestError("OpenTelemetry endpoint must be a string");
   }
   const endpoint = rawEndpoint?.trim();
   if (endpoint) {
+    if (!URL.canParse(endpoint)) {
+      throw requestError("OpenTelemetry endpoint must be an HTTPS URL without credentials, query, or fragment");
+    }
     const url = new URL(endpoint);
     if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
-      throw new Error("OpenTelemetry endpoint must be an HTTPS URL without credentials, query, or fragment");
+      throw requestError("OpenTelemetry endpoint must be an HTTPS URL without credentials, query, or fragment");
     }
   }
   const enabled = input?.otel?.enabled ?? false;
-  if (enabled && !endpoint) throw new Error("OpenTelemetry endpoint is required when export is enabled");
+  if (enabled && !endpoint) {
+    throw requestError("OpenTelemetry endpoint is required when export is enabled");
+  }
   const traces = input?.otel?.traces ?? true;
   const metrics = input?.otel?.metrics ?? true;
   if (enabled && !traces && !metrics) {
-    throw new Error("OpenTelemetry export requires traces, metrics, or both");
+    throw requestError("OpenTelemetry export requires traces, metrics, or both");
   }
   if (input?.otel?.logs !== undefined && input.otel.logs !== false) {
-    throw new Error("OpenTelemetry log export is unavailable under metadata-only policy");
+    throw requestError("OpenTelemetry log export is unavailable under metadata-only policy");
   }
   const sampleRate = input?.otel?.sampleRate ?? 0.1;
   if (!Number.isFinite(sampleRate) || sampleRate < 0 || sampleRate > 1) {
-    throw new Error("OpenTelemetry sample rate must be between 0 and 1");
+    throw requestError("OpenTelemetry sample rate must be between 0 and 1");
   }
   const flushIntervalMs = input?.otel?.flushIntervalMs ?? 60_000;
   if (!Number.isInteger(flushIntervalMs) || flushIntervalMs < 1_000 || flushIntervalMs > 300_000) {
-    throw new Error("OpenTelemetry flush interval must be between 1000 and 300000 milliseconds");
+    throw requestError("OpenTelemetry flush interval must be between 1000 and 300000 milliseconds");
   }
   const serviceName = requireText(input?.otel?.serviceName ?? `crabhelm-${slug}`, "OpenTelemetry service name", 120);
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/u.test(serviceName)) {
-    throw new Error("OpenTelemetry service name contains unsupported characters");
+    throw requestError("OpenTelemetry service name contains unsupported characters");
   }
   return {
     logLevel,
@@ -258,7 +266,7 @@ function normalizeAppliance(input: CreateClawInput["deployment"]): DeploymentSpe
   const archiveSha256 = requireText(input.appliance.archiveSha256, "appliance archive SHA-256", 64);
   const nodeSha256 = requireText(input.appliance.nodeSha256, "appliance Node SHA-256", 64);
   if (!sha256Pattern.test(manifestSha256) || !sha256Pattern.test(archiveSha256) || !sha256Pattern.test(nodeSha256)) {
-    throw new Error("appliance release digests must be lowercase SHA-256 values");
+    throw requestError("appliance release digests must be lowercase SHA-256 values");
   }
   return { manifestSha256, archiveSha256, nodeSha256 };
 }
@@ -328,11 +336,11 @@ export function createClawRecord(
   const name = requireText(input.name, "name", 80);
   const slug = input.slug ? requireText(input.slug, "slug", 63) : slugify(name);
   if (!slugPattern.test(slug)) {
-    throw new Error("slug must be a lowercase DNS label");
+    throw requestError("slug must be a lowercase DNS label");
   }
   const profile = requireText(input.deployment?.profile ?? "openclaw-core", "profile", 63);
   if (!slugPattern.test(profile)) {
-    throw new Error("deployment profile must be a lowercase DNS label");
+    throw requestError("deployment profile must be a lowercase DNS label");
   }
   const appliance = normalizeAppliance(input.deployment);
   const timestamp = now.toISOString();
@@ -471,7 +479,7 @@ export function clawCredentialsGeneration(record: ClawRecord): number {
 export function rotateClawCredentials(record: ClawRecord, now = new Date()): ClawRecord {
   const credentialsGeneration = clawCredentialsGeneration(record) + 1;
   if (credentialsGeneration > 1_000_000) {
-    throw new Error("credential rotation limit reached");
+    throw requestError("credential rotation limit reached");
   }
   return {
     ...record,
