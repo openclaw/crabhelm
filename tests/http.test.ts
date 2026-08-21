@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test from "node:test";
+import { GitHubRestMemberSource } from "../src/github.js";
 import { createCrabhelmApiHandler, createCrabhelmStaticHandler } from "../src/http.js";
 import { SimulatorChildCoreProvider } from "../src/providers.js";
 import { CrabhelmReconciler } from "../src/reconciler.js";
@@ -251,17 +252,27 @@ test("GitHub import preview stays behind the parent API and returns stable membe
     createMemoryStateStore<AuditEvent>(),
   );
   let received: unknown;
+  const githubSource = new GitHubRestMemberSource({
+    token: "test",
+    async fetch() {
+      return new Response(JSON.stringify([{
+        id: 42,
+        login: "maintainer",
+        permissions: { maintain: true },
+      }]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
   const handler = createCrabhelmApiHandler({
     registry,
     reconciler: new CrabhelmReconciler(registry, new SimulatorChildCoreProvider()),
     githubSource: {
       async preview(query) {
+        const result = await githubSource.preview(query);
         received = query;
-        return {
-          source: query,
-          truncated: false,
-          members: [{ id: 42, login: "maintainer", role: "maintain" }],
-        };
+        return result;
       },
     },
     runtime: {
@@ -282,6 +293,24 @@ test("GitHub import preview stays behind the parent API and returns stable membe
   const address = server.address();
   assert.ok(address && typeof address === "object");
   try {
+    const invalid = await fetch(
+      `http://127.0.0.1:${address.port}/plugins/crabhelm/api/import/github/preview`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          scope: "repository",
+          organization: "openclaw",
+          repository: "openclaw",
+          permission: "write",
+        }),
+      },
+    );
+    assert.equal(invalid.status, 422);
+    assert.deepEqual(await invalid.json(), {
+      error: "repository permission must be maintain or admin",
+    });
+
     const response = await fetch(
       `http://127.0.0.1:${address.port}/plugins/crabhelm/api/import/github/preview`,
       {
