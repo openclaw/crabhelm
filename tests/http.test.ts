@@ -156,6 +156,59 @@ test("partial runtime admits available targets and rejects unavailable placement
   }
 });
 
+test("unexpected API failures do not expose exception details", async () => {
+  const registry = new CrabhelmRegistry(
+    createMemoryStateStore<ClawRecord>(),
+    createMemoryStateStore<AuditEvent>(),
+  );
+  const handler = createCrabhelmApiHandler({
+    registry,
+    reconciler: new CrabhelmReconciler(registry, new SimulatorChildCoreProvider()),
+    assertCanCreate() {
+      throw new Error("private failure\n    at /srv/crabhelm/private.ts:42:7");
+    },
+    runtime: {
+      mode: "simulator",
+      defaultTarget: "default",
+      targets: [{
+        id: "default",
+        label: "Default",
+        profile: "openclaw-core",
+        ttlSeconds: 14_400,
+        idleTimeoutSeconds: 14_400,
+        admissionOpen: true,
+      }],
+      githubImport: false,
+      inference: { kind: "direct", defaultModel: "openai/gpt-5.5", metadataOnly: true },
+    },
+  });
+  const server = createServer(async (req, res) => {
+    if (!(await handler(req, res))) res.writeHead(404).end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/plugins/crabhelm/api/claws`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "Failure",
+          owner: { subject: "manual:failure", label: "Failure", source: "manual" },
+        }),
+      },
+    );
+    assert.equal(response.status, 500);
+    assert.deepEqual(await response.json(), { error: "request failed" });
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => error ? reject(error) : resolve()),
+    );
+  }
+});
+
 test("GitHub import preview stays behind the parent API and returns stable member ids", async () => {
   const registry = new CrabhelmRegistry(
     createMemoryStateStore<ClawRecord>(),

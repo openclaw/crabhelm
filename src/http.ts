@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
 import type { CrabhelmRuntime, DeploymentRuntimeTarget } from "./config.js";
+import { publicRequestFailure, requestError } from "./errors.js";
 import type {
   GitHubImportMember,
   GitHubImportQuery,
@@ -125,10 +126,10 @@ export function createCrabhelmApiHandler(options: {
           ? body.canaryId.trim()
           : undefined;
         if (canaryId && !clawIds.includes(canaryId)) {
-          throw new Error("canaryId must be one of the selected claws");
+          throw requestError("canaryId must be one of the selected claws");
         }
         if (clawIds.length > 1 && !canaryId) {
-          throw new Error("a canaryId is required when applying a policy to multiple claws");
+          throw requestError("a canaryId is required when applying a policy to multiple claws");
         }
 
         const results: Array<{
@@ -200,11 +201,11 @@ export function createCrabhelmApiHandler(options: {
       }
       if (req.method === "POST" && url.pathname === `${routeRoot}/api/claws/batch`) {
         if (!options.runtime.targets.some((target) => target.admissionOpen)) {
-          throw new Error("Crabbox provisioning is unconfigured");
+          throw requestError("Crabbox provisioning is unconfigured");
         }
         const body = (await readJsonBody(req)) as { items?: unknown };
         if (!Array.isArray(body.items) || body.items.length < 1 || body.items.length > 50) {
-          throw new Error("batch items must contain between 1 and 50 claws");
+          throw requestError("batch items must contain between 1 and 50 claws");
         }
         const results = await mapConcurrent(body.items, 3, async (input) => {
           try {
@@ -216,9 +217,10 @@ export function createCrabhelmApiHandler(options: {
             );
             return { ok: true as const, claw: await options.reconciler.reconcileOne(claw.id) };
           } catch (error) {
+            const failure = publicRequestFailure(error);
             return {
               ok: false as const,
-              error: error instanceof Error ? error.message : String(error),
+              error: failure.message,
             };
           }
         });
@@ -233,7 +235,7 @@ export function createCrabhelmApiHandler(options: {
       }
       if (req.method === "POST" && url.pathname === `${routeRoot}/api/import/github/preview`) {
         if (!options.githubSource) {
-          throw new Error("GitHub organization import is unconfigured");
+          throw requestError("GitHub organization import is unconfigured");
         }
         const query = (await readJsonBody(req)) as GitHubImportQuery;
         sendJson(res, 200, await options.githubSource.preview(query));
@@ -241,7 +243,7 @@ export function createCrabhelmApiHandler(options: {
       }
       if (req.method === "POST" && url.pathname === `${routeRoot}/api/import/github`) {
         if (!options.githubSource) {
-          throw new Error("GitHub organization import is unconfigured");
+          throw requestError("GitHub organization import is unconfigured");
         }
         const body = asRecord(await readJsonBody(req));
         const target = requireTarget(
@@ -254,7 +256,7 @@ export function createCrabhelmApiHandler(options: {
         const membersById = new Map(preview.members.map((member) => [member.id, member]));
         const selected = ids.map((id) => membersById.get(id));
         if (selected.some((member) => !member)) {
-          throw new Error("one or more selected GitHub member ids are not in the current preview");
+          throw requestError("one or more selected GitHub member ids are not in the current preview");
         }
         const results = await mapConcurrent(selected as GitHubImportMember[], 3, async (member) => {
           try {
@@ -264,10 +266,11 @@ export function createCrabhelmApiHandler(options: {
             );
             return { ok: true as const, member, claw: await options.reconciler.reconcileOne(claw.id) };
           } catch (error) {
+            const failure = publicRequestFailure(error);
             return {
               ok: false as const,
               member,
-              error: error instanceof Error ? error.message : String(error),
+              error: failure.message,
             };
           }
         });
@@ -288,10 +291,10 @@ export function createCrabhelmApiHandler(options: {
       const id = decodeURIComponent(match[1] ?? "");
       const action = match[2];
       if (req.method === "GET" && action === "pairing") {
-        if (!options.nodeControl) throw new Error("child pairing control is unavailable");
+        if (!options.nodeControl) throw requestError("child pairing control is unavailable");
         const claw = await options.registry.get(id);
         const channel = url.searchParams.get("channel") ?? "slack";
-        if (channel !== "slack") throw new Error("only Slack pairing is supported");
+        if (channel !== "slack") throw requestError("only Slack pairing is supported");
         const accountId = url.searchParams.get("account")?.trim() || undefined;
         sendJson(
           res,
@@ -301,15 +304,15 @@ export function createCrabhelmApiHandler(options: {
         return true;
       }
       if (req.method === "POST" && action === "pairing/approve") {
-        if (!options.nodeControl) throw new Error("child pairing control is unavailable");
+        if (!options.nodeControl) throw requestError("child pairing control is unavailable");
         const body = (await readJsonBody(req)) as {
           channel?: unknown;
           accountId?: unknown;
           code?: unknown;
         };
         const channel = body.channel ?? "slack";
-        if (channel !== "slack") throw new Error("only Slack pairing is supported");
-        if (typeof body.code !== "string") throw new Error("pairing code is required");
+        if (channel !== "slack") throw requestError("only Slack pairing is supported");
+        if (typeof body.code !== "string") throw requestError("pairing code is required");
         const claw = await options.registry.get(id);
         const approved = await options.nodeControl.approvePairing(claw, {
           channel,
@@ -388,9 +391,9 @@ export function createCrabhelmApiHandler(options: {
       sendJson(res, 405, { error: "method not allowed" });
       return true;
     } catch (error) {
-      sendJson(res, error instanceof SyntaxError ? 400 : 422, {
-        error: error instanceof Error ? error.message : String(error),
-      });
+      const failure = publicRequestFailure(error);
+      if (failure.unexpected) console.error("crabhelm API request failed", error);
+      sendJson(res, failure.status, { error: failure.message });
       return true;
     }
   };
@@ -415,14 +418,14 @@ async function reconcilePolicyTarget(
       clawId,
       ok,
       claw,
-      ...(ok ? {} : { error: `policy did not converge: ${claw.observed.message}` }),
+      ...(ok ? {} : { error: "policy did not converge" }),
       canary,
     };
-  } catch (error) {
+  } catch {
     return {
       clawId,
       ok: false,
-      error: error instanceof Error ? error.message : String(error),
+      error: "policy reconciliation failed",
       canary,
     };
   }
@@ -430,18 +433,18 @@ async function reconcilePolicyTarget(
 
 function requirePositiveInteger(value: unknown, label: string): number {
   if (!Number.isInteger(value) || Number(value) < 1) {
-    throw new Error(`${label} must be a positive integer`);
+    throw requestError(`${label} must be a positive integer`);
   }
   return Number(value);
 }
 
 function requireClawIds(value: unknown): string[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > 100) {
-    throw new Error("clawIds must contain between 1 and 100 ids");
+    throw requestError("clawIds must contain between 1 and 100 ids");
   }
   const ids = value.map((id) => typeof id === "string" ? id.trim() : "");
   if (ids.some((id) => !id) || new Set(ids).size !== ids.length) {
-    throw new Error("clawIds must contain unique non-empty ids");
+    throw requestError("clawIds must contain unique non-empty ids");
   }
   return ids;
 }
@@ -452,7 +455,7 @@ function requireExpectedGenerations(value: unknown, clawIds: string[]): Record<s
   for (const id of clawIds) {
     const generation = input[id];
     if (!Number.isInteger(generation) || Number(generation) < 0) {
-      throw new Error(`expected generation is required for claw ${id}`);
+      throw requestError(`expected generation is required for claw ${id}`);
     }
     result[id] = Number(generation);
   }
@@ -466,19 +469,21 @@ function requireTarget(
 ): DeploymentRuntimeTarget {
   const id = typeof value === "string" && value.trim() ? value.trim() : runtime.defaultTarget;
   const target = runtime.targets.find((item) => item.id === id);
-  if (!target) throw new Error(`deployment target ${id} is not configured`);
+  if (!target) throw requestError(`deployment target ${id} is not configured`);
   assertCanCreate?.(id);
-  if (!target.admissionOpen) throw new Error(target.message ?? `deployment target ${id} is unavailable`);
+  if (!target.admissionOpen) {
+    throw requestError(target.message ?? `deployment target ${id} is unavailable`);
+  }
   return target;
 }
 
 function requireMemberIds(value: unknown): number[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > 50) {
-    throw new Error("memberIds must contain between 1 and 50 numeric ids");
+    throw requestError("memberIds must contain between 1 and 50 numeric ids");
   }
   const ids = [...new Set(value)];
   if (ids.length !== value.length || ids.some((id) => !Number.isSafeInteger(id) || Number(id) <= 0)) {
-    throw new Error("memberIds must contain unique positive numeric ids");
+    throw requestError("memberIds must contain unique positive numeric ids");
   }
   return ids as number[];
 }
@@ -493,15 +498,15 @@ function githubCreateInput(
   const dmPolicy = input.dmPolicy;
   const groupPolicy = input.groupPolicy;
   const logLevel = input.logLevel;
-  if (typeof input.slackEnabled !== "boolean") throw new Error("slackEnabled is required");
+  if (typeof input.slackEnabled !== "boolean") throw requestError("slackEnabled is required");
   if (dmPolicy !== "pairing" && dmPolicy !== "allowlist" && dmPolicy !== "disabled") {
-    throw new Error("dmPolicy is invalid");
+    throw requestError("dmPolicy is invalid");
   }
   if (groupPolicy !== "allowlist" && groupPolicy !== "disabled") {
-    throw new Error("groupPolicy is invalid");
+    throw requestError("groupPolicy is invalid");
   }
   if (logLevel !== "error" && logLevel !== "warn" && logLevel !== "info" && logLevel !== "debug") {
-    throw new Error("logLevel is invalid");
+    throw requestError("logLevel is invalid");
   }
   return {
     name: `${member.login} maintainer claw`,
@@ -548,7 +553,7 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += buffer.length;
     if (size > maxBodyBytes) {
-      throw new Error("request body exceeds 64 KiB");
+      throw requestError("request body exceeds 64 KiB");
     }
     chunks.push(buffer);
   }
@@ -572,7 +577,7 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 function requireString(value: unknown, label: string): string {
-  if (typeof value !== "string" || !value.trim()) throw new Error(`${label} is required`);
+  if (typeof value !== "string" || !value.trim()) throw requestError(`${label} is required`);
   return value.trim();
 }
 

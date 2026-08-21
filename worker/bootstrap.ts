@@ -806,6 +806,7 @@ export function inferenceProbeCommand(
   const validateResponse = [
     "const fs = require('node:fs');",
     "const raw = fs.readFileSync(process.argv[1], 'utf8').trim();",
+    "const expected = process.argv[2];",
     "let value;",
     "for (let start = raw.indexOf('{'); start >= 0 && !value; start = raw.indexOf('{', start + 1)) {",
     "  let depth = 0, quoted = false, escaped = false;",
@@ -822,13 +823,14 @@ export function inferenceProbeCommand(
     "if (!value || !Array.isArray(value.payloads)) process.exit(3);",
     "const texts = value.payloads.map((payload) => payload?.text).filter((text) => typeof text === 'string' && text.trim()).map((text) => text.trim());",
     "if (texts.length !== 1) process.exit(4);",
-    `if (texts[0] !== ${JSON.stringify(expectedResponse)}) process.exit(5);`,
+    "if (texts[0] !== expected) process.exit(5);",
   ].join(" ");
   const validateModelProbe = [
     "const fs = require('node:fs');",
     "const value = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));",
+    "const expectedModel = process.argv[2];",
     "const results = value?.auth?.probes?.results;",
-    `if (!Array.isArray(results) || !results.some((result) => result?.provider === 'clawrouter' && result?.model === ${JSON.stringify(model)} && result?.status === 'ok')) process.exit(3);`,
+    "if (!Array.isArray(results) || !results.some((result) => result?.provider === 'clawrouter' && result?.model === expectedModel && result?.status === 'ok')) process.exit(3);",
   ].join(" ");
   const turnCommand = routerBaseUrl
     ? `timeout -k 10 180 "\${agent_command[@]}" "$openclaw_cli" agent --agent main --model ${shellQuote(model)} --session-id "$probe_session" --message ${shellQuote("Reply exactly: CLAWROUTER_CANARY_OK")} --json >${output} 2>${error}`
@@ -864,7 +866,7 @@ export function inferenceProbeCommand(
       ? [
           `  elif ! timeout -k 10 90 "\${agent_command[@]}" "$openclaw_cli" models status --probe --probe-provider clawrouter --probe-max-tokens 16 --json >${modelProbeOutput} 2>${modelProbeError}; then`,
           "    probe_result=MODEL_PROBE_FAILED",
-          `  elif ! chmod 0644 ${modelProbeOutput} ${modelProbeError} || ! "\${agent_command[@]}" "$node_binary" --input-type=commonjs -e ${shellQuote(validateModelProbe)} ${modelProbeOutput}; then`,
+          `  elif ! chmod 0644 ${modelProbeOutput} ${modelProbeError} || ! "\${agent_command[@]}" "$node_binary" --input-type=commonjs -e ${shellQuote(validateModelProbe)} ${modelProbeOutput} ${shellQuote(model)}; then`,
           "    probe_result=MODEL_PROBE_FAILED",
         ]
       : []),
@@ -873,7 +875,7 @@ export function inferenceProbeCommand(
     "  else",
     `    chmod 0644 ${output} ${error}`,
     "    response_status=0",
-    `    "\${agent_command[@]}" "$node_binary" --input-type=commonjs -e ${shellQuote(validateResponse)} ${output} || response_status=$?`,
+    `    "\${agent_command[@]}" "$node_binary" --input-type=commonjs -e ${shellQuote(validateResponse)} ${output} ${shellQuote(expectedResponse)} || response_status=$?`,
     "    case \"$response_status\" in",
     "      0)",
     `        if "\${agent_command[@]}" /bin/bash ${quotePath(runtimeLauncher)}; then`,

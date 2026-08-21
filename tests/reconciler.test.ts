@@ -855,7 +855,7 @@ test("reconciler persists allowlisted operator diagnostics without opaque causes
   const result = await reconciler.reconcileOne(created.id);
   assert.equal(
     result.observed.message,
-    "Crabbox create failed (HTTP 503) [CRABBOX_CREATE_HTTP]",
+    "Crabbox rejected workspace creation [CRABBOX_CREATE_HTTP]",
   );
   assert.equal(result.observed.message.includes("secret-value"), false);
   const failure = (await registry.snapshot()).events.find(
