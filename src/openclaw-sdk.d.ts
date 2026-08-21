@@ -11,7 +11,7 @@ declare module "openclaw/plugin-sdk/core" {
     label: string;
     description: string;
     parameters: TSchema;
-    execute(toolCallId: string, params: unknown): Promise<AgentToolResult>;
+    execute(toolCallId: string, params: unknown, signal?: AbortSignal): Promise<AgentToolResult>;
   };
 
   export function jsonResult(value: unknown): AgentToolResult;
