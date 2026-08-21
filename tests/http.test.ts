@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test from "node:test";
+import { GitHubRestMemberSource } from "../src/github.js";
 import { createCrabhelmApiHandler, createCrabhelmStaticHandler } from "../src/http.js";
 import { SimulatorChildCoreProvider } from "../src/providers.js";
 import { CrabhelmReconciler } from "../src/reconciler.js";
@@ -98,9 +99,14 @@ test("partial runtime admits available targets and rejects unavailable placement
       defaultDeployment: { target: "west", profile: "openclaw-core", region: "us-west" },
     },
   );
+  const admissionChecks: string[] = [];
   const handler = createCrabhelmApiHandler({
     registry,
     reconciler: new CrabhelmReconciler(registry, new SimulatorChildCoreProvider()),
+    assertCanCreate(target) {
+      admissionChecks.push(target ?? "");
+      if (target === "europe") throw new Error("private admission failure");
+    },
     runtime: {
       mode: "partial",
       defaultTarget: "west",
@@ -131,6 +137,36 @@ test("partial runtime admits available targets and rejects unavailable placement
     });
     assert.equal(blocked.status, 422);
     assert.deepEqual(await blocked.json(), { error: "Europe target token is unavailable" });
+    assert.deepEqual(admissionChecks, []);
+
+    const invalid = await fetch(base, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "",
+        owner: { subject: "manual:invalid", label: "Invalid", source: "manual" },
+        deployment: { target: "west" },
+      }),
+    });
+    assert.equal(invalid.status, 422);
+    assert.deepEqual(await invalid.json(), { error: "name must be between 1 and 80 characters" });
+    assert.deepEqual(admissionChecks, ["west"]);
+
+    const invalidEndpoint = await fetch(base, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "Invalid endpoint",
+        owner: { subject: "manual:invalid", label: "Invalid", source: "manual" },
+        deployment: { target: "west" },
+        observability: { otel: { endpoint: "not a URL" } },
+      }),
+    });
+    assert.equal(invalidEndpoint.status, 422);
+    assert.deepEqual(await invalidEndpoint.json(), {
+      error: "OpenTelemetry endpoint must be an HTTPS URL without credentials, query, or fragment",
+    });
+    assert.deepEqual(admissionChecks, ["west", "west"]);
 
     const admitted = await fetch(base, {
       method: "POST",
@@ -148,7 +184,61 @@ test("partial runtime admits available targets and rejects unavailable placement
       profile: "openclaw-core",
       region: "us-west",
     });
+    assert.deepEqual(admissionChecks, ["west", "west", "west"]);
     assert.equal((await registry.list()).length, 1);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => error ? reject(error) : resolve()),
+    );
+  }
+});
+
+test("unexpected API failures do not expose exception details", async () => {
+  const registry = new CrabhelmRegistry(
+    createMemoryStateStore<ClawRecord>(),
+    createMemoryStateStore<AuditEvent>(),
+  );
+  const handler = createCrabhelmApiHandler({
+    registry,
+    reconciler: new CrabhelmReconciler(registry, new SimulatorChildCoreProvider()),
+    assertCanCreate() {
+      throw new Error("private failure\n    at /srv/crabhelm/private.ts:42:7");
+    },
+    runtime: {
+      mode: "simulator",
+      defaultTarget: "default",
+      targets: [{
+        id: "default",
+        label: "Default",
+        profile: "openclaw-core",
+        ttlSeconds: 14_400,
+        idleTimeoutSeconds: 14_400,
+        admissionOpen: true,
+      }],
+      githubImport: false,
+      inference: { kind: "direct", defaultModel: "openai/gpt-5.5", metadataOnly: true },
+    },
+  });
+  const server = createServer(async (req, res) => {
+    if (!(await handler(req, res))) res.writeHead(404).end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/plugins/crabhelm/api/claws`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "Failure",
+          owner: { subject: "manual:failure", label: "Failure", source: "manual" },
+        }),
+      },
+    );
+    assert.equal(response.status, 500);
+    assert.deepEqual(await response.json(), { error: "request failed" });
   } finally {
     await new Promise<void>((resolve, reject) =>
       server.close((error) => error ? reject(error) : resolve()),
@@ -162,17 +252,27 @@ test("GitHub import preview stays behind the parent API and returns stable membe
     createMemoryStateStore<AuditEvent>(),
   );
   let received: unknown;
+  const githubSource = new GitHubRestMemberSource({
+    token: "test",
+    async fetch() {
+      return new Response(JSON.stringify([{
+        id: 42,
+        login: "maintainer",
+        permissions: { maintain: true },
+      }]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
   const handler = createCrabhelmApiHandler({
     registry,
     reconciler: new CrabhelmReconciler(registry, new SimulatorChildCoreProvider()),
     githubSource: {
       async preview(query) {
+        const result = await githubSource.preview(query);
         received = query;
-        return {
-          source: query,
-          truncated: false,
-          members: [{ id: 42, login: "maintainer", role: "maintain" }],
-        };
+        return result;
       },
     },
     runtime: {
@@ -193,6 +293,24 @@ test("GitHub import preview stays behind the parent API and returns stable membe
   const address = server.address();
   assert.ok(address && typeof address === "object");
   try {
+    const invalid = await fetch(
+      `http://127.0.0.1:${address.port}/plugins/crabhelm/api/import/github/preview`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          scope: "repository",
+          organization: "openclaw",
+          repository: "openclaw",
+          permission: "write",
+        }),
+      },
+    );
+    assert.equal(invalid.status, 422);
+    assert.deepEqual(await invalid.json(), {
+      error: "repository permission must be maintain or admin",
+    });
+
     const response = await fetch(
       `http://127.0.0.1:${address.port}/plugins/crabhelm/api/import/github/preview`,
       {

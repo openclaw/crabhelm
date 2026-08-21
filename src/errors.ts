@@ -41,6 +41,16 @@ export class CrabhelmOperationalError extends Error {
   }
 }
 
+export class CrabhelmRequestError extends Error {
+  readonly publicMessage: string;
+
+  constructor(publicMessage: string) {
+    super(publicMessage);
+    this.name = "CrabhelmRequestError";
+    this.publicMessage = publicMessage;
+  }
+}
+
 export function operationalError(
   code: CrabhelmOperationalErrorCode,
   operatorMessage: string,
@@ -49,12 +59,49 @@ export function operationalError(
   return new CrabhelmOperationalError(code, operatorMessage, { cause });
 }
 
+export function requestError(message: string): CrabhelmRequestError {
+  return new CrabhelmRequestError(message);
+}
+
+export function publicRequestFailure(
+  error: unknown,
+): { status: number; message: string; unexpected: boolean } {
+  if (error instanceof SyntaxError) {
+    return { status: 400, message: "request body must contain valid JSON", unexpected: false };
+  }
+  if (error instanceof CrabhelmRequestError) {
+    return { status: 422, message: error.publicMessage, unexpected: false };
+  }
+  return { status: 500, message: "request failed", unexpected: true };
+}
+
+const operationalErrorCopy: Partial<Record<CrabhelmOperationalErrorCode, string>> = {
+  CRABBOX_UNCONFIGURED: "Crabbox provisioning is unconfigured",
+  DEPLOYMENT_TARGET_UNAVAILABLE: "The deployment target is unavailable",
+  CRABBOX_UNREACHABLE: "Crabbox is unreachable",
+  CRABBOX_CREATE_HTTP: "Crabbox rejected workspace creation",
+  CRABBOX_CREATE_STATE: "Crabbox returned invalid workspace creation state",
+  CRABBOX_INSPECT_HTTP: "Crabbox workspace inspection failed",
+  CRABBOX_DELETE_HTTP: "Crabbox workspace removal failed",
+  CRABBOX_IDENTITY_MISMATCH: "Crabbox workspace identity does not match the claw",
+  CRABBOX_WORKSPACE_FAILED: "Crabbox reports a failed workspace",
+  CLAWROUTER_UNCONFIGURED: "ClawRouter is unconfigured",
+  CLAWROUTER_UNREACHABLE: "ClawRouter is unreachable",
+  CLAWROUTER_REJECTED: "ClawRouter rejected the control-plane request",
+  CLAWROUTER_STATUS_INVALID: "ClawRouter returned invalid status",
+  CHILD_CONTROL_FAILED: "Child control command failed",
+  CHILD_INGRESS_DISABLE_FAILED: "Child ingress disable did not complete",
+};
+
 export function safeOperationalFailure(
   error: unknown,
   fallback: { code: CrabhelmOperationalErrorCode; message: string },
 ): { code: CrabhelmOperationalErrorCode; message: string } {
   if (error instanceof CrabhelmOperationalError) {
-    return { code: error.code, message: error.operatorMessage };
+    return {
+      code: error.code,
+      message: operationalErrorCopy[error.code] ?? childErrorCopy[error.code] ?? fallback.message,
+    };
   }
   return fallback;
 }

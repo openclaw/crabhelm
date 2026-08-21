@@ -10,6 +10,7 @@ import {
   setClawEnabled,
   updateClawRecord,
 } from "./domain.js";
+import { requestError } from "./errors.js";
 import type { StateStore, StateTransaction } from "./state.js";
 import type {
   AuditEvent,
@@ -86,7 +87,7 @@ export class CrabhelmRegistry {
     await this.#tail;
     const record = await this.#claws.lookup(id);
     if (!record) {
-      throw new Error("claw not found");
+      throw requestError("claw not found");
     }
     return normalizeRecord(record);
   }
@@ -122,7 +123,7 @@ export class CrabhelmRegistry {
       const duplicate = (await policies.entries()).some(
         (entry) => entry.value.name.toLocaleLowerCase() === name.toLocaleLowerCase(),
       );
-      if (duplicate) throw new Error(`a policy named ${name} already exists`);
+      if (duplicate) throw requestError(`a policy named ${name} already exists`);
       const timestamp = new Date().toISOString();
       const policy: PolicyTemplate = {
         id: randomUUID(),
@@ -157,13 +158,15 @@ export class CrabhelmRegistry {
     return this.#serialize(async () => {
       const policies = this.#requirePolicies();
       const current = await this.#requirePolicy(id);
-      if (current.versions.length >= 100) throw new Error("policy version limit reached (100)");
+      if (current.versions.length >= 100) {
+        throw requestError("policy version limit reached (100)");
+      }
       const version = current.versions.length + 1;
       const timestamp = new Date().toISOString();
       const spec = normalizeManagedPolicySpec(input.spec);
       const latest = current.versions.at(-1)!;
       if (canonicalJson(spec) === canonicalJson(latest.spec)) {
-        throw new Error("new policy version must change at least one managed field");
+        throw requestError("new policy version must change at least one managed field");
       }
       const next: PolicyTemplate = {
         ...current,
@@ -223,7 +226,7 @@ export class CrabhelmRegistry {
         assertPolicyTargetMutable(claw);
         const expected = expectedGenerations[claw.id];
         if (!Number.isInteger(expected) || expected !== claw.desired.generation) {
-          throw new Error(
+          throw requestError(
             `policy preview is stale for ${claw.desired.name}: expected generation ${expected ?? "missing"}, current generation ${claw.desired.generation}`,
           );
         }
@@ -264,7 +267,7 @@ export class CrabhelmRegistry {
         (entry) => entry.value.desired.slug === next.desired.slug && entry.value.observed.phase !== "deleted",
       );
       if (duplicate) {
-        throw new Error(`a claw with slug ${next.desired.slug} already exists`);
+        throw requestError(`a claw with slug ${next.desired.slug} already exists`);
       }
       await this.#claws.register(next.id, next);
       await this.#audit({
@@ -287,7 +290,7 @@ export class CrabhelmRegistry {
         current.observed.phase === "deleting" ||
         current.observed.deletion
       ) {
-        throw new Error("cannot update a deleting or deleted claw");
+        throw requestError("cannot update a deleting or deleted claw");
       }
       const next = updateClawRecord(current, patch);
       this.#assertDeployment(next.desired.deployment);
@@ -296,7 +299,7 @@ export class CrabhelmRegistry {
         current.observed.lifecycle &&
         JSON.stringify(deploymentPlacement(next)) !== JSON.stringify(deploymentPlacement(current))
       ) {
-        throw new Error("deployment placement is immutable after workspace allocation; replace the claw instead");
+        throw requestError("deployment placement is immutable after workspace allocation; replace the claw instead");
       }
       await this.#claws.register(id, next);
       await this.#audit({
@@ -331,12 +334,14 @@ export class CrabhelmRegistry {
   #assertDeployment(deployment: ClawRecord["desired"]["deployment"]): void {
     if (!this.#deploymentTargets) return;
     const configured = this.#deploymentTargets.get(deployment.target);
-    if (!configured) throw new Error(`deployment target ${deployment.target} is not configured`);
+    if (!configured) {
+      throw requestError(`deployment target ${deployment.target} is not configured`);
+    }
     if (deployment.profile !== configured.profile) {
-      throw new Error(`deployment profile for ${deployment.target} must be ${configured.profile}`);
+      throw requestError(`deployment profile for ${deployment.target} must be ${configured.profile}`);
     }
     if ((deployment.region ?? "") !== (configured.region ?? "")) {
-      throw new Error(`deployment region for ${deployment.target} must be ${configured.region ?? "unset"}`);
+      throw requestError(`deployment region for ${deployment.target} must be ${configured.region ?? "unset"}`);
     }
   }
 
@@ -348,7 +353,7 @@ export class CrabhelmRegistry {
         current.observed.phase === "deleting" ||
         current.observed.deletion
       ) {
-        throw new Error("cannot change a deleting or deleted claw");
+        throw requestError("cannot change a deleting or deleted claw");
       }
       const next = setClawEnabled(current, enabled);
       if (next === current) return current;
@@ -373,7 +378,7 @@ export class CrabhelmRegistry {
         current.observed.phase === "deleting" ||
         current.observed.deletion
       ) {
-        throw new Error("cannot rotate credentials for a deleting or deleted claw");
+        throw requestError("cannot rotate credentials for a deleting or deleted claw");
       }
       const next = rotateClawCredentials(current);
       await this.#claws.register(id, next);
@@ -393,7 +398,7 @@ export class CrabhelmRegistry {
     return this.#serialize(async () => {
       const current = await this.#require(id);
       if (confirmation !== current.desired.name && confirmation !== current.desired.slug) {
-        throw new Error("typed confirmation must match the claw name or slug");
+        throw requestError("typed confirmation must match the claw name or slug");
       }
       if (current.observed.phase === "deleted") return current;
       if (current.observed.deletion) return current;
@@ -460,19 +465,19 @@ export class CrabhelmRegistry {
   async #require(id: string): Promise<ClawRecord> {
     const record = await this.#claws.lookup(id);
     if (!record) {
-      throw new Error("claw not found");
+      throw requestError("claw not found");
     }
     return normalizeRecord(record);
   }
 
   #requirePolicies(): StateStore<PolicyTemplate> {
-    if (!this.#policies) throw new Error("policy storage is unavailable");
+    if (!this.#policies) throw requestError("policy storage is unavailable");
     return this.#policies;
   }
 
   async #requirePolicy(id: string): Promise<PolicyTemplate> {
     const policy = await this.#requirePolicies().lookup(id);
-    if (!policy) throw new Error("policy not found");
+    if (!policy) throw requestError("policy not found");
     return policy;
   }
 
@@ -542,35 +547,37 @@ function deploymentPlacement(record: ClawRecord): Pick<ClawRecord["desired"]["de
 }
 
 function requirePolicyText(value: unknown, label: string, max: number, allowEmpty = false): string {
-  if (typeof value !== "string") throw new Error(`${label} is required`);
+  if (typeof value !== "string") throw requestError(`${label} is required`);
   const clean = value.trim();
   if ((!allowEmpty && !clean) || clean.length > max) {
-    throw new Error(`${label} must be ${allowEmpty ? `at most ${max}` : `between 1 and ${max}`} characters`);
+    throw requestError(`${label} must be ${allowEmpty ? `at most ${max}` : `between 1 and ${max}`} characters`);
   }
   return clean;
 }
 
 function requirePolicyVersion(policy: PolicyTemplate, version: number) {
-  if (!Number.isInteger(version) || version < 1) throw new Error("policy version must be a positive integer");
+  if (!Number.isInteger(version) || version < 1) {
+    throw requestError("policy version must be a positive integer");
+  }
   const selected = policy.versions.find((item) => item.version === version);
-  if (!selected) throw new Error(`policy ${policy.name} has no version ${version}`);
+  if (!selected) throw requestError(`policy ${policy.name} has no version ${version}`);
   return selected;
 }
 
 function requireUniqueClawIds(value: string[]): string[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > 100) {
-    throw new Error("policy targets must contain between 1 and 100 claw ids");
+    throw requestError("policy targets must contain between 1 and 100 claw ids");
   }
   const ids = value.map((id) => typeof id === "string" ? id.trim() : "");
   if (ids.some((id) => !id) || new Set(ids).size !== ids.length) {
-    throw new Error("policy targets must contain unique non-empty claw ids");
+    throw requestError("policy targets must contain unique non-empty claw ids");
   }
   return ids;
 }
 
 function assertPolicyTargetMutable(claw: ClawRecord): void {
   if (claw.observed.phase === "deleted" || claw.observed.phase === "deleting" || claw.observed.deletion) {
-    throw new Error(`cannot apply policy to deleting or deleted claw ${claw.desired.name}`);
+    throw requestError(`cannot apply policy to deleting or deleted claw ${claw.desired.name}`);
   }
 }
 

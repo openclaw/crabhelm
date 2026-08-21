@@ -1,3 +1,5 @@
+import { requestError } from "./errors.js";
+
 export type GitHubImportQuery =
   | {
       scope: "organization";
@@ -116,14 +118,14 @@ function normalizeQuery(value: GitHubImportQuery): GitHubImportQuery {
   if (input.scope === "organization") {
     const role = input.role ?? "all";
     if (role !== "all" && role !== "admin" && role !== "member") {
-      throw new Error("organization role must be all, admin, or member");
+      throw requestError("organization role must be all, admin, or member");
     }
     return { scope: "organization", organization, role };
   }
   if (input.scope === "team") {
     const role = input.role ?? "all";
     if (role !== "all" && role !== "maintainer" && role !== "member") {
-      throw new Error("team role must be all, maintainer, or member");
+      throw requestError("team role must be all, maintainer, or member");
     }
     return {
       scope: "team",
@@ -135,7 +137,7 @@ function normalizeQuery(value: GitHubImportQuery): GitHubImportQuery {
   if (input.scope === "repository") {
     const permission = input.permission ?? "maintain";
     if (permission !== "maintain" && permission !== "admin") {
-      throw new Error("repository permission must be maintain or admin");
+      throw requestError("repository permission must be maintain or admin");
     }
     return {
       scope: "repository",
@@ -144,7 +146,7 @@ function normalizeQuery(value: GitHubImportQuery): GitHubImportQuery {
       permission,
     };
   }
-  throw new Error("GitHub import scope must be organization, team, or repository");
+  throw requestError("GitHub import scope must be organization, team, or repository");
 }
 
 function queryPath(query: GitHubImportQuery): string {
@@ -185,10 +187,10 @@ function normalizeMember(value: unknown, query: GitHubImportQuery): GitHubImport
 }
 
 function requireSlug(value: unknown, label: string): string {
-  if (typeof value !== "string") throw new Error(`${label} is required`);
+  if (typeof value !== "string") throw requestError(`${label} is required`);
   const clean = value.trim().toLowerCase();
   if (!/^[a-z\d](?:[a-z\d_.-]{0,98}[a-z\d])?$/.test(clean)) {
-    throw new Error(`${label} is invalid`);
+    throw requestError(`${label} is invalid`);
   }
   return clean;
 }

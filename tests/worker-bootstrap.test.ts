@@ -172,6 +172,24 @@ test("live inference proof checks the exact ClawRouter base before the model tur
   await run("/bin/bash", ["-n", "-c", command]);
 });
 
+test("live inference validators pass dynamic expectations as arguments", async () => {
+  const model = "clawrouter/openai/model'); process.exit(0); //";
+  const command = inferenceProbeCommand(
+    model,
+    testReleaseMarker,
+    testNodeId,
+    "CRABHELM_ROUTER_INFERENCE",
+    1,
+    "a".repeat(64),
+    true,
+    "https://clawrouter.example.test",
+  );
+  assert.doesNotMatch(command, /result\?\.model === ["']/u);
+  assert.match(command, /const expectedModel = process\.argv\[2\]/u);
+  assert.ok(command.includes("'clawrouter/openai/model'\"'\"'); process.exit(0); //'"));
+  await run("/bin/bash", ["-n", "-c", command]);
+});
+
 test("terminal evidence is bound to a fresh inspection label", async () => {
   const label = "CRABHELM_deadbeef";
   const status = bootstrapStatusCommand("", label);
