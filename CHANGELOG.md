@@ -2,7 +2,6 @@
 
 ## Unreleased
 
-- Cancel governed GitHub confirmation polling, grant requests, and execution requests when the OpenClaw tool is cancelled. Thanks @SebTardif.
 - Abort hung Cloudflare terminal WebSocket upgrades after 15 seconds, matching the AWS handshake budget. Thanks @SebTardif.
 - Pin the reviewed Crabbox appliance to OpenClaw, Slack, and `diagnostics-otel` `2026.7.1` with upstream managed-ClawRouter and SQLite plugin-metadata migration backports plus provider-compatible route probes.
 - Harden AWS FakeCo admission with explicit verified-email handling for Cognito UserInfo, a locked Slack-off first-canary path without placeholder secrets or ingress, and ALB cookie-shard logout to an unauthenticated landing page.
@@ -18,3 +17,4 @@
 - Add per-claw credential rotation: bumping the credential epoch (console button, `POST /api/claws/<id>/rotate-credentials`, or admin RPC) drives one release-pinned in-place reinstall that re-fetches rotated Worker secrets before the claw reports ready again.
 - Allow OpenClaw GitHub organization members through Cloudflare Access and recognize configured administrator identities.
 - Add Cloudflare Access identity, signed central Slack ingress, encrypted per-claw HTTPS runtime dispatch, GitHub OAuth with governed tools, confirmation controls, runtime replacement, and live integration status; remove operator-token and raw-credential setup from the console.
+- Cancel governed GitHub confirmation polling, grant requests, and execution requests when the OpenClaw tool is cancelled. Thanks @SebTardif.
