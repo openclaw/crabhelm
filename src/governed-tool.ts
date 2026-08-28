@@ -1,6 +1,7 @@
 import { jsonResult, type AnyAgentTool } from "openclaw/plugin-sdk/core";
 import { Type } from "typebox";
 import { lstat, readFile } from "node:fs/promises";
+import { setTimeout as sleep } from "node:timers/promises";
 import path from "node:path";
 
 const parameters = Type.Object({
@@ -37,7 +38,8 @@ export function createGovernedGithubTool(stateDir: string): AnyAgentTool {
     label: "Governed GitHub",
     description: "Read repository or issue metadata, or post a confirmed issue comment, using the requester's connected GitHub identity. Credentials never enter this runtime.",
     parameters,
-    async execute(_toolCallId, raw) {
+    async execute(_toolCallId, raw, signal) {
+      signal?.throwIfAborted();
       const params = raw as Params;
       const context = await readTurnContext(stateDir);
       const controlUrl = runtimeUrl();
@@ -45,19 +47,19 @@ export function createGovernedGithubTool(stateDir: string): AnyAgentTool {
       if (params.capability !== "github.repository.read") args.issueNumber = requiredIssue(params.issueNumber);
       if (params.capability === "github.issue.comment") args.body = requiredBody(params.body);
       const input = { capabilityId: params.capability, target: params.repository, arguments: args };
-      let issued = await issue(controlUrl, context.turnToken, input);
+      let issued = await issue(controlUrl, context.turnToken, input, signal);
       if (issued.confirmationRequired && issued.confirmation?.id) {
         const confirmationId = issued.confirmation.id;
-        const status = await waitForConfirmation(controlUrl, context.turnToken, confirmationId);
+        const status = await waitForConfirmation(controlUrl, context.turnToken, confirmationId, signal);
         if (status !== "approved") return jsonResult({ ok: false, confirmation: status, message: `Requester ${status} the GitHub action.` });
-        issued = await issue(controlUrl, context.turnToken, { ...input, confirmationId });
+        issued = await issue(controlUrl, context.turnToken, { ...input, confirmationId }, signal);
       }
       if (!issued.grant || !issued.invocation?.id || !issued.executeUrl) throw new Error("Crabhelm did not issue a governed invocation");
       const execute = new URL(issued.executeUrl);
       if (execute.origin !== new URL(controlUrl).origin || execute.pathname !== "/api/tools/github/execute") throw new Error("Crabhelm returned an invalid tool endpoint");
       const response = await fetch(execute, {
         method: "POST",
-        signal: AbortSignal.timeout(30_000),
+        signal: requestSignal(30_000, signal),
         headers: { authorization: `Bearer ${issued.grant}`, "content-type": "application/json" },
         body: JSON.stringify({ invocationId: issued.invocation.id, arguments: args }),
       });
@@ -68,10 +70,10 @@ export function createGovernedGithubTool(stateDir: string): AnyAgentTool {
   };
 }
 
-async function issue(controlUrl: string, turnToken: string, input: Record<string, unknown>): Promise<IssuedInvocation> {
+async function issue(controlUrl: string, turnToken: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<IssuedInvocation> {
   const response = await fetch(new URL("/api/runtime/invocations/issue", controlUrl), {
     method: "POST",
-    signal: AbortSignal.timeout(30_000),
+    signal: requestSignal(30_000, signal),
     headers: { authorization: `Bearer ${turnToken}`, "content-type": "application/json" },
     body: JSON.stringify(input),
   });
@@ -80,19 +82,25 @@ async function issue(controlUrl: string, turnToken: string, input: Record<string
   return result as IssuedInvocation;
 }
 
-async function waitForConfirmation(controlUrl: string, turnToken: string, id: string): Promise<string> {
+async function waitForConfirmation(controlUrl: string, turnToken: string, id: string, signal?: AbortSignal): Promise<string> {
   const deadline = Date.now() + 9 * 60 * 1000;
   while (Date.now() < deadline) {
     const response = await fetch(new URL(`/api/runtime/confirmations/${encodeURIComponent(id)}`, controlUrl), {
-      signal: AbortSignal.timeout(15_000),
+      signal: requestSignal(15_000, signal),
       headers: { authorization: `Bearer ${turnToken}` },
     });
     const result = await boundedJson(response);
     if (!response.ok) throw new Error(providerError(result, response.status));
     if (result.status !== "pending") return String(result.status);
-    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    await sleep(2_000, undefined, { signal });
   }
   return "expired";
+}
+
+function requestSignal(timeoutMs: number, signal?: AbortSignal): AbortSignal {
+  signal?.throwIfAborted();
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
 async function readTurnContext(stateDir: string): Promise<TurnContext> {

@@ -44,6 +44,8 @@ Identity, baseline instructions, approved skills, tool policy, and Gateway confi
 
 Policy classifies governed capabilities by risk. External messages, production writes, access changes, destructive operations, and other configured actions require confirmation bound to requester, persona, actor, capability, target, arguments digest, and expiry. Replaying a confirmation for another action must fail.
 
+Cancelling the OpenClaw tool stops its GitHub confirmation polling and in-flight control-plane requests. Cancellation prevents subsequent grant and execution requests; it cannot undo an external write already accepted by the control plane.
+
 ## Audit
 
 Each meaningful decision records timestamp, requester, persona, selected actor, actor mode, capability, target, policy version, confirmation state, outcome, runtime identity, and correlation id. Content, prompts, model replies, credential values, and unrestricted provider responses are excluded by default.
