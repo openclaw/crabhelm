@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Pin pnpm to 11.13.1 so fresh installs do not select the broken 11.13.0 executable release.
 - Abort hung Cloudflare terminal WebSocket upgrades after 15 seconds, matching the AWS handshake budget. Thanks @SebTardif.
 - Pin the reviewed Crabbox appliance to OpenClaw, Slack, and `diagnostics-otel` `2026.7.1` with upstream managed-ClawRouter and SQLite plugin-metadata migration backports plus provider-compatible route probes.
 - Harden AWS FakeCo admission with explicit verified-email handling for Cognito UserInfo, a locked Slack-off first-canary path without placeholder secrets or ingress, and ALB cookie-shard logout to an unauthenticated landing page.
