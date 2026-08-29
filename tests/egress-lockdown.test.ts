@@ -79,7 +79,14 @@ esac
   );
   await writeExecutable(path.join(bin, "sudo"), "#!/usr/bin/env bash\n[[ \"$1\" == -n ]] && shift\nexec \"$@\"\n");
   await writeExecutable(path.join(bin, "systemctl"), "#!/usr/bin/env bash\nexit 0\n");
-  await writeExecutable(path.join(bin, "id"), "#!/usr/bin/env bash\nprintf '0\\n'\n");
+  // The installer runs as root, but its managed agent must have a non-root UID.
+  await writeExecutable(path.join(bin, "id"), `#!/usr/bin/env bash
+case "$*" in
+  '-u') printf '0\\n' ;;
+  '-u crabhelm-agent') printf '1001\\n' ;;
+  *) exit 1 ;;
+esac
+`);
   return { root, home, bin, guestLog, archiveId };
 }
 
@@ -152,12 +159,12 @@ case "\${1:-}" in
       cat <<'RULES'
 table inet crabhelm_egress {
  chain output { type filter hook output priority filter; policy accept;
-  meta skuid 0 oifname "lo" accept
-  meta skuid 0 ip daddr 169.254.169.254 counter packets 0 bytes 0 drop
-  meta skuid 0 ip6 daddr fd00:ec2::254 counter packets 0 bytes 0 drop
-  meta skuid 0 udp dport { 53, 67, 68, 123, 546, 547 } accept
-  meta skuid 0 tcp dport { 53, 443 } accept
-  meta skuid 0 counter packets 0 bytes 0 drop comment "default agent egress deny"
+  meta skuid 1001 oifname "lo" accept
+  meta skuid 1001 ip daddr 169.254.169.254 counter packets 0 bytes 0 drop
+  meta skuid 1001 ip6 daddr fd00:ec2::254 counter packets 0 bytes 0 drop
+  meta skuid 1001 udp dport { 53, 67, 68, 123, 546, 547 } accept
+  meta skuid 1001 tcp dport { 53, 443 } accept
+  meta skuid 1001 counter packets 0 bytes 0 drop comment "default agent egress deny"
  }
 }
 RULES
