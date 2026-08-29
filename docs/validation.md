@@ -25,6 +25,8 @@ Live evidence is separate from unit and simulator evidence. Detailed production 
 
 ## Repeatable checks
 
+Pull requests and pushes to `main` run the full `pnpm check` gate in `.github/workflows/ci.yml` on Node.js 22 with the pnpm version from `package.json` and a frozen lockfile. A disposable PostgreSQL 17 service sets `CRABHELM_TEST_POSTGRES_URL`, so database integration tests run in CI instead of skipping. Locally, those tests still skip when the variable is unset. The single job caches the pnpm store, cancels superseded runs, and has a 15-minute timeout.
+
 ```bash
 pnpm check
 pnpm exec wrangler deploy --dry-run
