@@ -1,5 +1,5 @@
-ARG NODE_VERSION=22.23.1
-ARG NODE_IMAGE_DIGEST=sha256:a149cd71dccd68704a07d4e4ca3e610c27301852b0f556865cfdb6e2856f8bed
+ARG NODE_VERSION=22.23.2
+ARG NODE_IMAGE_DIGEST=sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
 
 FROM node:${NODE_VERSION}-bookworm-slim@${NODE_IMAGE_DIGEST} AS dependencies
 
@@ -7,7 +7,7 @@ ENV PNPM_HOME=/pnpm
 ENV PATH=${PNPM_HOME}:${PATH}
 WORKDIR /app
 
-RUN corepack enable && corepack prepare pnpm@11.24.0 --activate
+RUN corepack enable && corepack prepare pnpm@11.25.0 --activate
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm config set store-dir /pnpm/store && \
