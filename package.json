@@ -31,21 +31,21 @@
     }
   },
   "devDependencies": {
-    "@aws-sdk/client-s3": "3.1121.0",
-    "@aws-sdk/client-sqs": "3.1121.0",
+    "@aws-sdk/client-s3": "3.1124.0",
+    "@aws-sdk/client-sqs": "3.1124.0",
     "@cloudflare/vitest-pool-workers": "0.22.0",
-    "@cloudflare/workers-types": "5.20260829.1",
-    "@types/node": "26.4.0",
+    "@cloudflare/workers-types": "5.20260902.1",
+    "@types/node": "26.4.1",
     "@types/pg": "8.23.1",
     "@types/ws": "8.18.1",
     "@typescript/native-preview": "7.0.0-dev.20260707.2",
     "esbuild": "0.28.2",
     "jose": "6.2.10",
     "pg": "8.23.0",
-    "tsx": "4.23.12",
-    "typebox": "1.3.20",
+    "tsx": "4.23.13",
+    "typebox": "1.3.25",
     "vitest": "4.1.11",
-    "wrangler": "4.127.1",
+    "wrangler": "4.128.0",
     "ws": "8.21.3"
   },
   "files": [
@@ -56,7 +56,7 @@
     "README.md",
     "openclaw.plugin.json"
   ],
-  "packageManager": "pnpm@11.24.0",
+  "packageManager": "pnpm@11.25.0",
   "openclaw": {
     "extensions": [
       "./dist/index.js"
