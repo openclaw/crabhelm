@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix duplicate Slack replies when Cloudflare cleanup overlaps a replayed runtime completion, while preserving failed-delivery retries.
 - Refresh AWS SDK and development dependencies, pin pnpm to 11.25.0, update the AWS control-plane container to Node.js 22.23.2, and apply the AWS credentials Action's account-ID handling and retry fixes.
 - Pin pnpm to 11.13.1 so fresh installs do not select the broken 11.13.0 executable release.
 - Abort hung Cloudflare terminal WebSocket upgrades after 15 seconds, matching the AWS handshake budget. Thanks @SebTardif.

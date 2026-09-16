@@ -1,5 +1,5 @@
-import { env } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { env, reset } from "cloudflare:test";
+import { afterEach, describe, expect, it } from "vitest";
 
 const CLAW_ID = "685b2bda-351e-450b-a91c-45938c54454f";
 
@@ -71,6 +71,9 @@ function messageStream(socket: WebSocket): { next(): Promise<Record<string, unkn
 }
 
 describe("runtime bridge reconnect in workerd", () => {
+  // Turn fixtures schedule alarms; remove them before the module runner closes.
+  afterEach(() => reset());
+
   it("replaces a stale socket for the same runtime instead of rejecting the new bridge", async () => {
     const first = await connect("runtime-a", "refresh-1");
     expect(await nextMessage(first)).toMatchObject({ type: "runtime.ready", clawId: CLAW_ID });

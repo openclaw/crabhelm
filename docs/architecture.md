@@ -73,6 +73,8 @@ For every accepted turn, the per-claw coordinator encrypts the prompt with AES-G
 
 The per-claw coordinator registers the grant JTI before release and consumes it atomically once, using Durable Object storage on Cloudflare or transactional PostgreSQL state on AWS. Prompt text and runtime-supplied identity claims are never authority. Runtime and turn tokens are audience-bound; the turn fixes requester, persona, claw, and Slack response location.
 
+Cloudflare reply delivery shares each in-flight Slack post across cleanup and repeated runtime completions, and checks persisted delivery state before using a queued snapshot. Retryable failures remain pending for a later alarm, including after a coordinator restart. Delivery remains at least once when Slack accepts a post but its response or the subsequent state write is lost.
+
 ## Governed tool path
 
 The agent runtime proposes a capability call; it does not receive a durable OAuth token. The controlled GitHub wrapper verifies and consumes the invocation grant, recomputes capability-specific arguments, enforces actor and confirmation policy, decrypts the selected credential only for the outbound provider request, and returns a bounded result projection. Long-lived OAuth grants remain as AES-GCM envelopes in the selected backend's dedicated private object-store vault; control-plane state contains metadata only. GitHub connects through the OAuth authorization-code flow; direct credential upload is disabled.

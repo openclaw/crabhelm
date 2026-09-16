@@ -50,6 +50,8 @@ type JobRow = {
 };
 
 export class CrabhelmClawCoordinator extends DurableObject<Env> {
+  readonly #deliveries = new Map<string, Promise<void>>();
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
@@ -515,7 +517,22 @@ export class CrabhelmClawCoordinator extends DurableObject<Env> {
     if (updated.rowsWritten === 1) await this.#deliver(this.ctx.storage.sql.exec<JobRow>("SELECT * FROM turn_jobs WHERE id = ?", job.id).one());
   }
 
-  async #deliver(job: JobRow): Promise<void> {
+  #deliver(candidate: JobRow): Promise<void> {
+    const existing = this.#deliveries.get(candidate.id);
+    if (existing) return existing;
+    const delivery = this.#deliverPending(candidate.id).finally(() => {
+      this.#deliveries.delete(candidate.id);
+    });
+    this.#deliveries.set(candidate.id, delivery);
+    return delivery;
+  }
+
+  async #deliverPending(id: string): Promise<void> {
+    // Alarm snapshots can outlive another event's delivery of the same job.
+    const job = this.ctx.storage.sql.exec<JobRow>(
+      "SELECT * FROM turn_jobs WHERE id = ? AND delivery_status = 'pending'", id,
+    ).toArray()[0];
+    if (!job) return;
     const source = JSON.parse(job.source_json) as SlackTurnSource;
     if (
       !slackIngressEnabled(this.env) ||
