@@ -1,5 +1,11 @@
 autoInstallPeers: false
 
+# Keep the Worker toolchain on patched releases until its pins catch up.
+overrides:
+  'miniflare>sharp': 0.35.5
+  'miniflare>undici': 7.29.1
+  source-map-js: 1.2.2
+
 allowBuilds:
   esbuild: true
   sharp: false
