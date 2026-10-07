@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Refresh stale runtime credentials before claiming work and stop every outstanding agent process group when a connection ticket is rejected, including delayed or overlapping shutdowns. Thanks @SebTardif.
 - Resume and buffer early AWS runtime WebSocket messages without letting closed or overflowing reconnects evict a healthy runtime. Thanks @SebTardif.
 - Keep deletion-time workspace inspection from relaunching the appliance installer. Thanks @SebTardif.
 - Report capped GitHub member imports as truncated even when the final page is short. Thanks @SebTardif.

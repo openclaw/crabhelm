@@ -107,6 +107,10 @@ The console and API expose desired versus observed router/model/provider identit
 
 Treat the fleet router origin, tenant, provider allowlist, model-to-provider map, and credential-derivation secret as installation identity. Existing claws fail closed if their persisted desired router no longer matches those settings; move a disposable fleet or use a reviewed migration rather than changing them in place. Routine scoped-token rotation uses each claw's credential epoch and does not rotate the fleet derivation secret.
 
+## Runtime credential recovery
+
+The runtime bridge refreshes persisted credentials that are at least five minutes old before claiming work, and remembers refreshes requested while disconnected. A rejected connection ticket (HTTP 401 or 403) stops reconnect attempts and terminates outstanding agent process groups before the bridge exits with a failure status. SIGTERM-resistant groups receive SIGKILL, including when shutdown timers run late.
+
 ## Managed OpenTelemetry
 
 Administrators can set per-claw trace and metric export through `PATCH /api/claws/<id>` or the service-bound admin RPC. Supply an HTTPS OTLP base endpoint; Crabhelm appends `/v1/traces` and `/v1/metrics`, keeps OTLP logs and all prompt/response/tool/system-prompt capture disabled, and requires at least one of traces or metrics when export is enabled.

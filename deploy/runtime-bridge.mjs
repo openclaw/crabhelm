@@ -24,7 +24,15 @@ let stopped = false;
 let reconnectDelay = 1000;
 let resetGeneration;
 let activeRunCancel;
-let refreshPending = false;
+const pendingStops = new Set();
+const rejectedTicketStopMs = 1_000;
+
+function trackStop(stop) {
+  pendingStops.add(stop);
+  void stop.finally(() => pendingStops.delete(stop));
+  return stop;
+}
+let refreshPending = Date.now() - lstatSync(runtimeTokenFile).mtimeMs >= 5 * 60 * 1000;
 let refreshRetry;
 
 metadataInfo("runtime_bridge_started", { transport: "websocket" });
@@ -101,6 +109,13 @@ async function connectionTicket() {
     signal: AbortSignal.timeout(15_000),
     headers: { authorization: `Bearer ${runtimeToken}`, accept: "application/json" },
   });
+  if (response.status === 401 || response.status === 403) {
+    stopped = true;
+    await activeRunCancel?.("runtime ticket rejected", rejectedTicketStopMs);
+    await Promise.allSettled(pendingStops);
+    metadataLog("runtime_bridge_connection_failed", new Error(`runtime ticket request failed (${response.status})`));
+    process.exit(1);
+  }
   if (!response.ok) throw new Error(`runtime ticket request failed (${response.status})`);
   const value = await response.json();
   if (typeof value?.ticket !== "string" || value.ticket.length > 4096) throw new Error("runtime ticket response is invalid");
@@ -194,13 +209,16 @@ async function handleTurn(ws, message) {
 }
 
 function requestJob(ws) {
-  if (stopped || working || claiming || ws?.readyState !== WebSocket.OPEN) return;
+  if (stopped || refreshPending || working || claiming || ws?.readyState !== WebSocket.OPEN) return;
   claiming = true;
   ws.send(JSON.stringify({ type: "job.claim" }));
 }
 
 function requestRefresh() {
-  if (socket?.readyState !== WebSocket.OPEN) return;
+  if (socket?.readyState !== WebSocket.OPEN) {
+    refreshPending = true;
+    return;
+  }
   refreshPending = true;
   socket.send(JSON.stringify({ type: "runtime.refresh" }));
   clearTimeout(refreshRetry);
@@ -252,16 +270,20 @@ async function run(command, args, timeoutMs, stdoutReady) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (activeRunCancel === cancel) activeRunCancel = undefined;
+      if (!stopPromise && activeRunCancel === cancel) activeRunCancel = undefined;
       child.stdout.destroy();
       child.stderr.destroy();
       callback();
     };
-    const cancel = (reason) => {
-      if (failure) return;
+    let stopPromise;
+    const beginGroupStop = (killAfterMs) => trackStop(forceStopChild(child, killAfterMs).finally(() => {
+      if (activeRunCancel === cancel) activeRunCancel = undefined;
+    }));
+    const cancel = (reason, killAfterMs = 10_000) => {
+      if (stopPromise) return stopPromise;
       failure = new Error(reason);
-      terminateChild(child, "SIGTERM");
-      setTimeout(() => terminateChild(child, "SIGKILL"), 10_000).unref();
+      stopPromise = beginGroupStop(killAfterMs);
+      return stopPromise;
     };
     activeRunCancel = cancel;
     const timer = setTimeout(() => cancel("OpenClaw agent timed out"), timeoutMs);
@@ -271,8 +293,7 @@ async function run(command, args, timeoutMs, stdoutReady) {
       stdout.push(chunk);
       const output = Buffer.concat(stdout).toString("utf8");
       if (stdoutReady?.(output)) {
-        terminateChild(child, "SIGTERM");
-        setTimeout(() => terminateChild(child, "SIGKILL"), 1_000).unref();
+        if (!stopPromise) stopPromise = beginGroupStop(1_000);
         settle(() => resolve({ stdout: output }));
       }
     });
@@ -291,6 +312,37 @@ async function run(command, args, timeoutMs, stdoutReady) {
 function hasAgentOutput(raw) {
   try { extractAgentText(raw); return true; }
   catch { return false; }
+}
+
+function forceStopChild(child, killAfterMs) {
+  const started = Date.now();
+  let escalatedAt;
+  terminateChild(child, "SIGTERM");
+  return new Promise((resolve) => {
+    const tick = () => {
+      if (!processGroupAlive(child) || (escalatedAt !== undefined && Date.now() - escalatedAt >= 2_000)) {
+        resolve();
+        return;
+      }
+      if (escalatedAt === undefined && Date.now() - started >= killAfterMs) {
+        escalatedAt = Date.now();
+        terminateChild(child, "SIGKILL");
+      }
+      // Keep shutdown alive through escalation, even if earlier ticks were delayed.
+      setTimeout(tick, 50);
+    };
+    tick();
+  });
+}
+
+function processGroupAlive(child) {
+  if (!child.pid) return false;
+  try {
+    process.kill(process.platform === "win32" ? child.pid : -child.pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== "ESRCH";
+  }
 }
 
 function terminateChild(child, signal) {
