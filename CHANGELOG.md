@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Refresh compatible AWS SDK, Worker, database, validation, development, pnpm, and GitHub Actions dependencies; patch Miniflare's Sharp/Undici dependencies and source-map-js to clear the tooling audit.
 - Refresh stale runtime credentials before claiming work and stop every outstanding agent process group when a connection ticket is rejected, including delayed or overlapping shutdowns. Thanks @SebTardif.
 - Resume and buffer early AWS runtime WebSocket messages without letting closed or overflowing reconnects evict a healthy runtime. Thanks @SebTardif.
 - Keep deletion-time workspace inspection from relaunching the appliance installer. Thanks @SebTardif.
