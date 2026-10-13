@@ -9,6 +9,7 @@
     "types": ["node", "@cloudflare/vitest-pool-workers/types"]
   },
   "include": [
+    "tests/governance-invocation.test.ts",
     "tests/workers/**/*.ts",
     "vitest.workers.config.ts",
     "worker-configuration.d.ts",

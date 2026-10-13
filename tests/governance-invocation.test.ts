@@ -41,7 +41,7 @@ async function fixture(t: TestContext, providerStatus = 201) {
   };
   const vaultKey = Buffer.alloc(32, 7).toString("base64url");
   const vault = new OAuthVault(bucket, vaultKey);
-  const connectionId = "connection-fixture";
+  const connectionId = "00000000-0000-4000-8000-000000000001";
   const objectKey = await vault.put(connectionId, principal.id, "github", "synthetic-credential");
   await registry.registerConnection({ principalId: principal.id, provider: "github", label: "Fixture", scopes: ["repo:write"], secret: "fixture" }, objectKey, principal.id, connectionId);
   const argumentsDigest = invocationArgumentsDigest({ capabilityId: "github.issue.comment", target: "example/repo", arguments: args });
