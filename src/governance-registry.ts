@@ -289,11 +289,19 @@ export class GovernanceRegistry {
   }
 
   async updateInvocation(id: string, patch: Partial<InvocationRecord>): Promise<InvocationRecord> {
-    const current = await this.#stores.invocations.lookup(id);
-    if (!current) throw new Error("invocation not found");
-    const next = { ...current, ...patch, id: current.id };
-    await this.#stores.invocations.register(id, next);
-    return next;
+    return this.#serialize(async () => {
+      const current = await this.#stores.invocations.lookup(id);
+      if (!current) throw new Error("invocation not found");
+      // Match the coordinator's terminal outcome fence. Audit failures
+      // and repeated completion cannot rewrite a recorded terminal outcome.
+      if (patch.status && !["issued", "running"].includes(current.status)) {
+        if (patch.status !== current.status) throw new Error("invocation outcome is final");
+        return current;
+      }
+      const next = { ...current, ...patch, id: current.id };
+      await this.#stores.invocations.register(id, next);
+      return next;
+    });
   }
 
   async managedSpecForClaw(claw: ClawRecord): Promise<ManagedAgentSpec> {

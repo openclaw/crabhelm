@@ -83,6 +83,8 @@ Wrappers run inside the selected control-plane trust boundary or on an approved 
 
 Each decision emits identity-complete audit metadata. High-volume audit delivery uses a Queue and approved durable sink; reconciliation state retains only bounded operational evidence.
 
+After the GitHub request helper returns a successful result, later bookkeeping cannot turn that result into a failed action. The response returns `ok: true` and its result even if an outcome write or audit export fails. Degraded responses add at most three `warnings`, each with a fixed `code`, bounded `message`, `invocationId`, and an `eventId` when a recorded audit event could not be queued. A warning never authorizes repeating the GitHub action. Failed requests preserve their original error and HTTP status; the governed tool also shows any bookkeeping warnings. Warnings report incomplete recording or delivery, not an automatic retry or a durable export guarantee. Provider-response decoding and transport uncertainty remain separate from bookkeeping failures.
+
 ## Read-only agent specification
 
 Persona identity, baseline instructions, skill manifests, capability policy, and Gateway configuration are immutable versioned artifacts owned by Crabhelm. The appliance verifies their digest and materializes them read-only. Runtime memory, sessions, and work products remain separate writable state. An agent cannot promote a skill, rewrite its identity, or broaden its own tool policy.

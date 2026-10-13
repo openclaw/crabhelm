@@ -130,3 +130,16 @@ for (const outcome of ["approved", "denied", "expired"]) {
     assert.equal(requests.length, outcome === "approved" ? 4 : 2);
   });
 }
+
+for (const success of [true, false]) {
+  test(`governed tool exposes bookkeeping warnings with the original ${success ? "result" : "error"}`, async (t) => {
+    const tool = await fixture(t);
+    const warning = { code: "audit_not_queued", message: "The recorded audit event could not be queued for archival.", invocationId: "invocation-1" };
+    const body = success ? { ok: true, result: { id: 123 }, warnings: [warning] } : { error: "Original provider error", warnings: [warning] };
+    t.mock.method(globalThis, "fetch", async (input: URL) => input.pathname.endsWith("/issue")
+      ? Response.json(grant, { status: 201 })
+      : Response.json(body, { status: success ? 200 : 422 }));
+    if (success) assert.deepEqual((await tool.execute("call-1", params)).details, body);
+    else await assert.rejects(tool.execute("call-1", params), { message: `Original provider error\n${warning.message}` });
+  });
+}
