@@ -2,8 +2,7 @@ import {
   SendMessageCommand,
   type SQSClient,
 } from "@aws-sdk/client-sqs";
-import type { GovernanceAuditEvent } from "../src/governance-types.js";
-import type { ObjectPutOptions } from "./s3-bucket.js";
+import { archiveAuditEvent, type AuditArchive } from "../src/audit-archive.js";
 
 export type QueueSendOptions = {
   contentType?: "json" | "text";
@@ -58,27 +57,14 @@ export type SqsBatchResponse = {
   batchItemFailures: Array<{ itemIdentifier: string }>;
 };
 
-export type AuditArchive = {
-  put(key: string, value: string, options?: ObjectPutOptions): Promise<unknown>;
-};
-
 /** Archives valid events and returns Lambda's partial-batch failure shape. */
 export async function archiveAuditBatch(
   event: SqsEvent,
   archive: AuditArchive,
 ): Promise<SqsBatchResponse> {
   const results = await Promise.allSettled(event.Records.map(async (record) => {
-    const audit = parseAuditEvent(record.body);
-    // Retain malformed records so SQS can redrive them to the configured DLQ.
-    if (!audit) throw new Error("audit message is malformed");
-    const date = audit.at.slice(0, 10);
-    await archive.put(`${date}/${audit.at}-${audit.id}.json`, JSON.stringify(audit), {
-      httpMetadata: { contentType: "application/json" },
-      customMetadata: {
-        classification: "audit-metadata",
-        correlationId: audit.correlationId,
-      },
-    });
+    // Parse and archive failures remain eligible for the configured SQS redrive.
+    await archiveAuditEvent(JSON.parse(record.body), archive);
   }));
   return {
     batchItemFailures: results.flatMap((result, index) => result.status === "rejected"
@@ -89,23 +75,6 @@ export async function archiveAuditBatch(
 
 export function createAuditArchiveHandler(archive: AuditArchive) {
   return (event: SqsEvent): Promise<SqsBatchResponse> => archiveAuditBatch(event, archive);
-}
-
-function parseAuditEvent(body: string): GovernanceAuditEvent | undefined {
-  let value: unknown;
-  try {
-    value = JSON.parse(body);
-  } catch {
-    return undefined;
-  }
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const event = value as Partial<GovernanceAuditEvent>;
-  if (typeof event.id !== "string" || !/^[A-Za-z0-9._:-]{1,200}$/u.test(event.id)) return undefined;
-  if (typeof event.at !== "string" || !/^\d{4}-\d{2}-\d{2}T[^/]{1,80}$/u.test(event.at)) return undefined;
-  if (typeof event.correlationId !== "string" || !/^[A-Za-z0-9._:-]{1,200}$/u.test(event.correlationId)) return undefined;
-  if (typeof event.action !== "string" || typeof event.summary !== "string") return undefined;
-  if (!new Set(["requested", "succeeded", "failed", "denied"]).has(String(event.outcome))) return undefined;
-  return value as GovernanceAuditEvent;
 }
 
 function requireTextBody(value: unknown): string {

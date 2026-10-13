@@ -1,6 +1,6 @@
 import { bootstrapInstallScript, bootstrapTokenClaims, normalizeEgressLockdownMode } from "./bootstrap.js";
 import { signClaims, verifyClaims } from "./security.js";
-import type { GovernanceAuditEvent, RuntimeClaims, RuntimeTicketClaims, SessionClaims } from "../src/governance-types.js";
+import type { RuntimeClaims, RuntimeTicketClaims, SessionClaims } from "../src/governance-types.js";
 import { verifyAccessIdentity, type AccessIdentity } from "./access.js";
 import { handleSlackRequest } from "./slack.js";
 import { slackIntegrationConfigured } from "./slack-config.js";
@@ -109,16 +109,6 @@ export async function handleCrabhelmRequest(
     headers.set("referrer-policy", "no-referrer");
     headers.set("x-content-type-options", "nosniff");
     return new Response(asset.body, { status: asset.status, statusText: asset.statusText, headers });
-}
-
-export async function archiveAuditEvent(event: GovernanceAuditEvent, env: Env): Promise<boolean> {
-  if (!event?.id || !event.at) return false;
-  const date = event.at.slice(0, 10);
-  await env.AUDIT_ARCHIVE.put(`${date}/${event.at}-${event.id}.json`, JSON.stringify(event), {
-    httpMetadata: { contentType: "application/json" },
-    customMetadata: { classification: "audit-metadata", correlationId: event.correlationId },
-  });
-  return true;
 }
 
 async function handleBootstrap(request: Request, env: Env, url: URL): Promise<Response> {

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Retry malformed or unarchived Cloudflare audit messages individually, acknowledge only successful archive writes, and share validation and stable archive formatting with the AWS consumer.
+
 - Bound Cloudflare state-capacity scans to 128-entry pages and select the oldest entry without sorting the entire namespace; keep insertion atomic while preserving existing limits and eviction policy. Reads remain linear, so qualify the additional list-call latency before deployment.
 
 - Refresh compatible AWS SDK, Worker, database, validation, development, pnpm, and GitHub Actions dependencies; patch Miniflare's Sharp/Undici dependencies and source-map-js to clear the tooling audit.
