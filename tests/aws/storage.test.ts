@@ -95,6 +95,25 @@ test("ECS audit poller retains malformed and archive-failed messages for DLQ red
   assert.deepEqual(client.deletedReceipts, ["receipt-good"]);
 });
 
+test("SQS audit replay preserves one S3 key, event body, and metadata", async () => {
+  const client = new FakeS3Client();
+  const bucket = new AwsS3Bucket(client as unknown as S3Client, "test-bucket");
+  const event = { ...auditEvent("replay"), details: { count: 2 }, summary: "metadata only — unchanged" };
+  const result = await archiveAuditBatch({ Records: [
+    { messageId: "delivery-1", body: JSON.stringify(event) },
+    { messageId: "delivery-2", body: JSON.stringify(event) },
+  ] }, bucket);
+  assert.deepEqual(result, { batchItemFailures: [] });
+  const key = "2026-07-07/2026-07-07T00:00:00.000Z-replay.json";
+  assert.deepEqual([...client.objects.keys()], [key]);
+  const object = await bucket.get(key);
+  assert.equal(await object?.text(), JSON.stringify(event));
+  assert.equal(object?.httpMetadata.contentType, "application/json");
+  assert.deepEqual(object?.customMetadata, {
+    classification: "audit-metadata", correlationId: event.correlationId,
+  });
+});
+
 test("ECS audit poller stop aborts an active long poll", async () => {
   const client = new BlockingAuditPollClient();
   const poller = new AuditQueuePoller(client as unknown as SQSClient, "https://sqs.example/audit", {
