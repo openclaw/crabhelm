@@ -134,5 +134,9 @@ async function boundedJson(response: Response): Promise<JsonObject> {
 }
 
 function providerError(value: JsonObject, status: number): string {
-  return typeof value.error === "string" ? value.error.slice(0, 300) : `Crabhelm request failed (${status})`;
+  const error = typeof value.error === "string" ? value.error.slice(0, 300) : `Crabhelm request failed (${status})`;
+  const warnings = Array.isArray(value.warnings) ? value.warnings.slice(0, 3).flatMap((warning) =>
+    warning && typeof warning === "object" && typeof warning.message === "string" ? [warning.message.slice(0, 200)] : []
+  ) : [];
+  return [error, ...warnings].join("\n");
 }

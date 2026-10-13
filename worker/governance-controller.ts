@@ -8,6 +8,12 @@ import { OAuthVault } from "./vault.js";
 import { postSlackConfirmation } from "./slack.js";
 
 const maxBodyBytes = 64 * 1024;
+const invocationWarningMessages = {
+  coordinator_outcome_not_recorded: "The coordinator outcome could not be recorded.",
+  invocation_outcome_not_recorded: "The invocation outcome could not be recorded.",
+  audit_not_recorded: "The audit event could not be recorded.",
+  audit_not_queued: "The recorded audit event could not be queued for archival.",
+} as const;
 
 export class GovernanceController {
   readonly #governance: GovernanceRegistry;
@@ -200,22 +206,44 @@ export class GovernanceController {
     if (!consumed) return json({ error: "invocation grant is expired, mismatched, or already used" }, 409);
     await coordinator.startRun(invocationId);
     await this.#governance.updateInvocation(invocationId, { status: "running" });
+    let result: unknown;
+    let executionError: unknown;
+    let succeeded = false;
     try {
       const connection = await this.#governance.requireConnection(claims.connectionId);
       if (connection.status !== "active" || connection.principalId !== claims.actorId) throw new Error("actor connection is unavailable");
       const credential = await this.#vault.get(connection.vaultKey, connection.id, connection.principalId, connection.provider);
-      const result = await githubRequest(claims, args, credential);
-      await coordinator.finishRun(invocationId, true);
-      await this.#governance.updateInvocation(invocationId, { status: "succeeded", completedAt: new Date().toISOString() });
-      await this.#emit(await this.#governance.audit({ correlationId: invocationId, clawId: claims.clawId, requesterId: claims.requesterId, personaId: claims.personaId, actorId: claims.actorId, actorMode: claims.actorMode, fallbackUsed: claims.fallbackUsed, capabilityId: claims.capabilityId, target: claims.target, policyRevision: claims.policyRevision, confirmationId: claims.confirmationId, action: "tool.github.execute", outcome: "succeeded", summary: `Executed ${claims.capabilityId}` }));
-      return json({ invocationId, ok: true, result });
+      result = await githubRequest(claims, args, credential);
+      succeeded = true;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      await coordinator.finishRun(invocationId, false, message);
-      await this.#governance.updateInvocation(invocationId, { status: "failed", completedAt: new Date().toISOString() });
-      await this.#emit(await this.#governance.audit({ correlationId: invocationId, clawId: claims.clawId, requesterId: claims.requesterId, personaId: claims.personaId, actorId: claims.actorId, actorMode: claims.actorMode, fallbackUsed: claims.fallbackUsed, capabilityId: claims.capabilityId, target: claims.target, policyRevision: claims.policyRevision, confirmationId: claims.confirmationId, action: "tool.github.execute", outcome: "failed", summary: message.slice(0, 240) }));
-      throw error;
+      executionError = error;
     }
+
+    // A completed provider request must never become a failed execution because
+    // a later state write or audit export failed. Report each bookkeeping gap.
+    const outcome = succeeded ? "succeeded" : "failed";
+    const message = succeeded ? "" : executionError instanceof Error ? executionError.message : String(executionError);
+    const warnings: Array<{ code: keyof typeof invocationWarningMessages; message: string; invocationId: string; eventId?: string }> = [];
+    const warn = (code: keyof typeof invocationWarningMessages, eventId?: string) => {
+      warnings.push({ code, message: `${succeeded ? "GitHub action succeeded. Do not repeat it." : "GitHub request failed."} ${invocationWarningMessages[code]}`, invocationId, ...(eventId ? { eventId } : {}) });
+      console.error(JSON.stringify({ event: "invocation_bookkeeping_failed", invocationId, outcome, code, ...(eventId ? { eventId } : {}) }));
+    };
+    try { await coordinator.finishRun(invocationId, succeeded, succeeded ? undefined : message); }
+    catch { warn("coordinator_outcome_not_recorded"); }
+    try { await this.#governance.updateInvocation(invocationId, { status: outcome, completedAt: new Date().toISOString() }); }
+    catch { warn("invocation_outcome_not_recorded"); }
+    let event: GovernanceAuditEvent | undefined;
+    try {
+      event = await this.#governance.audit({ correlationId: invocationId, clawId: claims.clawId, requesterId: claims.requesterId, personaId: claims.personaId, actorId: claims.actorId, actorMode: claims.actorMode, fallbackUsed: claims.fallbackUsed, capabilityId: claims.capabilityId, target: claims.target, policyRevision: claims.policyRevision, confirmationId: claims.confirmationId, action: "tool.github.execute", outcome, summary: succeeded ? `Executed ${claims.capabilityId}` : message.slice(0, 240) });
+    } catch { warn("audit_not_recorded"); }
+    if (event) {
+      try { await this.#emit(event); }
+      catch { warn("audit_not_queued", event.id); }
+    }
+    const warningFields = warnings.length ? { warnings } : {};
+    return succeeded
+      ? json({ invocationId, ok: true, result, ...warningFields })
+      : json({ error: message, ...warningFields }, executionError instanceof SyntaxError ? 400 : 422);
   }
 
   async #emit(event: GovernanceAuditEvent): Promise<void> {
