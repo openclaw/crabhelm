@@ -5,6 +5,10 @@ import worker from "../../worker/index.js";
 
 afterEach(() => vi.restoreAllMocks());
 
+function auditEnv(): Env {
+  return { ...env, GITHUB_OAUTH_CLIENT_SECRET: "test-only-unused" };
+}
+
 function auditEvent(id: string): GovernanceAuditEvent {
   return {
     id,
@@ -44,7 +48,7 @@ describe("audit queue consumer in workerd", () => {
     ]);
     const ctx = createExecutionContext();
 
-    await worker.queue(batch, env);
+    await worker.queue(batch, auditEnv());
 
     expect(await getQueueResult(batch, ctx)).toMatchObject({
       ackAll: false,
@@ -74,7 +78,7 @@ describe("audit queue consumer in workerd", () => {
     });
     const batch = batchOf([["pending", event]]);
     const ctx = createExecutionContext();
-    const running = worker.queue(batch, env);
+    const running = worker.queue(batch, auditEnv());
     await started.promise;
     try {
       expect(await getQueueResult(batch, ctx)).toMatchObject({ explicitAcks: [], retryMessages: [] });
@@ -90,7 +94,7 @@ describe("audit queue consumer in workerd", () => {
     const event = auditEvent("replay");
     for (const id of ["delivery-1", "delivery-2"]) {
       const batch = batchOf([[id, event]]);
-      await worker.queue(batch, env);
+      await worker.queue(batch, auditEnv());
       expect(await getQueueResult(batch, createExecutionContext())).toMatchObject({
         explicitAcks: [id], retryMessages: [],
       });
