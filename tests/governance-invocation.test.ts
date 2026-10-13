@@ -202,5 +202,7 @@ test("registry completion cannot replace or retimestamp a terminal invocation", 
   assert.ok(recorded);
   await assert.rejects(f.registry.updateInvocation(invocationId, { status: "failed" }), /outcome is final/u);
   assert.deepEqual(await f.registry.updateInvocation(invocationId, { status: "succeeded", completedAt: "2099-01-01T00:00:00.000Z" }), recorded);
+  assert.deepEqual(await f.registry.updateInvocation(invocationId, { completedAt: "2099-01-01T00:00:00.000Z" }), recorded);
+  assert.deepEqual(await f.registry.updateInvocation(invocationId, { actorId: "different-fixture-actor" }), recorded);
   assert.deepEqual(await f.invocations.lookup(invocationId), recorded);
 });

@@ -294,8 +294,8 @@ export class GovernanceRegistry {
       if (!current) throw new Error("invocation not found");
       // Match the coordinator's terminal outcome fence. Audit failures
       // and repeated completion cannot rewrite a recorded terminal outcome.
-      if (patch.status && !["issued", "running"].includes(current.status)) {
-        if (patch.status !== current.status) throw new Error("invocation outcome is final");
+      if (!["issued", "running"].includes(current.status)) {
+        if (patch.status !== undefined && patch.status !== current.status) throw new Error("invocation outcome is final");
         return current;
       }
       const next = { ...current, ...patch, id: current.id };
