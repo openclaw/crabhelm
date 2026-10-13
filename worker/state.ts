@@ -27,29 +27,44 @@ export class DurableObjectStateDatabase {
     }
     const prefix = `state:${namespace}:`;
     return {
-      register: async (key, value) => {
+      // Governance also writes outside registry transactions. Keep every page,
+      // capacity decision, eviction, and replacement in the same snapshot.
+      register: (key, value) => this.transaction(async () => {
         requireKey(key);
         const storage = this.#activeStorage();
         const storageKey = `${prefix}${encodeURIComponent(key)}`;
         const existing = await storage.get<StateEntry<T>>(storageKey);
         if (!existing) {
-          const entries = await storage.list<StateEntry<T>>({ prefix });
-          if (entries.size >= maxEntries) {
-            if (options.overflow !== "evict-oldest") {
+          let count = 0;
+          let startAfter: string | undefined;
+          let oldest: { key: string; createdAt: number } | undefined;
+          // A namespace can hold 50,000 payloads. Bound live pages and avoid
+          // filling the storage cache just to enforce capacity or find one victim.
+          for (;;) {
+            const entries = await storage.list<StateEntry<T>>({
+              prefix, startAfter, limit: 128, noCache: true,
+            });
+            count += entries.size;
+            if (count >= maxEntries && options.overflow !== "evict-oldest") {
               throw new Error(`state store entry limit exceeded (${maxEntries})`);
             }
-            const oldest = [...entries.entries()].toSorted((a, b) =>
-              a[1].createdAt - b[1].createdAt || a[0].localeCompare(b[0])
-            )[0];
-            if (oldest) await storage.delete(oldest[0]);
+            for (const [entryKey, entry] of entries) {
+              startAfter = entryKey;
+              if (!oldest || (entry.createdAt - oldest.createdAt ||
+                entryKey.localeCompare(oldest.key)) < 0) {
+                oldest = { key: entryKey, createdAt: entry.createdAt };
+              }
+            }
+            if (entries.size < 128) break;
           }
+          if (count >= maxEntries && oldest) await storage.delete(oldest.key);
         }
         await storage.put(storageKey, {
           key,
           value: structuredClone(value),
           createdAt: Date.now(),
         } satisfies StateEntry<T>);
-      },
+      }),
       lookup: async (key) => {
         requireKey(key);
         const entry = await this.#activeStorage().get<StateEntry<T>>(
