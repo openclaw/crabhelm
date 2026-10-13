@@ -1,4 +1,4 @@
-/// <reference path="../worker-configuration.d.ts" />
+/// <reference types="@cloudflare/workers-types" />
 
 import assert from "node:assert/strict";
 import test from "node:test";
