@@ -1,7 +1,6 @@
-/// <reference types="@cloudflare/workers-types" />
-
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { DurableObjectStorage, DurableObjectTransaction } from "@cloudflare/workers-types";
 import type { StateEntry } from "../src/state.js";
 import { DurableObjectStateDatabase } from "../worker/state.js";
 

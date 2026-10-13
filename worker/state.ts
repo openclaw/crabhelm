@@ -1,16 +1,18 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { DurableObjectStorage, DurableObjectTransaction } from "@cloudflare/workers-types";
 import type { StateEntry, StateStore, StateTransaction } from "../src/state.js";
 
 type Storage = Pick<
   DurableObjectStorage,
   "delete" | "get" | "list" | "put"
 > | Pick<DurableObjectTransaction, "delete" | "get" | "list" | "put">;
+type DatabaseStorage = Storage & Pick<DurableObjectStorage, "transaction">;
 
 export class DurableObjectStateDatabase {
-  readonly #storage: DurableObjectStorage;
+  readonly #storage: DatabaseStorage;
   readonly #transaction = new AsyncLocalStorage<DurableObjectTransaction>();
 
-  constructor(storage: DurableObjectStorage) {
+  constructor(storage: DatabaseStorage) {
     this.#storage = storage;
   }
 
