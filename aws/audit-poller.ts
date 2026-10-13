@@ -4,10 +4,8 @@ import {
   type Message,
   type SQSClient,
 } from "@aws-sdk/client-sqs";
-import {
-  archiveAuditBatch,
-  type AuditArchive,
-} from "./sqs-queue.js";
+import { archiveAuditBatch } from "./sqs-queue.js";
+import type { AuditArchive } from "../src/audit-archive.js";
 
 export type AuditPollerOptions = {
   waitTimeSeconds?: number;
