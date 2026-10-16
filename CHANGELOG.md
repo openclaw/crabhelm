@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Update compatible AWS SDK, Worker tooling, Node.js types, and TypeBox dependencies while retaining patched transitive dependency overrides.
 - Retry malformed or unarchived Cloudflare audit messages individually, acknowledge only successful archive writes, and share validation and stable archive formatting with the AWS consumer.
 
 - Preserve successful GitHub invocation outcomes when bookkeeping or audit export fails, and return bounded warnings without retrying the action or replacing its original failure.
