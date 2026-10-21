@@ -81,7 +81,7 @@ test("appliance builder pins artifacts and guest install verifies the bundle bef
     openclawBackportCommit,
     openclawMigrationBackportCommit,
   ]);
-  assert.equal(manifest.node.version, "22.23.1");
+  assert.equal(manifest.node.version, "22.23.4");
   assert.equal(manifest.node.platform, "linux");
   assert.equal(manifest.node.arch, "x64");
   assert.equal(manifest.slack.version, "2026.7.1");
@@ -411,12 +411,12 @@ async function createTestBuilder(openclawTarball: string): Promise<{ path: strin
 }
 
 async function createNodeFixture(root: string): Promise<string> {
-  const nodeRoot = path.join(root, "node-v22.23.1-linux-x64");
-  const tarball = path.join(root, "node-v22.23.1-linux-x64.tar.xz");
+  const nodeRoot = path.join(root, "node-v22.23.4-linux-x64");
+  const tarball = path.join(root, "node-v22.23.4-linux-x64.tar.xz");
   await mkdir(path.join(nodeRoot, "bin"), { recursive: true });
   await writeFile(
     path.join(nodeRoot, "bin", "node"),
-    `#!/usr/bin/env bash\nif [[ "\${1:-}" = --version ]]; then printf '%s\\n' v22.23.1; exit 0; fi\nexec ${JSON.stringify(process.execPath)} "$@"\n`,
+    `#!/usr/bin/env bash\nif [[ "\${1:-}" = --version ]]; then printf '%s\\n' v22.23.4; exit 0; fi\nexec ${JSON.stringify(process.execPath)} "$@"\n`,
     { mode: 0o755 },
   );
   await run("tar", ["-cJf", tarball, "-C", root, path.basename(nodeRoot)]);

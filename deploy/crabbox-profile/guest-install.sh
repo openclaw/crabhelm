@@ -16,7 +16,7 @@ manifest="$script_dir/manifest.json"
 expected_manifest_sha256="${CRABHELM_BUNDLE_MANIFEST_SHA256:-}"
 expected_node_sha256="${CRABHELM_NODE_SHA256:-}"
 expected_release_id="${CRABHELM_RELEASE_ID:-}"
-pinned_node_version=22.23.1
+pinned_node_version=22.23.4
 node_artifact="$script_dir/artifacts/node-linux-x64.tar.xz"
 
 # Parent/shared Gateway credentials never belong in the child and must not
@@ -78,7 +78,7 @@ const expected = {
 };
 if (
   manifest.schemaVersion !== expected.schemaVersion || manifest.profile !== expected.profile ||
-  manifest.node?.file !== expected.nodeFile || manifest.node?.version !== "22.23.1" ||
+  manifest.node?.file !== expected.nodeFile || manifest.node?.version !== "22.23.4" ||
   manifest.node?.platform !== "linux" || manifest.node?.arch !== "x64" ||
   manifest.openclaw?.file !== expected.openclawFile || manifest.slack?.file !== expected.slackFile || manifest.otel?.file !== expected.otelFile ||
   manifest.crabhelm?.file !== expected.crabhelmFile ||

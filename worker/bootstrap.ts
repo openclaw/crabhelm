@@ -794,10 +794,10 @@ export function inferenceProbeCommand(
   const modelProbeError = "/tmp/crabhelm-model-probe.err";
   const runtimeLauncher = `${home}/.local/share/crabhelm/runtime/start-runtime-bridge.sh`;
   const openclawCli = `${home}/.local/share/crabhelm/openclaw-2026.7.1/bin/openclaw`;
-  const nodeBinary = `${home}/.local/share/crabhelm/node-v22.23.1-${nodeId}-linux-x64/bin/node`;
+  const nodeBinary = `${home}/.local/share/crabhelm/node-v22.23.4-${nodeId}-linux-x64/bin/node`;
   const quotePath = (value: string) => systemManaged ? shellQuote(value) : `"${value}"`;
   const agentCommand = systemManaged
-    ? `sudo -n -u crabhelm-agent /usr/bin/env HOME=${home} OPENCLAW_STATE_DIR=${home}/.openclaw PATH=${home}/.local/share/crabhelm/node-v22.23.1-${nodeId}-linux-x64/bin:${home}/.local/share/crabhelm/openclaw-2026.7.1/bin:/usr/local/bin:/usr/bin:/bin`
+    ? `sudo -n -u crabhelm-agent /usr/bin/env HOME=${home} OPENCLAW_STATE_DIR=${home}/.openclaw PATH=${home}/.local/share/crabhelm/node-v22.23.4-${nodeId}-linux-x64/bin:${home}/.local/share/crabhelm/openclaw-2026.7.1/bin:/usr/local/bin:/usr/bin:/bin`
     : "/usr/bin/env";
   const restartCommand = systemManaged
     ? "sudo -n /usr/bin/systemctl restart crabhelm-agent.service"
@@ -1281,7 +1281,7 @@ mv -f "$marker_temporary" "$marker_dir/crabhelm-credentials-generation"`;
 
   const agentHome = "/var/lib/crabhelm-agent";
   const stateDir = `${agentHome}/.openclaw`;
-  const nodeBin = `${agentHome}/.local/share/crabhelm/node-v22.23.1-${options.nodeSha256}-linux-x64/bin`;
+  const nodeBin = `${agentHome}/.local/share/crabhelm/node-v22.23.4-${options.nodeSha256}-linux-x64/bin`;
   const openclawBin = `${agentHome}/.local/share/crabhelm/openclaw-2026.7.1/bin`;
   const readyId = `${options.releaseId}.${options.archiveId}.${options.nodeSha256}:${options.policyHash}`;
   const egressDependencies = options.egressLockdown === "required"
@@ -1319,7 +1319,7 @@ if "\${egress_privileged[@]}" /usr/bin/pgrep -u "$agent_uid" >/dev/null 2>&1; th
 fi
 legacy_openclaw="$HOME/.local/share/crabhelm/openclaw-2026.6.11/bin/openclaw"
 if [[ -x "$legacy_openclaw" ]]; then
-  PATH="$HOME/.local/share/crabhelm/node-v22.23.1-${options.nodeSha256}-linux-x64/bin:$PATH" "$legacy_openclaw" gateway stop >/dev/null 2>&1 || true
+  PATH="$HOME/.local/share/crabhelm/node-v22.23.4-${options.nodeSha256}-linux-x64/bin:$PATH" "$legacy_openclaw" gateway stop >/dev/null 2>&1 || true
 fi
 /usr/bin/systemctl --user stop openclaw-gateway.service >/dev/null 2>&1 || true
 "\${egress_privileged[@]}" /usr/bin/install -d -o "$agent_user" -g "$agent_user" -m 0700 "$agent_home" "$agent_work"
