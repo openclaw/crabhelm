@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Patch the Worker test toolchain with Vite 8.2.4 and Vitest 4.1.12 to prevent editor command injection and unauthenticated mock-server code injection.
 - Update compatible AWS SDK, Worker tooling, Node.js types, and TypeBox dependencies while retaining patched transitive dependency overrides.
 - Retry malformed or unarchived Cloudflare audit messages individually, acknowledge only successful archive writes, and share validation and stable archive formatting with the AWS consumer.
 

@@ -5,6 +5,7 @@ overrides:
   'miniflare>sharp': 0.35.5
   'miniflare>undici': 7.29.1
   source-map-js: 1.2.2
+  vite: 8.2.4
 
 allowBuilds:
   esbuild: true
