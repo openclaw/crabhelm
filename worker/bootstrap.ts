@@ -11,6 +11,29 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const BOOTSTRAP_TOKEN_TTL_MS = 20 * 60 * 1000;
 const EGRESS_POLICY_VERSION = 2;
+// Both current and distributed installers emit this structured failure to the
+// outer installer log. Read that record, not a mutable cross-account /tmp file.
+const installStageCommand = "install_stage=$(sed -nE 's/^crabhelm guest install: stage=(initial|verify|node|credential|package|plugin|managed-spec|bootstrap) line=[0-9]+ status=[0-9]+$/\\1/p' /tmp/crabhelm-install.log 2>/dev/null | tail -n 1 || true)";
+// The verified installer records its selected executable in the bridge launcher,
+// including in already distributed appliances. Read that locator as data: the
+// Worker version is not the version of every claw's selected appliance.
+const installedNodeResolver = `set -eu
+runtime_home="$1"
+node_id="$2"
+launcher="$runtime_home/.local/share/crabhelm/runtime/start-runtime-bridge.sh"
+[[ -f "$launcher" && ! -L "$launcher" && -O "$launcher" && -r "$launcher" ]] || exit 1
+selected=
+while IFS= read -r line || [[ -n "$line" ]]; do
+  [[ "$line" = node_binary=* ]] || continue
+  [[ -z "$selected" ]] || exit 1
+  [[ "$line" =~ node-v([0-9]+[.][0-9]+[.][0-9]+)-\${node_id}-linux-x64/bin/node ]] || exit 1
+  candidate="$runtime_home/.local/share/crabhelm/node-v\${BASH_REMATCH[1]}-\${node_id}-linux-x64/bin/node"
+  printf -v expected 'node_binary=%q' "$candidate"
+  [[ "$line" = "$expected" ]] || exit 1
+  selected="$candidate"
+done <"$launcher"
+[[ -n "$selected" && -f "$selected" && ! -L "$selected" && -x "$selected" ]] || exit 1
+printf '%s\\n' "$selected"`;
 type WorkerWebSocket = WebSocket & { accept(): void };
 export type TerminalSocket = Pick<
   WebSocket,
@@ -251,7 +274,7 @@ export class CrabboxWorkspaceBootstrap {
         : result === "binary-failed"
         ? "Workspace ready; installed OpenClaw executable was not found"
         : result === "runtime-failed"
-        ? "Workspace ready; installed Node.js runtime was not found"
+        ? "Workspace ready; selected appliance Node.js runtime is missing or invalid; reinstall the selected appliance"
         : result === "restart-failed"
         ? "Workspace ready; OpenClaw Gateway restart failed"
         : result === "gateway-failed"
@@ -295,11 +318,12 @@ export class CrabboxWorkspaceBootstrap {
       this.#brokerToken,
       [
         `printf '%s_BEGIN\\n' ${shellQuote(label)}`,
+        installStageCommand,
         "tail -n 40 \"$HOME/.openclaw/crabhelm-runtime-bridge.log\" 2>/dev/null || true",
-        "printf 'INSTALL_STAGE %s\\n' \"$(head -n 1 /tmp/crabhelm-install-failed-stage 2>/dev/null || echo missing)\"",
+        "printf 'INSTALL_STAGE %s\\n' \"${install_stage:-missing}\"",
         "tail -n 20 /tmp/crabhelm-install.log 2>/dev/null | sed -E 's/(Bearer[[:space:]]+|CRABHELM_RUNTIME_TOKEN=|OPENAI_API_KEY=|CLAWROUTER_API_KEY=|CLAWROUTER_ACCESS_CLIENT_SECRET=)[^[:space:]]+/\\1[REDACTED]/g; s/clawrouter-live-[A-Za-z0-9_-]+-[A-Za-z0-9_-]+/[REDACTED_CLAWROUTER_KEY]/g; s/[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+/[REDACTED_JWT]/g' | sed 's/^/INSTALL_LOG /' || true",
         "bridge_pid=$(tr -cd '0-9' <\"$HOME/.openclaw/crabhelm-runtime-bridge.pid\" 2>/dev/null || true)",
-        "printf 'STATE release=%s install_stage=%s turn_file=%s log_bytes=%s bridge_pid=%s stdout=%s bridge_sha256=%s\\n' \"$(head -n 1 \"$HOME/.openclaw/crabhelm-ready\" 2>/dev/null || echo missing)\" \"$(head -n 1 /tmp/crabhelm-install-failed-stage 2>/dev/null || echo missing)\" \"$(test -f \"$HOME/.openclaw/crabhelm-current-turn.json\" && echo present || echo absent)\" \"$(wc -c <\"$HOME/.openclaw/crabhelm-runtime-bridge.log\" 2>/dev/null || echo missing)\" \"${bridge_pid:-missing}\" \"$(readlink \"/proc/${bridge_pid:-0}/fd/1\" 2>/dev/null || echo missing)\" \"$(sha256sum \"$HOME/.local/share/crabhelm/runtime/runtime-bridge.mjs\" 2>/dev/null | cut -d' ' -f1 || echo missing)\"",
+        "printf 'STATE release=%s install_stage=%s turn_file=%s log_bytes=%s bridge_pid=%s stdout=%s bridge_sha256=%s\\n' \"$(head -n 1 \"$HOME/.openclaw/crabhelm-ready\" 2>/dev/null || echo missing)\" \"${install_stage:-missing}\" \"$(test -f \"$HOME/.openclaw/crabhelm-current-turn.json\" && echo present || echo absent)\" \"$(wc -c <\"$HOME/.openclaw/crabhelm-runtime-bridge.log\" 2>/dev/null || echo missing)\" \"${bridge_pid:-missing}\" \"$(readlink \"/proc/${bridge_pid:-0}/fd/1\" 2>/dev/null || echo missing)\" \"$(sha256sum \"$HOME/.local/share/crabhelm/runtime/runtime-bridge.mjs\" 2>/dev/null | cut -d' ' -f1 || echo missing)\"",
         "ps -eo pid=,ppid=,state=,etimes=,comm= | awk -v parent=\"${bridge_pid:-0}\" '$1 == parent || $2 == parent' | tail -n 10 || true",
         `printf '%s_END\\n' ${shellQuote(label)}`,
       ].join("\n"),
@@ -643,6 +667,7 @@ export function bootstrapStatusCommand(
     ? `{ ${readyIds.map((id) => `grep -Fqx ${shellQuote(id)} ${readyMarker} 2>/dev/null`).join(" || ")}; }${credentialCheck}${egressCheck}`
     : `test -f ${readyMarker}${credentialCheck}${egressCheck}`;
   const command = [
+    installStageCommand,
     `status_label=${shellQuote(statusLabel)}`,
     `if ${readyCheck}; then`,
     ...(retryMarker ? [`  rm -f ${shellQuote(retryMarker)} ${shellQuote(`${retryMarker}.retry`)} ${shellQuote(`${retryMarker}.retry2`)}`] : []),
@@ -694,22 +719,22 @@ export function bootstrapStatusCommand(
       `    touch ${shellQuote(`${retryMarker}.retry2`)}`,
       `    ${launchCommand}`,
       "    printf '%s_STARTED\\n' \"$status_label\"",
-      "  elif grep -Fqx 'node' /tmp/crabhelm-install-failed-stage 2>/dev/null; then",
+      "  elif test \"$install_stage\" = node; then",
     );
   } else {
-    command.push("  if grep -Fqx 'node' /tmp/crabhelm-install-failed-stage 2>/dev/null; then");
+    command.push("  if test \"$install_stage\" = node; then");
   }
   command.push(
     "    printf '%s_INSTALL_FAILED_NODE\\n' \"$status_label\"",
-    "  elif grep -Fqx 'verify' /tmp/crabhelm-install-failed-stage 2>/dev/null; then",
+    "  elif test \"$install_stage\" = verify; then",
     "    printf '%s_INSTALL_FAILED_ARTIFACT\\n' \"$status_label\"",
-    "  elif grep -Fqx 'package' /tmp/crabhelm-install-failed-stage 2>/dev/null; then",
+    "  elif test \"$install_stage\" = package; then",
     "    printf '%s_INSTALL_FAILED_NPM\\n' \"$status_label\"",
-    "  elif grep -Fqx 'plugin' /tmp/crabhelm-install-failed-stage 2>/dev/null; then",
+    "  elif test \"$install_stage\" = plugin; then",
     "    printf '%s_INSTALL_FAILED_PLUGIN_DUPLICATE\\n' \"$status_label\"",
-    "  elif grep -Fqx 'credential' /tmp/crabhelm-install-failed-stage 2>/dev/null; then",
+    "  elif test \"$install_stage\" = credential; then",
     "    printf '%s_INSTALL_FAILED_CREDENTIAL_SOURCE\\n' \"$status_label\"",
-    "  elif grep -Fqx 'bootstrap' /tmp/crabhelm-install-failed-stage 2>/dev/null; then",
+    "  elif test \"$install_stage\" = bootstrap; then",
     "    printf '%s_INSTALL_FAILED_BOOTSTRAP\\n' \"$status_label\"",
     "  elif grep -Fq 'child credential destination must be absent' /tmp/crabhelm-install.log; then",
     "    printf '%s_INSTALL_FAILED_CREDENTIAL\\n' \"$status_label\"",
@@ -794,14 +819,13 @@ export function inferenceProbeCommand(
   const modelProbeError = "/tmp/crabhelm-model-probe.err";
   const runtimeLauncher = `${home}/.local/share/crabhelm/runtime/start-runtime-bridge.sh`;
   const openclawCli = `${home}/.local/share/crabhelm/openclaw-2026.7.1/bin/openclaw`;
-  const nodeBinary = `${home}/.local/share/crabhelm/node-v22.23.1-${nodeId}-linux-x64/bin/node`;
   const quotePath = (value: string) => systemManaged ? shellQuote(value) : `"${value}"`;
   const agentCommand = systemManaged
-    ? `sudo -n -u crabhelm-agent /usr/bin/env HOME=${home} OPENCLAW_STATE_DIR=${home}/.openclaw PATH=${home}/.local/share/crabhelm/node-v22.23.1-${nodeId}-linux-x64/bin:${home}/.local/share/crabhelm/openclaw-2026.7.1/bin:/usr/local/bin:/usr/bin:/bin`
+    ? `sudo -n -u crabhelm-agent /usr/bin/env HOME=${home} OPENCLAW_STATE_DIR=${home}/.openclaw`
     : "/usr/bin/env";
   const restartCommand = systemManaged
     ? "sudo -n /usr/bin/systemctl restart crabhelm-agent.service"
-    : '"$openclaw_cli" gateway restart';
+    : '"${agent_command[@]}" "$openclaw_cli" gateway restart';
   const expectedResponse = routerBaseUrl ? "CLAWROUTER_CANARY_OK" : "671789";
   const validateResponse = [
     "const fs = require('node:fs');",
@@ -839,8 +863,12 @@ export function inferenceProbeCommand(
     `probe_label=${shellQuote(probeLabel)}`,
     "probe_session=\"crabhelm-healthcheck-$(date +%s)-$$\"",
     `openclaw_cli=${quotePath(openclawCli)}`,
-    `node_binary=${quotePath(nodeBinary)}`,
     `agent_command=(${agentCommand})`,
+    `if ! node_binary=$("\${agent_command[@]}" /bin/bash -c ${shellQuote(installedNodeResolver)} crabhelm-node ${quotePath(home)} ${shellQuote(nodeId)}); then`,
+    "  printf '%s\\n' 'crabhelm bootstrap: selected Node.js runtime is missing or invalid; reinstall the selected appliance' >&2",
+    "  probe_result=RUNTIME_FAILED",
+    "else",
+    `agent_command+=("PATH=\${node_binary%/*}:${home}/.local/share/crabhelm/openclaw-2026.7.1/bin:/usr/local/bin:/usr/bin:/bin")`,
     `if "\${agent_command[@]}" test -f ${quotePath(marker)} && "\${agent_command[@]}" grep -Fqx ${shellQuote(markerValue)} ${quotePath(marker)}; then`,
     `  if "\${agent_command[@]}" /bin/bash ${quotePath(runtimeLauncher)}; then probe_result=READY; else probe_result=RUNTIME_FAILED; fi`,
     "else",
@@ -891,6 +919,7 @@ export function inferenceProbeCommand(
     "      *) probe_result=OUTPUT_FAILED ;;",
     "    esac",
     "  fi",
+    "fi",
     "fi",
     "printf '%s_%s\\n' \"$probe_label\" \"$probe_result\"",
   ].join("\n");
@@ -1281,7 +1310,6 @@ mv -f "$marker_temporary" "$marker_dir/crabhelm-credentials-generation"`;
 
   const agentHome = "/var/lib/crabhelm-agent";
   const stateDir = `${agentHome}/.openclaw`;
-  const nodeBin = `${agentHome}/.local/share/crabhelm/node-v22.23.1-${options.nodeSha256}-linux-x64/bin`;
   const openclawBin = `${agentHome}/.local/share/crabhelm/openclaw-2026.7.1/bin`;
   const readyId = `${options.releaseId}.${options.archiveId}.${options.nodeSha256}:${options.policyHash}`;
   const egressDependencies = options.egressLockdown === "required"
@@ -1319,7 +1347,18 @@ if "\${egress_privileged[@]}" /usr/bin/pgrep -u "$agent_uid" >/dev/null 2>&1; th
 fi
 legacy_openclaw="$HOME/.local/share/crabhelm/openclaw-2026.6.11/bin/openclaw"
 if [[ -x "$legacy_openclaw" ]]; then
-  PATH="$HOME/.local/share/crabhelm/node-v22.23.1-${options.nodeSha256}-linux-x64/bin:$PATH" "$legacy_openclaw" gateway stop >/dev/null 2>&1 || true
+  legacy_release=
+  legacy_ready="$HOME/.openclaw/crabhelm-ready"
+  if [[ -f "$legacy_ready" && ! -L "$legacy_ready" && -O "$legacy_ready" ]]; then
+    IFS= read -r legacy_release <"$legacy_ready" || true
+  fi
+  if [[ "$legacy_release" =~ ^[0-9a-f]{64}\\.[0-9a-f]{64}\\.([0-9a-f]{64})(:[0-9a-f]{64})?$ ]] &&
+    legacy_node=$(/bin/bash -c ${shellQuote(installedNodeResolver)} crabhelm-node "$HOME" "\${BASH_REMATCH[1]}"); then
+    PATH="\${legacy_node%/*}:/usr/local/bin:/usr/bin:/bin" "$legacy_openclaw" gateway stop >/dev/null 2>&1 ||
+      printf '%s\\n' 'crabhelm bootstrap: preceding appliance Gateway stop failed; continuing user-service cleanup' >&2
+  else
+    printf '%s\\n' 'crabhelm bootstrap: preceding appliance Node locator unavailable; skipping CLI stop and continuing user-service cleanup' >&2
+  fi
 fi
 /usr/bin/systemctl --user stop openclaw-gateway.service >/dev/null 2>&1 || true
 "\${egress_privileged[@]}" /usr/bin/install -d -o "$agent_user" -g "$agent_user" -m 0700 "$agent_home" "$agent_work"
@@ -1350,13 +1389,18 @@ fi
   CRABHELM_SLACK_ENABLED="$CRABHELM_SLACK_ENABLED" \
   CRABHELM_CREDENTIALS_GENERATION="$CRABHELM_CREDENTIALS_GENERATION" \
   /bin/bash "$agent_work/bundle/guest-install.sh"
+if ! node_binary=$("\${run_as_agent[@]}" HOME="$agent_home" /bin/bash -c ${shellQuote(installedNodeResolver)} crabhelm-node "$agent_home" ${shellQuote(options.nodeSha256)}); then
+  printf '%s\\n' 'crabhelm bootstrap: selected Node.js runtime is missing or invalid after installation; reinstall the selected appliance' >&2
+  exit 1
+fi
+node_bin="\${node_binary%/*}"
 "\${egress_privileged[@]}" /bin/rm -rf "$agent_work"
 if "\${run_as_agent[@]}" /usr/bin/sudo -n /usr/bin/true >/dev/null 2>&1; then
   printf '%s\\n' 'crabhelm bootstrap: isolated runtime account unexpectedly has sudo access' >&2
   exit 1
 fi
 unit_temporary="$(mktemp)"
-cat >"$unit_temporary" <<'CRABHELM_AGENT_UNIT'
+cat >"$unit_temporary" <<CRABHELM_AGENT_UNIT
 [Unit]
 Description=Crabhelm isolated OpenClaw Gateway
 Wants=network-online.target
@@ -1368,7 +1412,7 @@ User=crabhelm-agent
 Group=crabhelm-agent
 Environment=HOME=${agentHome}
 Environment=OPENCLAW_STATE_DIR=${stateDir}
-Environment=PATH=${nodeBin}:${openclawBin}:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=\${node_bin}:${openclawBin}:/usr/local/bin:/usr/bin:/bin
 ExecStart=${openclawBin}/openclaw gateway --port 18789
 Restart=on-failure
 RestartSec=5

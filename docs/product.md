@@ -80,6 +80,8 @@ The production target is deployment-specific and configured outside public sourc
 
 Each claw may override the fleet appliance with explicit manifest, archive, and bootstrap-Node SHA-256 values. Changing them keeps the allocated workspace, advances desired generation, and reinstalls until the complete release identity plus live inference converge. Canary one claw and verify readiness before changing the fleet default or applying the release elsewhere; set the override to `null` afterward to resume following fleet defaults.
 
+Readiness probes and managed services use the exact Node executable recorded by the selected appliance's verified installer. Updating the Worker does not change an existing appliance selection or its runtime. A missing or invalid runtime locator requires reinstalling that selected appliance; readiness does not fall back to an unrelated system Node. Existing selections of an older runtime still need an appliance rollout to receive runtime security fixes.
+
 ## Policies
 
 Policies are immutable versions of managed fields: primary/fallback inference models, Slack enabled state, native DM/group policy, and child log level. Preview is generation-fenced. Multi-claw rollout requires an explicit canary; an unconverged canary stops the remainder. Applying an older version is rollback.

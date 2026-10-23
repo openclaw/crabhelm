@@ -267,7 +267,6 @@ printf '\n' >>"$CRABHELM_TEST_LOG"
   const policyHash = "c".repeat(64);
   const probe = inferenceProbeCommand("openai/gpt-5.5", releaseId, nodeId, "CRABHELM_INFERENCE", 1, policyHash);
   assert.match(probe, /start-runtime-bridge\.sh/u);
-  assert.match(probe, new RegExp(`node-v22\\.23\\.1-${nodeId}-linux-x64`));
   assert.match(probe, new RegExp(`v5:${releaseId}:p${policyHash}:openai/gpt-5\\.5`));
   assert.match(probe, /if "\$\{agent_command\[@\]\}" \/bin\/bash "\$HOME\/\.local\/share\/crabhelm\/runtime\/start-runtime-bridge\.sh"; then[\s\S]*crabhelm-inference-ready/u);
 });

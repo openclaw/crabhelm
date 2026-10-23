@@ -6,18 +6,20 @@ Provider-neutral guest overlay used by Crabhelm's Crabbox deployment adapter. Cr
 
 ```bash
 deploy/crabbox-profile/build-bundle.sh \
-  --node-tarball /absolute/node-v22.23.1-linux-x64.tar.xz \
+  --node-tarball /absolute/node-v22.23.4-linux-x64.tar.xz \
   --openclaw-tarball /absolute/openclaw.tgz \
   --slack-tarball /absolute/slack.tgz \
   --otel-tarball /absolute/diagnostics-otel-with-dependencies.tgz \
   --output /absolute/empty/output
 ```
 
-The builder pins the Linux x64 Node.js `22.23.1` runtime plus OpenClaw, Slack, and `diagnostics-otel` `2026.7.1`, packs the current Crabhelm source, verifies all artifacts, and emits `manifest.json`. The reviewed OpenClaw artifact is built from stable commit `2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4` with upstream managed-ClawRouter backport `6db586a388c639796e312811b4d9801ca6ce1806` and SQLite plugin-metadata migration backport `ef110e9a0f42e5c99d56f0126e7e42c4284865aa`; the registry artifact alone lacks those release-branch fixes. The profile pins the exact reviewed tarball SHA-256 before the builder reads its embedded source metadata. Pin exact manifest, archive, and Node digests only after a disposable routed canary passes. The installer always runs the reviewed Node artifact from a digest-specific path. Plugin inputs must contain their production dependencies under `package/node_modules`; lifecycle scripts and dependency declarations are removed from the reviewed appliance copy. Archive the output under a top-level `bundle/` directory because the Cloudflare installer executes `bundle/guest-install.sh`:
+The builder pins the Linux x64 Node.js `22.23.4` runtime plus OpenClaw, Slack, and `diagnostics-otel` `2026.7.1`, packs the current Crabhelm source, verifies all artifacts, and emits `manifest.json`. The reviewed OpenClaw artifact is built from stable commit `2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4` with upstream managed-ClawRouter backport `6db586a388c639796e312811b4d9801ca6ce1806` and SQLite plugin-metadata migration backport `ef110e9a0f42e5c99d56f0126e7e42c4284865aa`; the registry artifact alone lacks those release-branch fixes. The profile pins the exact reviewed tarball SHA-256 before the builder reads its embedded source metadata. Pin exact manifest, archive, and Node digests only after a disposable routed canary passes. The installer always runs the reviewed Node artifact from a digest-specific path. Plugin inputs must contain their production dependencies under `package/node_modules`; lifecycle scripts and dependency declarations are removed from the reviewed appliance copy. Archive the output under a top-level `bundle/` directory because the Cloudflare installer executes `bundle/guest-install.sh`:
 
 ```bash
 tar -C /path/to/parent -s '|^output|bundle|' -czf /tmp/crabhelm-bundle.tgz output
 ```
+
+The current OpenClaw digest identifies a new reconstruction reviewed in [PR #37](https://github.com/openclaw/crabhelm/pull/37), with the migration backport adapted to the stable source's existing owner. It does not identify the unavailable historical package. Retain the exact tarball, prepared source tree and patch, toolchain, and build/pack receipts together when promoting the artifact. Normal builds include a build timestamp and need not reproduce this digest; verify the selected bytes instead of substituting a registry package or changing the pin to match an unreviewed rebuild.
 
 Upload the archive to `releases/<archive-sha256>.tgz` in the private R2 appliance bucket configured for the deployment, verify the remote bytes, set the archive and manifest digests in Wrangler configuration, then deploy the Worker.
 

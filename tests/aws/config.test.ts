@@ -291,7 +291,7 @@ test("AWS config selects the pinned GovCloud RDS trust bundle", () => {
 
 test("AWS image pins the commercial and GovCloud RDS trust bundles", async () => {
   const dockerfile = await readFile(new URL("../../Dockerfile.aws", import.meta.url), "utf8");
-  assert.match(dockerfile, /RDS_COMMERCIAL_CA_SHA256=e5bb2084ccf45087bda1c9bffdea0eb15ee67f0b91646106e466714f9de3c7e3/u);
+  assert.match(dockerfile, /RDS_COMMERCIAL_CA_SHA256=90a6f1a7978a1b1b096dca6c57511ca48d3b8cf052f8e704baf358f34ea2f21b/u);
   assert.match(dockerfile, /RDS_GOVCLOUD_CA_SHA256=bae59f78f2e2ba789e734cdcac78c13a0f0e99aa3f7bd49f1f37477c815b9b33/u);
   assert.match(dockerfile, /truststore\.pki\.us-gov-west-1\.rds\.amazonaws\.com\/global\/global-bundle\.pem/u);
   assert.match(dockerfile, /aws-rds-govcloud-global-bundle\.pem/u);

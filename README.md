@@ -66,7 +66,7 @@ Build and upload a reviewed appliance after guest-profile changes:
 
 ```bash
 deploy/crabbox-profile/build-bundle.sh \
-  --node-tarball /absolute/node-v22.23.1-linux-x64.tar.xz \
+  --node-tarball /absolute/node-v22.23.4-linux-x64.tar.xz \
   --openclaw-tarball /absolute/openclaw.tgz \
   --slack-tarball /absolute/slack.tgz \
   --otel-tarball /absolute/diagnostics-otel.tgz \
