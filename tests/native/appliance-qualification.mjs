@@ -134,7 +134,7 @@ async function lifecycle(){
  const profile=await fs.readFile('deploy/crabbox-profile/profile.conf','utf8');assert.ok(profile.includes('openclaw_tarball_sha256='+receipt.coreSHA256));
  await run('native-packages','sudo',['-n','apt-get','update']);await run('native-nftables','sudo',['-n','apt-get','install','-y','nftables']);
  if(scenario==='fresh'){
-  const baseline=(await run('marker-original-source','git',['show','b508e5cd8c1321249ed282ca2bfaad0b65a5381b:deploy/crabbox-profile/guest-install.sh'])).stdout;const baselineFile=path.join(evidence,'marker-original-guest-install.sh');await fs.writeFile(baselineFile,baseline,{mode:0o644});
+  const baseline=(await run('marker-original-source','git',['show','b508e5cd8c1321249ed282ca2bfaad0b65a5381b:deploy/crabbox-profile/guest-install.sh'])).stdout;const baselineFile=path.join(evidence,'marker-original.sh');await fs.writeFile(baselineFile,baseline,{mode:0o644});
   const ns=path.join(evidence,'marker-ns.sh');await fs.writeFile(ns,'#!/bin/bash\nset -euo pipefail\nmount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /tmp\nexec '+shq(process.execPath)+' --import '+shq(path.join(repo,'node_modules/tsx/dist/loader.mjs'))+' '+shq(process.argv[1])+' --marker-child '+shq(path.join(evidence,'marker'))+' '+shq(baselineFile)+'\n');
   await run('native-marker-red-green','sudo',['-n','/usr/bin/unshare','--mount','--propagation','private','--fork','/bin/bash',ns]);assert.equal(JSON.parse(await fs.readFile(path.join(evidence,'marker/marker-result.json'),'utf8')).pass,true);
  }
