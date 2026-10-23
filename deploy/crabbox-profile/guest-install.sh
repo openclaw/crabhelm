@@ -8,8 +8,7 @@ die() {
 }
 
 install_stage=initial
-: > /tmp/crabhelm-install-failed-stage
-trap 'status=$?; printf "%s\n" "$install_stage" > /tmp/crabhelm-install-failed-stage; printf "crabhelm guest install: stage=%s line=%s status=%s\n" "$install_stage" "$LINENO" "$status" >&2; exit "$status"' ERR
+trap 'status=$?; printf "crabhelm guest install: stage=%s line=%s status=%s\n" "$install_stage" "$LINENO" "$status" >&2; exit "$status"' ERR
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 manifest="$script_dir/manifest.json"

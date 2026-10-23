@@ -11,6 +11,9 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const BOOTSTRAP_TOKEN_TTL_MS = 20 * 60 * 1000;
 const EGRESS_POLICY_VERSION = 2;
+// Both current and distributed installers emit this structured failure to the
+// outer installer log. Read that record, not a mutable cross-account /tmp file.
+const installStageCommand = "install_stage=$(sed -nE 's/^crabhelm guest install: stage=(initial|verify|node|credential|package|plugin|managed-spec|bootstrap) line=[0-9]+ status=[0-9]+$/\\1/p' /tmp/crabhelm-install.log 2>/dev/null | tail -n 1 || true)";
 // The verified installer records its selected executable in the bridge launcher,
 // including in already distributed appliances. Read that locator as data: the
 // Worker version is not the version of every claw's selected appliance.
@@ -315,11 +318,12 @@ export class CrabboxWorkspaceBootstrap {
       this.#brokerToken,
       [
         `printf '%s_BEGIN\\n' ${shellQuote(label)}`,
+        installStageCommand,
         "tail -n 40 \"$HOME/.openclaw/crabhelm-runtime-bridge.log\" 2>/dev/null || true",
-        "printf 'INSTALL_STAGE %s\\n' \"$(head -n 1 /tmp/crabhelm-install-failed-stage 2>/dev/null || echo missing)\"",
+        "printf 'INSTALL_STAGE %s\\n' \"${install_stage:-missing}\"",
         "tail -n 20 /tmp/crabhelm-install.log 2>/dev/null | sed -E 's/(Bearer[[:space:]]+|CRABHELM_RUNTIME_TOKEN=|OPENAI_API_KEY=|CLAWROUTER_API_KEY=|CLAWROUTER_ACCESS_CLIENT_SECRET=)[^[:space:]]+/\\1[REDACTED]/g; s/clawrouter-live-[A-Za-z0-9_-]+-[A-Za-z0-9_-]+/[REDACTED_CLAWROUTER_KEY]/g; s/[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+/[REDACTED_JWT]/g' | sed 's/^/INSTALL_LOG /' || true",
         "bridge_pid=$(tr -cd '0-9' <\"$HOME/.openclaw/crabhelm-runtime-bridge.pid\" 2>/dev/null || true)",
-        "printf 'STATE release=%s install_stage=%s turn_file=%s log_bytes=%s bridge_pid=%s stdout=%s bridge_sha256=%s\\n' \"$(head -n 1 \"$HOME/.openclaw/crabhelm-ready\" 2>/dev/null || echo missing)\" \"$(head -n 1 /tmp/crabhelm-install-failed-stage 2>/dev/null || echo missing)\" \"$(test -f \"$HOME/.openclaw/crabhelm-current-turn.json\" && echo present || echo absent)\" \"$(wc -c <\"$HOME/.openclaw/crabhelm-runtime-bridge.log\" 2>/dev/null || echo missing)\" \"${bridge_pid:-missing}\" \"$(readlink \"/proc/${bridge_pid:-0}/fd/1\" 2>/dev/null || echo missing)\" \"$(sha256sum \"$HOME/.local/share/crabhelm/runtime/runtime-bridge.mjs\" 2>/dev/null | cut -d' ' -f1 || echo missing)\"",
+        "printf 'STATE release=%s install_stage=%s turn_file=%s log_bytes=%s bridge_pid=%s stdout=%s bridge_sha256=%s\\n' \"$(head -n 1 \"$HOME/.openclaw/crabhelm-ready\" 2>/dev/null || echo missing)\" \"${install_stage:-missing}\" \"$(test -f \"$HOME/.openclaw/crabhelm-current-turn.json\" && echo present || echo absent)\" \"$(wc -c <\"$HOME/.openclaw/crabhelm-runtime-bridge.log\" 2>/dev/null || echo missing)\" \"${bridge_pid:-missing}\" \"$(readlink \"/proc/${bridge_pid:-0}/fd/1\" 2>/dev/null || echo missing)\" \"$(sha256sum \"$HOME/.local/share/crabhelm/runtime/runtime-bridge.mjs\" 2>/dev/null | cut -d' ' -f1 || echo missing)\"",
         "ps -eo pid=,ppid=,state=,etimes=,comm= | awk -v parent=\"${bridge_pid:-0}\" '$1 == parent || $2 == parent' | tail -n 10 || true",
         `printf '%s_END\\n' ${shellQuote(label)}`,
       ].join("\n"),
@@ -663,6 +667,7 @@ export function bootstrapStatusCommand(
     ? `{ ${readyIds.map((id) => `grep -Fqx ${shellQuote(id)} ${readyMarker} 2>/dev/null`).join(" || ")}; }${credentialCheck}${egressCheck}`
     : `test -f ${readyMarker}${credentialCheck}${egressCheck}`;
   const command = [
+    installStageCommand,
     `status_label=${shellQuote(statusLabel)}`,
     `if ${readyCheck}; then`,
     ...(retryMarker ? [`  rm -f ${shellQuote(retryMarker)} ${shellQuote(`${retryMarker}.retry`)} ${shellQuote(`${retryMarker}.retry2`)}`] : []),
@@ -714,22 +719,22 @@ export function bootstrapStatusCommand(
       `    touch ${shellQuote(`${retryMarker}.retry2`)}`,
       `    ${launchCommand}`,
       "    printf '%s_STARTED\\n' \"$status_label\"",
-      "  elif grep -Fqx 'node' /tmp/crabhelm-install-failed-stage 2>/dev/null; then",
+      "  elif test \"$install_stage\" = node; then",
     );
   } else {
-    command.push("  if grep -Fqx 'node' /tmp/crabhelm-install-failed-stage 2>/dev/null; then");
+    command.push("  if test \"$install_stage\" = node; then");
   }
   command.push(
     "    printf '%s_INSTALL_FAILED_NODE\\n' \"$status_label\"",
-    "  elif grep -Fqx 'verify' /tmp/crabhelm-install-failed-stage 2>/dev/null; then",
+    "  elif test \"$install_stage\" = verify; then",
     "    printf '%s_INSTALL_FAILED_ARTIFACT\\n' \"$status_label\"",
-    "  elif grep -Fqx 'package' /tmp/crabhelm-install-failed-stage 2>/dev/null; then",
+    "  elif test \"$install_stage\" = package; then",
     "    printf '%s_INSTALL_FAILED_NPM\\n' \"$status_label\"",
-    "  elif grep -Fqx 'plugin' /tmp/crabhelm-install-failed-stage 2>/dev/null; then",
+    "  elif test \"$install_stage\" = plugin; then",
     "    printf '%s_INSTALL_FAILED_PLUGIN_DUPLICATE\\n' \"$status_label\"",
-    "  elif grep -Fqx 'credential' /tmp/crabhelm-install-failed-stage 2>/dev/null; then",
+    "  elif test \"$install_stage\" = credential; then",
     "    printf '%s_INSTALL_FAILED_CREDENTIAL_SOURCE\\n' \"$status_label\"",
-    "  elif grep -Fqx 'bootstrap' /tmp/crabhelm-install-failed-stage 2>/dev/null; then",
+    "  elif test \"$install_stage\" = bootstrap; then",
     "    printf '%s_INSTALL_FAILED_BOOTSTRAP\\n' \"$status_label\"",
     "  elif grep -Fq 'child credential destination must be absent' /tmp/crabhelm-install.log; then",
     "    printf '%s_INSTALL_FAILED_CREDENTIAL\\n' \"$status_label\"",

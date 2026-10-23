@@ -19,6 +19,8 @@ The builder pins the Linux x64 Node.js `22.23.4` runtime plus OpenClaw, Slack, a
 tar -C /path/to/parent -s '|^output|bundle|' -czf /tmp/crabhelm-bundle.tgz output
 ```
 
+The current OpenClaw digest identifies a new reconstruction reviewed in [PR #37](https://github.com/openclaw/crabhelm/pull/37), with the migration backport adapted to the stable source's existing owner. It does not identify the unavailable historical package. Retain the exact tarball, prepared source tree and patch, toolchain, and build/pack receipts together when promoting the artifact. Normal builds include a build timestamp and need not reproduce this digest; verify the selected bytes instead of substituting a registry package or changing the pin to match an unreviewed rebuild.
+
 Upload the archive to `releases/<archive-sha256>.tgz` in the private R2 appliance bucket configured for the deployment, verify the remote bytes, set the archive and manifest digests in Wrangler configuration, then deploy the Worker.
 
 ## Guest sequence
