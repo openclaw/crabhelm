@@ -209,7 +209,7 @@ async function productTLS(privateCA,privateRoot){
   await write(label+'-native-transport.json',events);
   const targetURL=new URL(url),target=targetURL.hostname;
   const errors=events.filter(x=>{if(x.event!=='native-error')return false;try{return new URL(x.origin).origin===targetURL.origin;}catch{return false;}});
-  const connections=events.filter(x=>x.event==='connected'&&x.host===target&&Number(x.port??443)===Number(targetURL.port||443));
+  const connections=events.filter(x=>x.event==='connected'&&x.host===target&&Number(x.port||443)===Number(targetURL.port||443));
   const codes=errors.flatMap(x=>x.codes??[]),authorized=connections.filter(x=>x.authorized);
   rows.push({label,url,mode,explicitCA:ca??null,expected,actualTargetNativeCodes:codes,authorizedTargetConnections:authorized,productCLIExit:result.code,localProviderRequests:tlsProviderRequests-before});
   await write('product-tls-results.json',{pass:false,complete:false,plannedIncidentRows:56,rows});
