@@ -96,6 +96,8 @@ async function cli(version,args,label,{env={}}={}){
 }
 async function gateway(version,method,params,label){const r=await cli(version,['gateway','call',method,'--params',JSON.stringify(params),'--json'],label);return JSON.parse(r.stdout);}
 const sessionKey='agent:main:crabhelm-upgrade-proof',sessionText='Crabhelm retained genuine session '+randomUUID(),memoryText='# Native qualification retained memory\n'+randomUUID()+'\n';
+// Seed before the first presence RPC so initial local pairing requests the
+// fixture operator's required admin scope. Later scope upgrades require approval.
 async function seed(version){
  await cli(version,['config','set','session.dmScope','per-channel-peer'],'seed-real-config');
  await run('seed-config-restart','sudo',['-n','systemctl','restart','crabhelm-agent.service']);await waitReady();
@@ -161,7 +163,7 @@ async function lifecycle(){
  if(scenario==='upgrade'){
   const oldSource=path.join(privateRoot,'old-controller');await fs.mkdir(oldSource);const archive=path.join(privateRoot,'old-controller.tar');await run('old-controller-archive','git',['archive','--format=tar','--output='+archive,oldController]);await run('old-controller-extract','tar',['-xf',archive,'-C',oldSource]);
   assert.equal(await hash(path.join(oldSource,'worker/bootstrap.ts')),'c83f4a7367d5a5f6c0171f9f1436d60a71d2bf3450acafb55bfbce4bc9926d21');
-  const old=await import(pathToFileURL(path.join(oldSource,'worker/bootstrap.ts')).href);await install('old',old.bootstrapInstallScript,1);await service('released-predecessor','old','2026.6.11');await seed('2026.6.11');await checkState('2026.6.11','before-upgrade');
+  const old=await import(pathToFileURL(path.join(oldSource,'worker/bootstrap.ts')).href);await install('old',old.bootstrapInstallScript,1);await seed('2026.6.11');await service('released-predecessor','old','2026.6.11');await checkState('2026.6.11','before-upgrade');
  }else{
   // An explicit foreign residue fixture, not a claim of an installed predecessor.
   await assert.rejects(fs.stat('/tmp/crabhelm-install-failed-stage'),{code:'ENOENT'});
@@ -169,9 +171,9 @@ async function lifecycle(){
  }
  const legacyBefore=(await run('legacy-stage-before','sudo',['-n','stat','-c','%u:%g:%a:%i:%Y','/tmp/crabhelm-install-failed-stage'])).stdout;
  const legacyHashBefore=(await run('legacy-stage-hash-before','sudo',['-n','sha256sum','/tmp/crabhelm-install-failed-stage'])).stdout;
- await install('new',bootstrapInstallScript,scenario==='upgrade'?2:1);await service('target-initial','new','2026.7.1');
+ await install('new',bootstrapInstallScript,scenario==='upgrade'?2:1);
  assert.equal((await run('legacy-stage-after','sudo',['-n','stat','-c','%u:%g:%a:%i:%Y','/tmp/crabhelm-install-failed-stage'])).stdout,legacyBefore);assert.equal((await run('legacy-stage-hash-after','sudo',['-n','sha256sum','/tmp/crabhelm-install-failed-stage'])).stdout,legacyHashBefore);
- if(scenario==='fresh')await seed('2026.7.1');await checkState('2026.7.1','after-target-install');
+ if(scenario==='fresh')await seed('2026.7.1');await service('target-initial','new','2026.7.1');await checkState('2026.7.1','after-target-install');
  await run('target-second-restart','sudo',['-n','systemctl','restart','crabhelm-agent.service']);
  await waitReady();
  await service('target-after-restart','new','2026.7.1');await checkState('2026.7.1','after-second-restart');await write('genuine-artifact-receipt.json',receipt);
