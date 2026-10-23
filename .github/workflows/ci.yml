@@ -55,122 +55,63 @@ jobs:
           CRABHELM_TEST_POSTGRES_URL: postgresql://crabhelm:crabhelm_test@localhost:5432/crabhelm_test
         run: pnpm check
 
-  stage-appliance-inputs:
-    name: Stage reviewed appliance inputs (one ephemeral UTM job)
-    if: github.event_name == 'pull_request' && github.repository == 'openclaw/crabhelm' && github.event.pull_request.number == 37 && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'security/emudhra-node-release'
-    runs-on: [crabhelm37-transfer-fec785006a605b9de01113cbb443fbe6]
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    outputs:
-      artifact-id: ${{ steps.upload.outputs.artifact-id }}
-    steps:
-      - name: Require independently reviewed local manifest head
-        env:
-          EXPECTED_EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
-        run: |
-          python3 - <<'PYCODE'
-          from pathlib import Path
-          import json,os
-          p=Path('/mnt/rv20261022work/crabhelm37-stage2-20261023/state/transfer-manifest.json')
-          assert p.stat().st_mode & 0o777 == 0o600
-          m=json.loads(p.read_text());assert m['expectedHead']==os.environ['EXPECTED_EVENT_HEAD']
-          assert m['expectedHead']!='TO_BE_FROZEN_BY_ROOT_AFTER_REVIEW'
-          PYCODE
-      - name: Admit actual Actions runtime before artifact credentials
-        id: action-runtime
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import os,subprocess,hashlib,json,platform
-          pid=os.getpid();root=None
-          for _ in range(20):
-            info=Path('/proc/'+str(pid)+'/status').read_text()
-            exe=Path(os.readlink('/proc/'+str(pid)+'/exe'))
-            if exe.name=='Runner.Worker':root=exe.parent.parent;break
-            pid=int(next(x for x in info.splitlines() if x.startswith('PPid:')).split()[1])
-            if not pid:break
-          assert root is not None,'Cannot establish actual runner action runtime'
-          node=root/'externals/node24/bin/node'
-          version=subprocess.check_output([str(node),'--version'],text=True).strip()
-          assert version.startswith('v24.') and tuple(map(int,version[1:].split('.'))) >= (24,22,1),version
-          row={'node':str(node),'version':version,'sha256':hashlib.sha256(node.read_bytes()).hexdigest(),'kernelArch':platform.machine(),'CPU':os.cpu_count(),'runnerImage':os.environ.get('ImageVersion'),'eventMergeSHA':os.environ.get('GITHUB_SHA'),'eventName':os.environ.get('GITHUB_EVENT_NAME')}
-          out=Path(os.environ['RUNNER_TEMP'])/'action-runtime-admission.json';out.write_text(json.dumps(row,indent=2));print(json.dumps(row))
-          PY
-      - name: Verify fixed actual input files
-        run: |
-          set -euo pipefail
-          sha256sum --check <<'SHA'
-          cfed4163399c80ef0bb8a1447de8f911953764275a3f3f46766c90d22e318984  /mnt/rv20261022work/crabhelm37-stage2-20261023/inputs/released-predecessor.tgz
-          0de75bae4518692962cfda7099d0144f555c24622e373c58faf046d766645224  /mnt/rv20261022work/crabhelm37-stage2-20261023/inputs/reviewed-openclaw.tgz
-          d6ae8745867d812560e917707e633c8b66b36f7270124a8cca9602c6dc98ef46  /mnt/rv20261022work/crabhelm37-stage2-20261023/inputs/slack-2026.7.1.tgz
-          a447a223cf4764865570e71e92fb5173bf79a3d8307dd99382eb56ea6aff93f6  /mnt/rv20261022work/crabhelm37-stage2-20261023/inputs/diagnostics-otel-2026.7.1.tgz
-          SHA
-      - name: Upload only fixed reviewed input bytes
-        id: upload
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, node24
-        with:
-          name: crabhelm37-reviewed-inputs-${{ github.run_id }}
-          path: |
-            /mnt/rv20261022work/crabhelm37-stage2-20261023/inputs/released-predecessor.tgz
-            /mnt/rv20261022work/crabhelm37-stage2-20261023/inputs/reviewed-openclaw.tgz
-            /mnt/rv20261022work/crabhelm37-stage2-20261023/inputs/slack-2026.7.1.tgz
-            /mnt/rv20261022work/crabhelm37-stage2-20261023/inputs/diagnostics-otel-2026.7.1.tgz
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 7
-          overwrite: false
-
   build-native-appliance:
     name: Build reviewed native appliance once
-    needs: stage-appliance-inputs
+    if: github.event_name == 'pull_request' && github.repository == 'openclaw/crabhelm' && github.event.pull_request.number == 37 && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'security/emudhra-node-release'
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
       bundle-sha256: ${{ steps.build.outputs.bundle-sha256 }}
     steps:
-      - name: Admit actual Actions runtime before artifact credentials
-        id: action-runtime
+      - name: Admit anonymous exact source and patched native tools
+        id: native-tools
+        env:
+          REVIEWED_HEAD: ${{ github.event.pull_request.head.sha }}
         shell: bash
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import os,subprocess,hashlib,json,platform
-          pid=os.getpid();root=None
-          for _ in range(20):
-            info=Path('/proc/'+str(pid)+'/status').read_text()
-            exe=Path(os.readlink('/proc/'+str(pid)+'/exe'))
-            if exe.name=='Runner.Worker':root=exe.parent.parent;break
-            pid=int(next(x for x in info.splitlines() if x.startswith('PPid:')).split()[1])
-            if not pid:break
-          assert root is not None,'Cannot establish actual runner action runtime'
-          node=root/'externals/node24/bin/node'
-          version=subprocess.check_output([str(node),'--version'],text=True).strip()
-          assert version.startswith('v24.') and tuple(map(int,version[1:].split('.'))) >= (24,22,1),version
-          row={'node':str(node),'version':version,'sha256':hashlib.sha256(node.read_bytes()).hexdigest(),'kernelArch':platform.machine(),'CPU':os.cpu_count(),'runnerImage':os.environ.get('ImageVersion'),'eventMergeSHA':os.environ.get('GITHUB_SHA'),'eventName':os.environ.get('GITHUB_EVENT_NAME')}
-          out=Path(os.environ['RUNNER_TEMP'])/'action-runtime-admission.json';out.write_text(json.dumps(row,indent=2));print(json.dumps(row))
-          PY
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = openclaw/crabhelm
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_ARCH" = X64
+          test -z "$(ls -A "$GITHUB_WORKSPACE")"
+          git init "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin https://github.com/openclaw/crabhelm.git
+          git fetch --no-tags origin "$REVIEWED_HEAD"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$REVIEWED_HEAD"
+          git cat-file -e 0a7149380cad4d3a52576417d2b953ff8e4c00ab:worker/bootstrap.ts
+          tools="$RUNNER_TEMP/crabhelm37-patched-native-tools"
+          mkdir "$tools"
+          curl --fail --silent --show-error --location https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-x64.tar.xz --output "$tools/node.tar.xz"
+          echo "1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce  $tools/node.tar.xz" | sha256sum --check
+          mkdir "$tools/node"
+          tar -xJf "$tools/node.tar.xz" --strip-components=1 -C "$tools/node"
+          curl --fail --silent --show-error --location https://registry.npmjs.org/pnpm/-/pnpm-11.28.4.tgz --output "$tools/pnpm.tgz"
+          echo "a4f318bc906d7fe28707f894e7bc86c0d134a8dcff5d5f37f1e18d7c1687cf6d  $tools/pnpm.tgz" | sha256sum --check
+          mkdir "$tools/pnpm" "$tools/pnpm-bin"
+          tar -xzf "$tools/pnpm.tgz" --strip-components=1 -C "$tools/pnpm"
+          ln -s "$tools/pnpm/bin/pnpm.cjs" "$tools/pnpm-bin/pnpm"
+          export PATH="$tools/node/bin:$tools/pnpm-bin:$PATH"
+          test "$(node --version)" = v22.23.4
+          test "$(pnpm --version)" = 11.28.4
+          printf '%s\n' "$tools/node/bin" "$tools/pnpm-bin" >> "$GITHUB_PATH"
+          node -e 'const c=require("node:crypto"),f=require("node:fs");console.log(JSON.stringify({nativeNode:process.version,arch:process.arch,executableSHA256:c.createHash("sha256").update(f.readFileSync(process.execPath)).digest("hex"),artifactTransport:"Supported local Docker action with independently admitted patched24.22.1; embedded host Node never executes an action in this job"}));'
       - name: Download exact same-run reviewed inputs
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        uses: ./.github/actions/patched-artifact
         with:
-          artifact-ids: ${{ needs.stage-appliance-inputs.outputs.artifact-id }}
+          operation: download
+          artifact-ids: '12476682095'
+          github-token: ${{ github.token }}
+          repository: openclaw/crabhelm
+          run-id: '39894679029'
           path: ${{ runner.temp }}/appliance-inputs
           merge-multiple: true
           digest-mismatch: error
-      - name: Check out reviewed exact PR head
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Set up pinned pnpm
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
-      - name: Set up patched product build Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: 22.23.4
       - name: Install qualification dependencies
         run: pnpm install --frozen-lockfile
       - name: Build once through canonical profile and builder gates
@@ -181,21 +122,23 @@ jobs:
         run: node --import tsx tests/native/appliance-qualification.mjs --build
       - name: Preserve exact built bytes for both lifecycle scenarios
         id: upload
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        uses: ./.github/actions/patched-artifact
         with:
+          operation: upload
           name: crabhelm37-built-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/crabhelm37-built/new-bundle.tgz
-            ${{ runner.temp }}/crabhelm37-built/released-predecessor.tgz
-            ${{ runner.temp }}/crabhelm37-built/build-receipt.json
+            /github/runner_temp/crabhelm37-built/new-bundle.tgz
+            /github/runner_temp/crabhelm37-built/released-predecessor.tgz
+            /github/runner_temp/crabhelm37-built/build-receipt.json
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
           overwrite: false
       - name: Preserve build evidence
-        if: always() && steps.action-runtime.outcome == 'success'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always() && steps.native-tools.outcome == 'success'
+        uses: ./.github/actions/patched-artifact
         with:
+          operation: upload
           name: crabhelm37-native-build-evidence-${{ github.run_id }}
           path: ${{ runner.temp }}/crabhelm37-evidence
           if-no-files-found: error
@@ -212,46 +155,48 @@ jobs:
       matrix:
         scenario: [fresh, upgrade]
     steps:
-      - name: Admit actual Actions runtime before artifact credentials
-        id: action-runtime
+      - name: Admit anonymous exact source and patched native tools
+        id: native-tools
+        env:
+          REVIEWED_HEAD: ${{ github.event.pull_request.head.sha }}
         shell: bash
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import os,subprocess,hashlib,json,platform
-          pid=os.getpid();root=None
-          for _ in range(20):
-            info=Path('/proc/'+str(pid)+'/status').read_text()
-            exe=Path(os.readlink('/proc/'+str(pid)+'/exe'))
-            if exe.name=='Runner.Worker':root=exe.parent.parent;break
-            pid=int(next(x for x in info.splitlines() if x.startswith('PPid:')).split()[1])
-            if not pid:break
-          assert root is not None,'Cannot establish actual runner action runtime'
-          node=root/'externals/node24/bin/node'
-          version=subprocess.check_output([str(node),'--version'],text=True).strip()
-          assert version.startswith('v24.') and tuple(map(int,version[1:].split('.'))) >= (24,22,1),version
-          row={'node':str(node),'version':version,'sha256':hashlib.sha256(node.read_bytes()).hexdigest(),'kernelArch':platform.machine(),'CPU':os.cpu_count(),'runnerImage':os.environ.get('ImageVersion'),'eventMergeSHA':os.environ.get('GITHUB_SHA'),'eventName':os.environ.get('GITHUB_EVENT_NAME')}
-          out=Path(os.environ['RUNNER_TEMP'])/'action-runtime-admission.json';out.write_text(json.dumps(row,indent=2));print(json.dumps(row))
-          PY
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = openclaw/crabhelm
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_ARCH" = X64
+          test -z "$(ls -A "$GITHUB_WORKSPACE")"
+          git init "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin https://github.com/openclaw/crabhelm.git
+          git fetch --no-tags origin "$REVIEWED_HEAD"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$REVIEWED_HEAD"
+          git cat-file -e 0a7149380cad4d3a52576417d2b953ff8e4c00ab:worker/bootstrap.ts
+          tools="$RUNNER_TEMP/crabhelm37-patched-native-tools"
+          mkdir "$tools"
+          curl --fail --silent --show-error --location https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-x64.tar.xz --output "$tools/node.tar.xz"
+          echo "1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce  $tools/node.tar.xz" | sha256sum --check
+          mkdir "$tools/node"
+          tar -xJf "$tools/node.tar.xz" --strip-components=1 -C "$tools/node"
+          curl --fail --silent --show-error --location https://registry.npmjs.org/pnpm/-/pnpm-11.28.4.tgz --output "$tools/pnpm.tgz"
+          echo "a4f318bc906d7fe28707f894e7bc86c0d134a8dcff5d5f37f1e18d7c1687cf6d  $tools/pnpm.tgz" | sha256sum --check
+          mkdir "$tools/pnpm" "$tools/pnpm-bin"
+          tar -xzf "$tools/pnpm.tgz" --strip-components=1 -C "$tools/pnpm"
+          ln -s "$tools/pnpm/bin/pnpm.cjs" "$tools/pnpm-bin/pnpm"
+          export PATH="$tools/node/bin:$tools/pnpm-bin:$PATH"
+          test "$(node --version)" = v22.23.4
+          test "$(pnpm --version)" = 11.28.4
+          printf '%s\n' "$tools/node/bin" "$tools/pnpm-bin" >> "$GITHUB_PATH"
+          node -e 'const c=require("node:crypto"),f=require("node:fs");console.log(JSON.stringify({nativeNode:process.version,arch:process.arch,executableSHA256:c.createHash("sha256").update(f.readFileSync(process.execPath)).digest("hex"),artifactTransport:"Supported local Docker action with independently admitted patched24.22.1; embedded host Node never executes an action in this job"}));'
       - name: Download exact same built appliance bytes
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        uses: ./.github/actions/patched-artifact
         with:
+          operation: download
           artifact-ids: ${{ needs.build-native-appliance.outputs.artifact-id }}
           path: ${{ runner.temp }}/built-appliance
           merge-multiple: true
           digest-mismatch: error
-      - name: Check out reviewed exact PR head
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Set up pinned pnpm
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
-      - name: Set up patched product build Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: 22.23.4
       - name: Install qualification dependencies
         run: pnpm install --frozen-lockfile
       - name: Qualify actual installation and genuine retained state
@@ -262,9 +207,10 @@ jobs:
           CRABHELM_EXPECTED_BUNDLE_SHA256: ${{ needs.build-native-appliance.outputs.bundle-sha256 }}
         run: node --import tsx tests/native/appliance-qualification.mjs
       - name: Preserve bounded native evidence
-        if: always() && steps.action-runtime.outcome == 'success'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always() && steps.native-tools.outcome == 'success'
+        uses: ./.github/actions/patched-artifact
         with:
+          operation: upload
           name: crabhelm37-native-${{ matrix.scenario }}-${{ github.run_id }}
           path: ${{ runner.temp }}/crabhelm37-evidence
           if-no-files-found: error

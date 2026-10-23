@@ -36,10 +36,13 @@ async function run(label,file,args=[],{check=true,env={},timeout=15*60_000,cwd=r
 async function markerIdentity(){const s=await fs.stat('/tmp/crabhelm-install-failed-stage');return {uid:s.uid,gid:s.gid,mode:s.mode&0o777,ino:s.ino,mtimeMs:s.mtimeMs,sha256:await hash('/tmp/crabhelm-install-failed-stage')};}
 async function markerChild(){
  evidence=process.argv[3];await fs.mkdir(evidence,{recursive:true});
+ assert.notEqual(await fs.readlink('/proc/self/ns/mnt'),await fs.readlink('/proc/1/ns/mnt'),'Marker fixture requires its own mount namespace');
+ assert.ok((await fs.readFile('/proc/self/mountinfo','utf8')).split('\n').some(line=>line.split(' ')[4]==='/tmp'&&line.split(' - ')[1]?.split(' ')[0]==='tmpfs'),'Marker fixture requires a private tmpfs mounted at /tmp');
+ await assert.rejects(fs.stat('/tmp/crabhelm-install-failed-stage'),{code:'ENOENT'});
  const root=await fs.mkdtemp('/var/tmp/crabhelm37-marker-');await fs.chmod(root,0o755);
  const home=path.join(root,'home');await fs.mkdir(home);await fs.chown(home,65534,65534);await fs.chmod(home,0o700);
- await fs.writeFile('/tmp/crabhelm-install-failed-stage','plugin\n',{mode:0o600});const before=await markerIdentity();
- const base=(await exec('git',['show','b508e5cd8c1321249ed282ca2bfaad0b65a5381b:deploy/crabbox-profile/guest-install.sh'],{cwd:repo})).stdout;
+ await fs.writeFile('/tmp/crabhelm-install-failed-stage','plugin\n',{mode:0o600,flag:'wx'});const before=await markerIdentity();
+ assert.ok(path.isAbsolute(process.argv[4]??''));const base=await fs.readFile(process.argv[4],'utf8');
  assert.equal(sha(base),'dcc0f349a7045af7a309842dc71ea5aa099375a000d96e8c61abc81f9e03c296');
  const outputs={};
  for(const [name,source] of [['base',base],['candidate',await fs.readFile(path.join(repo,'deploy/crabbox-profile/guest-install.sh'),'utf8')]]){
@@ -131,7 +134,8 @@ async function lifecycle(){
  const profile=await fs.readFile('deploy/crabbox-profile/profile.conf','utf8');assert.ok(profile.includes('openclaw_tarball_sha256='+receipt.coreSHA256));
  await run('native-packages','sudo',['-n','apt-get','update']);await run('native-nftables','sudo',['-n','apt-get','install','-y','nftables']);
  if(scenario==='fresh'){
-  const ns=path.join(evidence,'marker-ns.sh');await fs.writeFile(ns,'#!/bin/bash\nset -euo pipefail\nmount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /tmp\nexec '+shq(process.execPath)+' --import '+shq(path.join(repo,'node_modules/tsx/dist/loader.mjs'))+' '+shq(process.argv[1])+' --marker-child '+shq(path.join(evidence,'marker'))+'\n');
+  const baseline=(await run('marker-original-source','git',['show','b508e5cd8c1321249ed282ca2bfaad0b65a5381b:deploy/crabbox-profile/guest-install.sh'])).stdout;const baselineFile=path.join(evidence,'marker-original-guest-install.sh');await fs.writeFile(baselineFile,baseline,{mode:0o644});
+  const ns=path.join(evidence,'marker-ns.sh');await fs.writeFile(ns,'#!/bin/bash\nset -euo pipefail\nmount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /tmp\nexec '+shq(process.execPath)+' --import '+shq(path.join(repo,'node_modules/tsx/dist/loader.mjs'))+' '+shq(process.argv[1])+' --marker-child '+shq(path.join(evidence,'marker'))+' '+shq(baselineFile)+'\n');
   await run('native-marker-red-green','sudo',['-n','/usr/bin/unshare','--mount','--propagation','private','--fork','/bin/bash',ns]);assert.equal(JSON.parse(await fs.readFile(path.join(evidence,'marker/marker-result.json'),'utf8')).pass,true);
  }
  const privateRoot=path.join(process.env.RUNNER_TEMP,'crabhelm37-private-state');await fs.mkdir(privateRoot,{mode:0o700});
@@ -146,10 +150,12 @@ async function lifecycle(){
    const url=new URL(req.url,'https://127.0.0.1:19400'),tag=url.pathname.split('/')[2];assert.ok(['old','new'].includes(tag));
    if(url.pathname.endsWith('/bundle.tgz')){const file=path.join(built,tag==='old'?'released-predecessor.tgz':'new-bundle.tgz');res.setHeader('content-length',(await fs.stat(file)).size);createReadStream(file).pipe(res);return;}
    if(url.pathname.endsWith('/managed-spec.json')){res.end(JSON.stringify(spec));return;}
-   if(url.pathname.endsWith('/credentials.env')){res.end('OPENAI_API_KEY=synthetic-invalid-qualification-only\nCRABHELM_CONTROL_URL=https://127.0.0.1:19400\nCRABHELM_RUNTIME_TOKEN=synthetic-runtime-token-generation-'+(url.searchParams.get('credentials')??'1')+'\nCRABHELM_CHILD_ID='+childId+'\n');return;}
+   if(url.pathname.endsWith('/credentials.env')){const expectedGeneration=tag==='old'?1:scenario==='upgrade'?2:1;res.setHeader('content-type','text/plain; charset=utf-8');if(url.searchParams.get('credentials')!==String(expectedGeneration)){res.writeHead(400);res.end('Invalid fixture generation\n');return;}res.end('OPENAI_API_KEY=synthetic-invalid-qualification-only\nCRABHELM_CONTROL_URL=https://127.0.0.1:19400\nCRABHELM_RUNTIME_TOKEN=synthetic-runtime-token-generation-'+expectedGeneration+'\nCRABHELM_CHILD_ID='+childId+'\n');return;}
    res.writeHead(404);res.end();
   }catch(error){res.writeHead(500);res.end('fixture setup error');}
  });await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(19400,'127.0.0.1',resolve);});
+ const invalidQuery=new URL('https://127.0.0.1:19400/bootstrap/new/credentials.env');invalidQuery.searchParams.set('credentials','fixture-reflection-negative\nINJECTED=value');
+ const invalidHeaders=path.join(privateRoot,'invalid-query.headers');const invalidResponse=await run('fixture-invalid-generation-query','curl',['--silent','--show-error','--max-time','5','--cacert',cert,'--header','Authorization: Bearer '+auth,'--dump-header',invalidHeaders,'--write-out','\nHTTP_STATUS:%{http_code}\n',invalidQuery.href]);assert.equal(invalidResponse.stdout,'Invalid fixture generation\n\nHTTP_STATUS:400\n');assert.doesNotMatch(invalidResponse.stdout,/fixture-reflection-negative|INJECTED/);assert.match(await fs.readFile(invalidHeaders,'utf8'),/content-type: text\/plain/i);
  const options=(tag,generation)=>({base:'https://127.0.0.1:19400/bootstrap/'+tag,releaseId:tag==='old'?oldManifest:receipt.manifestSHA256,archiveId:tag==='old'?oldArchive:receipt.archiveSHA256,nodeSha256:tag==='old'?oldNode:newNode,childId,model:'openai/gpt-4o-mini',slack:'false',policyHash:'a'.repeat(64),credentialsGeneration:generation,egressLockdown:'required'});
  async function install(tag,owner,generation){const script=path.join(privateRoot,tag+'-install.sh');await fs.writeFile(script,owner(options(tag,generation)),{mode:0o600});await write(tag+'-install-identity.json',{scriptSHA256:await hash(script),options:options(tag,generation)});installed=true;await run(tag+'-genuine-install','timeout',['--signal=TERM','--kill-after=10s','10m','/bin/bash',script],{env:{CRABHELM_BOOTSTRAP_TOKEN:auth},timeout:11*60_000});}
  if(scenario==='upgrade'){
@@ -221,6 +227,18 @@ async function productTLS(privateCA,privateRoot){
  }
  await write('product-tls-results.json',{pass:true,scope:'Actual installed OpenClaw models status --probe/embedded provider transport, actual patched selected Node, native diagnostic-channel error/authorized-socket observation. Public/private HTTP auth rejection with synthetic invalid key is only a TLS compatibility control, not a real model canary.',rows});
 }
+async function captureFailure(){
+ await run('failure-unit-state','sudo',['-n','systemctl','show','crabhelm-agent.service','crabhelm-egress.service','--property=ActiveState,SubState,MainPID,ExecMainCode,ExecMainStatus,ExecStart,User,FragmentPath'],{check:false});
+ await run('failure-unit-definition','sudo',['-n','systemctl','cat','crabhelm-agent.service','crabhelm-egress.service'],{check:false});
+ await run('failure-bounded-journal','sudo',['-n','journalctl','--no-pager','-n','120','-u','crabhelm-agent.service','-u','crabhelm-egress.service'],{check:false});
+ await run('failure-disk','df',['-B1','/'],{check:false});await run('failure-memory','free',['-b'],{check:false});
+ const pid=Number((await run('failure-mainpid','sudo',['-n','systemctl','show','--property=MainPID','--value','crabhelm-agent.service'],{check:false})).stdout.trim());
+ if(Number.isInteger(pid)&&pid>1){
+  await run('failure-live-executable','sudo',['-n','readlink','/proc/'+pid+'/exe'],{check:false});
+  await run('failure-live-cmdline','sudo',['-n','cat','/proc/'+pid+'/cmdline'],{check:false});
+  await run('failure-live-status','sudo',['-n','cat','/proc/'+pid+'/status'],{check:false});
+ }
+}
 async function cleanup(){
  if(installed){await run('cleanup-stop-services','sudo',['-n','systemctl','disable','--now','crabhelm-agent.service','crabhelm-egress.service'],{check:false});
   const pid=(await run('cleanup-bridge-pid','sudo',['-n','cat','/var/lib/crabhelm-agent/.openclaw/crabhelm-runtime-bridge.pid'],{check:false})).stdout.trim();if(/^\d+$/.test(pid)){const cmd=(await run('cleanup-bridge-identity','sudo',['-n','cat','/proc/'+pid+'/cmdline'],{check:false})).stdout;if(cmd.includes('/runtime/runtime-bridge.mjs'))await run('cleanup-exact-bridge','sudo',['-n','kill','-TERM',pid],{check:false});}
@@ -239,5 +257,5 @@ try{
  }
 }catch(e){error=e.stack??String(e);process.exitCode=1;}
 finally{
- if(process.argv[2]!=='--marker-child')await cleanup();if(evidence)await write('result.json',{pass:success,error,head:process.env.CRABHELM_EXPECTED_HEAD,records,states});if(error)console.error(error);
+ if(process.argv[2]!=='--marker-child'){if(error&&installed){try{await captureFailure();}catch(diagnosticError){console.error('Failure diagnostic capture incomplete:',diagnosticError.message);}}await cleanup();}if(evidence)await write('result.json',{pass:success,error,head:process.env.CRABHELM_EXPECTED_HEAD,records,states});if(error)console.error(error);
 }
