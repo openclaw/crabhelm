@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve the native GitHub Actions job budget for CodeQL scans.
+
 - Batch main CodeQL analysis weekly while preserving PR and manual scans.
 
 - Patch the Worker test toolchain with Vite 8.2.4 and Vitest 4.1.12 to prevent editor command injection and unauthenticated mock-server code injection.
