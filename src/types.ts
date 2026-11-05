@@ -348,6 +348,8 @@ export type ProvisionResult = {
 
 export type InspectResult = Omit<Partial<ProvisionResult>, "health"> & {
   absent?: boolean;
+  /** Discard prior readiness evidence while retaining the allocated resource identity. */
+  invalidateReadiness?: true;
   lastSeenAt?: string;
   health?: ClawObserved["health"];
 };

@@ -303,17 +303,28 @@ export class CrabhelmReconciler {
       const resultInference = inferenceResult(inference, result);
       const routedReady = ready && (!inference || resultInference?.routeVerified === true);
       const policyApplied = result.configHash === childPolicyHash(claw);
-      const observed: ClawObserved = {
+      const { invalidateReadiness, ...observedResult } = result;
+      const previous: ClawObserved = invalidateReadiness ? {
         ...claw.observed,
-        ...result,
-        generation: routedReady || policyApplied ? claw.desired.generation : claw.observed.generation,
-        phase: ready && !routedReady ? "attention" : result.phase ?? claw.observed.phase,
+        generation: 0,
+        controlLink: { ...claw.observed.controlLink, status: "offline", lastSeenAt: undefined },
+        gatewayVersion: undefined,
+        configHash: undefined,
+        probes: undefined,
+        lastSeenAt: undefined,
+        inference: claw.observed.inference ? { ...claw.observed.inference, routeVerified: false } : undefined,
+      } : claw.observed;
+      const observed: ClawObserved = {
+        ...previous,
+        ...observedResult,
+        generation: routedReady || policyApplied ? claw.desired.generation : previous.generation,
+        phase: ready && !routedReady ? "attention" : result.phase ?? previous.phase,
         message: ready && !routedReady
           ? "ClawRouter configuration is present but live routed inference proof is missing"
-          : result.message ?? claw.observed.message,
-        health: ready && !routedReady ? "degraded" : result.health ?? claw.observed.health,
-        controlLink: result.controlLink ?? claw.observed.controlLink,
-        lastSeenAt: result.lastSeenAt ?? claw.observed.lastSeenAt,
+          : result.message ?? previous.message,
+        health: ready && !routedReady ? "degraded" : result.health ?? previous.health,
+        controlLink: result.controlLink ?? previous.controlLink,
+        lastSeenAt: result.lastSeenAt ?? previous.lastSeenAt,
         ...(resultInference ? { inference: resultInference } : {}),
       };
       return await this.#writeObserved(claw, observed);
