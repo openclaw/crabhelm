@@ -238,7 +238,7 @@ test("long claw slugs produce valid, collision-fenced Crabbox ids", () => {
   assert.match(id, /^crabhelm-[a-z0-9-]+-[a-f0-9]{8}$/);
 });
 
-test("Crabbox provider requires exact policy and enabled-ingress evidence for convergence", async () => {
+test("Crabbox provider requires exact policy and enabled-ingress evidence for convergence", async (t) => {
   const claw = createClawRecord({
     name: "Evidence",
     owner: { subject: "github:evidence", label: "@evidence", source: "github" },
@@ -247,8 +247,11 @@ test("Crabbox provider requires exact policy and enabled-ingress evidence for co
   let configHash = "stale";
   let ingressDisabled = false;
   let authReady = true;
+  let workspaceStatus: string | undefined = "running";
+  let inspections = 0;
   const nodeControl = {
     async inspect() {
+      inspections += 1;
       return {
         status: "paired" as const,
         message: "node evidence",
@@ -278,7 +281,7 @@ test("Crabbox provider requires exact policy and enabled-ingress evidence for co
     idleTimeoutSeconds: 14_400,
     nodeControl,
     fetch: async () => new Response(
-      JSON.stringify({ id: "crabhelm-evidence", status: "running" }),
+      JSON.stringify({ id: "crabhelm-evidence", status: workspaceStatus }),
       { status: 200, headers: { "content-type": "application/json" } },
     ),
   });
@@ -293,6 +296,28 @@ test("Crabbox provider requires exact policy and enabled-ingress evidence for co
   const degraded = await provider.inspect(claw);
   assert.equal(degraded.phase, "attention");
   assert.equal(degraded.health, "degraded");
+
+  authReady = true;
+  for (const status of ["provisioning", "stopping", "expired", "unknown", "", undefined]) {
+    await t.test(`workspace ${JSON.stringify(status)} cannot reuse ready node evidence`, async () => {
+      workspaceStatus = status;
+      const before = inspections;
+      const result = await provider.inspect(claw);
+      assert.equal(result.phase, "enrolling");
+      assert.equal(result.health, "unknown");
+      assert.equal(result.lastSeenAt, undefined);
+      assert.equal(result.controlLink, undefined);
+      assert.equal(result.probes, undefined);
+      assert.deepEqual(result.lifecycle, claw.observed.lifecycle);
+      assert.equal(inspections, before, "non-ready workspace must not reconcile node policy");
+    });
+  }
+  for (const status of ["ready", "running"]) {
+    await t.test(`workspace ${status} permits current node evidence`, async () => {
+      workspaceStatus = status;
+      assert.equal((await provider.inspect(claw)).phase, "ready");
+    });
+  }
 });
 
 test("Crabbox provider delegates standalone lifecycle evidence to its workspace adapter", async () => {

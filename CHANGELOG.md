@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Require active workspace lifecycle evidence before child readiness and clear stale stored readiness when a workspace becomes inactive. Thanks @valkyriweb.
+- Patch the remaining Undici and Zod tooling vulnerabilities and refresh compatible AWS, Worker, authentication, validation, and WebSocket dependencies within the release cooldown.
+
 - Preserve the native GitHub Actions job budget for CodeQL scans.
 
 - Batch main CodeQL analysis weekly while preserving PR and manual scans.

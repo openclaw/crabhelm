@@ -356,6 +356,20 @@ export class CrabboxChildCoreProvider implements ChildCoreProvider {
       const diagnostic = crabboxWorkspaceFailureDiagnostic(body, workspace);
       throw operationalError("CRABBOX_WORKSPACE_FAILED", `Crabbox workspace reported failure${diagnostic ? `: ${diagnostic}` : ""}`);
     }
+    // Node evidence cannot override the workspace owner's lifecycle state.
+    // Keep the legacy "running" state supported for node-controlled targets.
+    if (status !== "ready" && status !== "running") {
+      return {
+        absent: false,
+        phase: "enrolling",
+        health: "unknown",
+        invalidateReadiness: true,
+        message: status === "stopping"
+          ? "Crabbox provider release is pending"
+          : `Workspace provider status is ${status || "unknown"}; child bootstrap is pending`,
+        lifecycle: claw.observed.lifecycle,
+      };
+    }
     if (this.#options.workspaceBootstrap && status === "ready") {
       if (options.reconcileDesired === false) {
         return {
@@ -427,9 +441,7 @@ export class CrabboxChildCoreProvider implements ChildCoreProvider {
       health: ready ? "healthy" : attention ? "degraded" : "unknown",
       message:
         nodeEvidence?.message ??
-        (status === "stopping"
-          ? "Crabbox provider release is pending"
-          : `Workspace provider status is ${status ?? "unknown"}; child bootstrap is pending`),
+        `Workspace provider status is ${status}; child bootstrap is pending`,
       lifecycle: claw.observed.lifecycle,
       ...(nodeEvidence?.controlLink ? { controlLink: nodeEvidence.controlLink } : {}),
       ...(nodeEvidence?.gatewayVersion ? { gatewayVersion: nodeEvidence.gatewayVersion } : {}),

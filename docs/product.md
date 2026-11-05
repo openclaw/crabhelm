@@ -63,6 +63,7 @@ For ClawRouter fleets, the drawer shows the desired origin, tenant-scoped policy
 The console separates provider allocation, control link, Gateway version, policy generation, model authentication, and Slack state. Production readiness requires:
 
 - exact provider identity exists;
+- its workspace reports `ready` or the supported node-controlled `running` state; inactive or unknown workspace states clear prior control, policy, model, and Gateway readiness evidence while preserving resource identity;
 - child Gateway readiness marker exists;
 - desired model is written into child config;
 - a live `openclaw agent` turn returns the expected answer through that model;
