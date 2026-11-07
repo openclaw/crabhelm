@@ -18,12 +18,12 @@ export class Crabbox {
     return ["--provider", this.#config.crabboxProvider];
   }
 
-  async warmup(slug, log = process.stderr) {
+  async warmup(slug, log = process.stderr, { onSpawn } = {}) {
     const c = this.#config;
     const result = await this.#run("crabbox", [
       "warmup", ...this.#providerArgs(), "--type", c.crabboxType, "--slug", slug,
       "--idle-timeout", c.leaseIdleTimeout, "--ttl", c.leaseTtl,
-    ], { cwd: this.#cwd, stdout: "capture", stderr: "capture" });
+    ], { cwd: this.#cwd, stdout: "capture", stderr: "capture", onSpawn });
     const text = result.stdout + "\n" + result.stderr;
     for (const line of text.split("\n")) if (/^(leased|ready|warmup complete|serve route|waiting)/.test(line)) log.write("agent-run: crabbox " + line + "\n");
     const leased = /leased (\S+) slug=(\S+)/.exec(text);
@@ -53,6 +53,8 @@ export class Crabbox {
     const result = await this.#run("crabbox", ["stop", ...this.#providerArgs(), "--id", slug], { cwd: this.#cwd });
     const text = result.stdout + "\n" + result.stderr;
     const released = /released lease=(\S+)/.exec(text);
+    // The coordinator has no such lease (for example a warmup cancelled by a signal): nothing is left running.
+    if (!released && /\/release: http 404\b/.test(text)) return { stopped: true, absent: true, exitCode: result.code, lease: null };
     return { stopped: result.code === 0 && Boolean(released), exitCode: result.code, lease: released?.[1] ?? null };
   }
 }

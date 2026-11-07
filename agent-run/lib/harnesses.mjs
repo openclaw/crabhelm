@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { quote } from "./shell.mjs";
 
 // Per-harness adapters. Each adapter knows how to run one non-interactive
 // turn locally (today's behaviour) and how to configure the box so the
@@ -62,8 +63,59 @@ const pi = {
   promptAsArgument: true,
 };
 
-export const HARNESSES = { pi };
-export const PLANNED = ["codex", "claude", "grok", "prime", "rusty", "openclaw"];
+// Pi thinking levels mapped to Codex model_reasoning_effort values.
+const CODEX_EFFORT = { off: "none", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh" };
+
+function codexModel(model) {
+  return model?.startsWith("clawrouter/") ? model.slice("clawrouter/".length) : model;
+}
+
+function codexArgs({ model, thinking, lastMessage }) {
+  if (thinking && !CODEX_EFFORT[thinking]) throw new Error("codex: unknown thinking level " + thinking);
+  return [
+    "exec", "--skip-git-repo-check", "--color", "never", "-o", lastMessage,
+    ...(model ? ["--model", codexModel(model)] : []),
+    ...(thinking ? ["-c", "model_reasoning_effort=" + JSON.stringify(CODEX_EFFORT[thinking])] : []),
+  ];
+}
+
+const codex = {
+  name: "codex",
+  bin: "codex",
+  localArgv({ model, thinking, prompt, sessionDir }) {
+    return ["codex", ...codexArgs({ model, thinking, lastMessage: sessionDir + "/last-message.md" }), "--", prompt];
+  },
+  // A fresh CODEX_HOME holding only a ClawRouter provider that reads the per-run key from the environment.
+  remoteConfig({ remoteBaseUrl }) {
+    const toml = [
+      "model_provider = \"clawrouter\"",
+      "",
+      "[model_providers.clawrouter]",
+      "name = \"clawrouter\"",
+      "base_url = " + JSON.stringify(new URL(remoteBaseUrl).origin + "/v1"),
+      "env_key = \"CLAWROUTER_API_KEY\"",
+      "wire_api = \"responses\"",
+      "",
+    ].join("\n");
+    return { "codex/config.toml": toml };
+  },
+  remoteEnv({ configDir }) {
+    return { CODEX_HOME: configDir + "/codex" };
+  },
+  remoteArgv({ model, thinking, sessionDir }) {
+    // The lease is a disposable container holding only inputs and a per-run key, so Codex's own sandbox is
+    // bypassed; Landlock and seccomp are not reliably available inside the broker's rootless containers.
+    return ["codex", ...codexArgs({ model, thinking, lastMessage: sessionDir + "/last-message.md" }), "--dangerously-bypass-approvals-and-sandbox"];
+  },
+  // Codex writes its rollout under $CODEX_HOME/sessions; copy it next to the last message.
+  remoteCollect({ sessionDir }) {
+    return ["if [ -d \"$CODEX_HOME/sessions\" ]; then cp -R \"$CODEX_HOME/sessions\" " + quote(sessionDir + "/codex-sessions") + "; fi"];
+  },
+  promptAsArgument: true,
+};
+
+export const HARNESSES = { pi, codex };
+export const PLANNED = ["claude", "grok", "prime", "rusty", "openclaw"];
 
 export function harness(name) {
   const adapter = HARNESSES[name];

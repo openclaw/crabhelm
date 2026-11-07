@@ -5,8 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
 import { test } from "node:test";
+import { boxPackages, integrityMatches } from "../lib/appliance.mjs";
 import { ClawRouterAdmin, IN_POD_SCRIPT, newKeyName } from "../lib/clawrouter.mjs";
-import { sshCommand } from "../lib/crabbox.mjs";
+import { Crabbox, sshCommand } from "../lib/crabbox.mjs";
 import { childEnv } from "../lib/proc.mjs";
 import { HARNESSES } from "../lib/harnesses.mjs";
 import { agentRun, EXIT_INFRA, EXIT_QUEUED } from "../lib/run.mjs";
@@ -20,6 +21,38 @@ test("splitWords reads the quoting crabbox ssh prints", () => {
     "ssh", "-i", "/Users/x/Application Support/id", "-o", "ProxyCommand='crabbox' '--lease'", "crabbox@cbx_1",
   ]);
   for (const value of ["plain", "it's", "a b", "$HOME", "", "x'\"y"]) assert.deepEqual(splitWords(quote(value)), [value]);
+});
+
+test("the appliance takes only the lockfile packages a linux-x64 glibc box needs", () => {
+  const entry = (extra) => ({ resolved: "https://r/x.tgz", integrity: "sha512-x", ...extra });
+  const lock = { packages: {
+    "": { name: "root" },
+    "node_modules/a": entry(),
+    "node_modules/a-darwin-arm64": entry({ os: ["darwin"], cpu: ["arm64"], optional: true }),
+    "node_modules/a-linux-x64": entry({ os: ["linux"], cpu: ["x64"], optional: true }),
+    "node_modules/a-linux-x64-musl": entry({ os: ["linux"], cpu: ["x64"], libc: ["musl"], optional: true }),
+    "node_modules/not-windows": entry({ os: ["!win32"] }),
+    "node_modules/devtool": entry({ dev: true }),
+    "node_modules/linked": { link: true, resolved: "../x" },
+  } };
+  assert.deepEqual(boxPackages(lock).map((p) => p.path), ["node_modules/a", "node_modules/a-linux-x64", "node_modules/not-windows"]);
+  assert.throws(() => boxPackages({ packages: { "node_modules/b": {} } }), /no resolved URL or integrity/);
+});
+
+test("tarball integrity is checked against the lockfile hash", () => {
+  const bytes = Buffer.from("tarball");
+  const good = "sha512-" + createHash("sha512").update(bytes).digest("base64");
+  assert.ok(integrityMatches(good, bytes));
+  assert.ok(integrityMatches("sha1-ignored " + good, bytes));
+  assert.ok(!integrityMatches(good, Buffer.from("other")));
+  assert.ok(!integrityMatches("sha1-" + createHash("sha1").update(bytes).digest("base64"), bytes));
+});
+
+test("stopping a lease the coordinator never created counts as stopped", async () => {
+  const runner = async () => ({ code: 0, stdout: "", stderr: "coordinator POST /v1/leases/s/release: http 404: {\"error\":\"not_found\"}\n" });
+  assert.deepEqual(await new Crabbox({ crabboxProvider: "serve" }, { runner }).stop("s"), { stopped: true, absent: true, exitCode: 0, lease: null });
+  const failing = async () => ({ code: 1, stdout: "", stderr: "coordinator POST /v1/leases/s/release: http 500\n" });
+  assert.equal((await new Crabbox({ crabboxProvider: "serve" }, { runner: failing }).stop("s")).stopped, false);
 });
 
 test("sshCommand puts options before the destination", () => {
@@ -106,7 +139,7 @@ test("the Pi box config drops the laptop key and reads the per-run key from the 
   assert.ok(!files["pi/models.json"].includes("laptop-secret"));
 });
 
-function remoteFixture({ runExit = 0, failUpload = false, warmupError } = {}) {
+function remoteFixture({ runExit = 0, failUpload = false, warmupError, stopResult = { stopped: true, exitCode: 0, lease: "cbx_1" }, afterMint } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "agent-run-flow-"));
   const cacheDir = join(dir, "cache");
   mkdirSync(join(cacheDir, "appliances"), { recursive: true });
@@ -129,13 +162,13 @@ function remoteFixture({ runExit = 0, failUpload = false, warmupError } = {}) {
   const wrappedAdmin = {
     list: () => admin.list(),
     revoke: (n) => admin.revoke(n),
-    mint: async (n) => { const key = await admin.mint(n); events.push("mint"); fixture.token = key.token; return key; },
+    mint: async (n) => { const key = await admin.mint(n); events.push("mint"); fixture.token = key.token; afterMint?.(); return key; },
     revokeAndProve: async (n, t) => { events.push("revoke"); return admin.revokeAndProve(n, t); },
   };
   const crabbox = {
     warmup: async () => { events.push("warmup"); if (warmupError) throw warmupError; return { leaseId: "cbx_1", slug: "s" }; },
     sshArgv: async () => ["ssh", "-p", "22", "u@cbx_1"],
-    stop: async () => { events.push("stop"); return { stopped: true, exitCode: 0, lease: "cbx_1" }; },
+    stop: async () => { events.push("stop"); return stopResult; },
   };
   const calls = [];
   const runner = async (command, args, options = {}) => {
@@ -187,6 +220,41 @@ test("no broker capacity exits 75 and still revokes the key", async () => {
   const f = remoteFixture({ warmupError: error });
   assert.equal(await agentRun(f.options, f.deps), EXIT_QUEUED);
   assert.deepEqual(f.events, ["mint", "warmup", "revoke", "stop"]);
+});
+
+test("a lease that does not stop turns a successful run into an infrastructure failure", async () => {
+  const f = remoteFixture({ stopResult: { stopped: false, exitCode: 1, lease: null } });
+  assert.equal(await agentRun(f.options, f.deps), EXIT_INFRA);
+  assert.equal(JSON.parse(readFileSync(join(f.options.out, "receipt.json"), "utf8")).target.cleanup.stopped, false);
+});
+
+test("a signal before the lease is requested revokes the key and takes no lease", async () => {
+  const f = remoteFixture({ afterMint: () => process.emit("SIGTERM", "SIGTERM") });
+  assert.equal(await agentRun(f.options, f.deps), EXIT_INFRA);
+  assert.deepEqual(f.events, ["mint", "revoke"]);
+});
+
+test("the remote script keeps the harness exit code after collecting session files", async () => {
+  const f = remoteFixture({ runExit: 5 });
+  f.deps.pins.harnesses.codex = { package: "c", version: "1.0.0", bin: "codex" };
+  const index = join(f.deps.config.cacheDir, "appliances", "index.json");
+  const entries = JSON.parse(readFileSync(index, "utf8"));
+  writeFileSync(index, JSON.stringify({ ...entries, "codex-1.0.0-node24": entries["pi-1.0.0-node24"] }));
+  assert.equal(await agentRun({ ...f.options, harness: "codex", thinking: "high" }, f.deps), 5);
+  const script = f.calls.find((c) => c.args.at(-1) === "bash -s").input;
+  assert.match(script, /^codex exec .*-c 'model_reasoning_effort="high"' --dangerously-bypass-approvals-and-sandbox -- /m);
+  assert.match(script, /rc=\$\?\n\{ if \[ -d "\$CODEX_HOME\/sessions" \].*\nexit \$rc/);
+  assert.ok(!script.includes("exec codex"));
+});
+
+test("the Codex box config routes through the tunnel and names only the key variable", () => {
+  const files = HARNESSES.codex.remoteConfig({ config: {}, remoteBaseUrl: "http://127.0.0.1:18789" });
+  const toml = files["codex/config.toml"];
+  assert.match(toml, /^model_provider = "clawrouter"$/m);
+  assert.match(toml, /^base_url = "http:\/\/127\.0\.0\.1:18789\/v1"$/m);
+  assert.match(toml, /^env_key = "CLAWROUTER_API_KEY"$/m);
+  assert.deepEqual(HARNESSES.codex.remoteEnv({ configDir: "/w/config" }), { CODEX_HOME: "/w/config/codex" });
+  assert.deepEqual(HARNESSES.codex.localArgv({ model: "clawrouter/gpt-x", prompt: "hi", sessionDir: "/s" }).slice(-3), ["gpt-x", "--", "hi"]);
 });
 
 test("local placement runs the harness on the laptop with no key and no lease", async () => {

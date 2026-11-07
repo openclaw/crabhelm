@@ -50,13 +50,19 @@ No infrastructure change, no Access token and no tailnet key reach the box. The 
 ## Harness appliances
 
 Each harness has one pinned, content-addressed tarball: Node linux-x64 (SHASUMS-verified) plus the harness package at an exact version with its lockfile.
-`agent-run appliance build <h>` builds it on a Crabbox lease (heavy work stays off the laptop; the first Pi build took about 20 minutes on cpu2 and produced an 84 MB tarball) and stores it under `~/.cache/agent-run/appliances/<h>-<version>-<sha12>.tgz`. `agent-run/appliances.json` pins the expected sha256.
+`agent-run appliance build <h>` works in two parts:
+
+1. The laptop resolves the npm lockfile (registry metadata only), downloads the linux-x64 glibc tarballs it lists, and checks each one against its lockfile integrity.
+2. If no locked package has an install script, the laptop assembles the tree itself: `npm ci --offline --ignore-scripts --os=linux --cpu=x64 --libc=glibc`. Node stays packed as `node.tgz`, and the box unpacks it per run. The codex appliance took 45 seconds this way.
+3. Otherwise a Crabbox lease receives the tarballs over SSH and runs `npm ci --offline`, so install scripts run on Linux and stay off the laptop. Pi takes this path (`@google/genai`, `protobufjs`).
+
+The laptop downloads because broker boxes reach the npm registry at only 6-47 KB/s (measured 2026-11-07); the first Pi build, which downloaded on the box, took about 20 minutes. Fleet confirmed this is a lease-network defect on all three lue-kube donors (`receipts/lease-egress-slow.md`). The same donors carry the SSH relay at about 290 KB/s up and 175 KB/s down, so a 229 MB codex appliance takes about 13 minutes to upload per run until Fleet fixes it. The result is stored under `~/.cache/agent-run/appliances/<h>-<version>-<sha12>.tgz`, and the index records the tarball sha256 and the lockfile sha256.
 Each run streams the cached tarball over SSH; the box checks the sha256 before it unpacks it. Nothing is downloaded or installed on the box per run.
 
 | Harness | Box config written per run (key only from env) |
 |---|---|
 | pi | `models.json` provider `clawrouter`, `baseUrl http://127.0.0.1:18789`, `api anthropic-messages`, `apiKey CLAWROUTER_API_KEY`; `pi -p` |
-| codex | `config.toml` model provider with the forward as base URL, Responses API; `codex exec` |
+| codex | fresh `CODEX_HOME` with `config.toml`: `model_provider clawrouter`, `base_url http://127.0.0.1:18789/v1`, `env_key CLAWROUTER_API_KEY`, `wire_api responses`; `codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox` (the lease is a disposable container; Codex's own sandbox needs Landlock and seccomp, which rootless broker containers do not reliably provide). The rollout under `$CODEX_HOME/sessions` and the last message are copied back. |
 | claude | `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`; `claude -p` |
 | grok, prime-agent, rusty, openclaw | per-slice: each slice records the exact base-URL and key settings it needs |
 
