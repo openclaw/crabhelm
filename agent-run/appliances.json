@@ -21,6 +21,11 @@
       "bin": "claude",
       "ignoreScripts": true,
       "entry": "node_modules/@anthropic-ai/claude-code-linux-x64/claude"
+    },
+    "openclaw": {
+      "package": "openclaw",
+      "version": "2026.7.1",
+      "bin": "openclaw"
     }
   }
 }

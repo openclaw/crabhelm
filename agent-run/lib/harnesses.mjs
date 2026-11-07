@@ -156,8 +156,98 @@ const claude = {
   promptOnStdin: true,
 };
 
-export const HARNESSES = { pi, codex, claude };
-export const PLANNED = ["grok", "prime", "rusty", "openclaw"];
+function openclawModel(model) {
+  const qualified = model || "openai/gpt-6-sol";
+  const parts = qualified.split("/");
+  if (parts.length > 2) throw new Error("openclaw: model must be a provider/model pair");
+  const [prefix, id] = parts.length === 2 ? parts : [undefined, parts[0]];
+  if (!id) throw new Error("openclaw: model id is required");
+  if (/^(?:grok|xai)(?:-|$)/i.test(id)) throw new Error("openclaw: XAI models are not allowed");
+  let provider = prefix;
+  if (provider === "clawrouter") provider = undefined;
+  if (provider && !["openai", "anthropic"].includes(provider)) {
+    throw new Error("openclaw: only OpenAI and Anthropic models are allowed");
+  }
+  if (!provider) {
+    if (/^claude-/i.test(id)) provider = "anthropic";
+    else if (/^(?:gpt-|codex-|o[1-9](?:-|$))/i.test(id)) provider = "openai";
+    else throw new Error("openclaw: model must identify an OpenAI or Anthropic model");
+  }
+  return { provider, id, qualified: provider + "/" + id, keyEnv: provider === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY" };
+}
+
+const openclaw = {
+  name: "openclaw",
+  bin: "openclaw",
+  workspaceFiles: {
+    "BOOTSTRAP.md": "This workspace is initialized for one task. Do not run onboarding or identity setup. Follow the task prompt and attached files.\n",
+    "IDENTITY.md": "# Identity\nThis is a disposable task-scoped software agent, not a human.\n",
+    "USER.md": "# User context\nUse only the supplied task prompt and attached files. No persistent user profile is provided.\n",
+    "SOUL.md": "# Operating principles\nFollow the task scope. Protect credentials and private data. Do not claim human identity.\n",
+    "memory/.keep": "",
+  },
+  localArgv({ model, thinking, prompt, runId }) {
+    return [
+      "openclaw", "agent", "--local", "--agent", "main", "--session-id", runId,
+      "--message", prompt,
+      ...(model ? ["--model", openclawModel(model).qualified] : []),
+      ...(thinking ? ["--thinking", thinking] : []),
+      "--timeout", "840", "--json",
+    ];
+  },
+  remoteConfig({ remoteBaseUrl, model, workdir }) {
+    const selected = openclawModel(model);
+    const url = new URL(remoteBaseUrl);
+    const baseUrl = selected.provider === "openai" ? new URL("/v1", url).origin + "/v1" : url.origin;
+    const api = selected.provider === "openai" ? "openai-responses" : "anthropic-messages";
+    return {
+      "openclaw/openclaw.json": JSON.stringify({
+        gateway: { mode: "local" },
+        agents: { defaults: {
+          model: { primary: selected.qualified },
+          models: { [selected.qualified]: {} },
+          workspace: workdir + "/inputs",
+        } },
+        models: { providers: {
+          [selected.provider]: {
+            baseUrl,
+            apiKey: { source: "env", provider: "default", id: selected.keyEnv },
+            api,
+            models: [{
+              id: selected.id, name: selected.id, reasoning: true, input: ["text"],
+              contextWindow: 200000, maxTokens: 8192,
+            }],
+          },
+        } },
+      }, null, 2) + "\n",
+    };
+  },
+  remoteEnv({ configDir }) {
+    const stateDir = configDir + "/openclaw/state";
+    return {
+      OPENCLAW_CONFIG_PATH: configDir + "/openclaw/openclaw.json",
+      OPENCLAW_STATE_DIR: stateDir,
+    };
+  },
+  keyEnv({ model }) {
+    return [openclawModel(model).keyEnv];
+  },
+  remoteArgv({ model, thinking, runId, promptFile }) {
+    return [
+      "openclaw", "agent", "--local", "--agent", "main", "--session-id", runId,
+      "--message-file", promptFile,
+      "--model", openclawModel(model).qualified,
+      ...(thinking ? ["--thinking", thinking] : []),
+      "--timeout", "840", "--json",
+    ];
+  },
+  remoteCollect({ configDir, sessionDir }) {
+    return ["if [ -d " + quote(configDir + "/openclaw/state/agents/main/sessions") + " ]; then cp -R " + quote(configDir + "/openclaw/state/agents/main/sessions") + " " + quote(sessionDir + "/openclaw-sessions") + "; fi"];
+  },
+};
+
+export const HARNESSES = { pi, codex, claude, openclaw };
+export const PLANNED = ["rusty", "prime", "grok"];
 
 export function harness(name) {
   const adapter = HARNESSES[name];
