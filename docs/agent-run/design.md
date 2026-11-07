@@ -49,7 +49,7 @@ No infrastructure change, no Access token and no tailnet key reach the box. The 
 
 ## Harness appliances
 
-Each npm harness has one pinned, content-addressed tarball: Node linux-x64 (SHASUMS-verified) plus the harness package at an exact version with its lockfile. Rusty instead uses a pinned Linux x86_64 release artifact. agent-run checks its SHA-256 and packages only the rustyd binary and manifest.
+Each npm harness has one pinned, content-addressed tarball: Node linux-x64 (SHASUMS-verified) plus the harness package at an exact version with its lockfile. Rusty instead uses a pinned Linux x86_64 release artifact. agent-run downloads private assets through authenticated gh release download with prompts disabled, verifies the SHA-256, and packages only the rustyd binary and manifest. GitHub credentials stay on the laptop.
 `agent-run appliance build <h>` works in two parts:
 
 1. The laptop resolves the npm lockfile (registry metadata only), downloads the linux-x64 glibc tarballs it lists, and checks each one against its lockfile integrity.

@@ -207,6 +207,7 @@ const rusty = {
   remoteEnv({ configDir }) {
     const sessionDir = configDir + "/rusty/home/.rusty";
     return {
+      HOME: configDir + "/rusty/home",
       RUSTY_SESSION_DIR: sessionDir,
       RUSTY_NO_WORKTREE: "1",
       RUSTY_AGENT_RELAY: "0",

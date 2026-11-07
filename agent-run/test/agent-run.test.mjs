@@ -59,10 +59,22 @@ test("a pinned Linux release artifact assembles a digest-addressed appliance", a
   const bytes = readFileSync(archive);
   const digest = createHash("sha256").update(bytes).digest("hex");
   const url = "https://releases.example/rustyd.tgz";
-  const pins = { harnesses: { rusty: { package: "rustyd", version: "0.1.5", bin: "rustyd", platform: "linux-x64", artifact: { url, sha256: digest, member: "rustyd" } } } };
+  const release = { repo: "example/rusty", tag: "v0.1.5", asset: "rustyd.tgz" };
+  const pins = { harnesses: { rusty: { package: "rustyd", version: "0.1.5", bin: "rustyd", platform: "linux-x64", artifact: { url, githubRelease: release, sha256: digest, member: "rustyd" } } } };
   const appliance = await buildAppliance({
     config: { cacheDir: join(dir, "cache") }, pins, harness: "rusty", log: sink(),
-    fetcher: async (requested) => { assert.equal(requested, url); return new Response(bytes); },
+    fetcher: async () => { throw new Error("private release must use gh auth"); },
+    runner: async (command, args, options = {}) => {
+      if (command === "gh") {
+        assert.deepEqual(args.slice(0, -2), ["release", "download", release.tag, "--repo", release.repo, "--pattern", release.asset]);
+        assert.equal(options.env.GH_PROMPT_DISABLED, "1");
+        assert.equal(options.env.CLAWROUTER_API_KEY, undefined);
+        writeFileSync(join(args.at(-1), release.asset), bytes);
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      execFileSync(command, args, { env: options.env });
+      return { code: 0, stdout: "", stderr: "" };
+    },
   });
   assert.equal(appliance.key, applianceKey(pins, "rusty"));
   assert.equal(appliance.sourceSha256, digest);
@@ -387,6 +399,10 @@ test("Rusty runs one Responses turn with a throwaway profile and per-run key", a
   const archive = f.calls.find((call) => call.command === "tar");
   assert.equal(archive.rustyProfile.name, "agent-run");
   assert.deepEqual(archive.rustyProfile.permissions, { allow: [], deny: ["*"] });
+  assert.deepEqual(HARNESSES.rusty.remoteEnv({ configDir: "/w/config" }), {
+    HOME: "/w/config/rusty/home", RUSTY_SESSION_DIR: "/w/config/rusty/home/.rusty",
+    RUSTY_NO_WORKTREE: "1", RUSTY_AGENT_RELAY: "0", RUSTY_HERDR_REPORT: "0",
+  });
   assert.deepEqual(f.events, ["mint", "warmup", "revoke", "stop"]);
 });
 

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, copyFileSync, symlinkSync, createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { run } from "./proc.mjs";
+import { childEnv, run } from "./proc.mjs";
 import { quote } from "./shell.mjs";
 import { sshCommand } from "./crabbox.mjs";
 
@@ -61,20 +61,38 @@ async function nodeTarball(config, pins, log) {
   return path;
 }
 
-async function pinnedArtifact(config, spec, fetcher, log) {
+async function pinnedArtifact(config, spec, fetcher, runner, log) {
   const dir = join(config.cacheDir, "artifacts");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const path = join(dir, spec.package + "-" + spec.version + "-" + spec.artifact.sha256.slice(0, 12) + ".tgz");
   if (existsSync(path) && await sha256File(path) === spec.artifact.sha256) return path;
   log.write("agent-run: downloading pinned " + spec.package + " " + spec.version + " for " + spec.platform + "\n");
-  const response = await fetcher(spec.artifact.url);
-  if (!response.ok) throw new Error("release artifact download failed: HTTP " + response.status);
-  const bytes = Buffer.from(await response.arrayBuffer());
-  const sha256 = createHash("sha256").update(bytes).digest("hex");
-  if (sha256 !== spec.artifact.sha256) throw new Error("release artifact sha256 mismatch");
-  writeFileSync(path + ".tmp", bytes, { mode: 0o600 });
-  renameSync(path + ".tmp", path);
-  return path;
+  const downloadDir = mkdtempSync(join(dir, "download-"));
+  try {
+    let bytes;
+    if (spec.artifact.githubRelease) {
+      const release = spec.artifact.githubRelease;
+      const result = await runner("gh", [
+        "release", "download", release.tag, "--repo", release.repo,
+        "--pattern", release.asset, "--dir", downloadDir,
+      ], { env: childEnv(process.env, { GH_PROMPT_DISABLED: "1" }) });
+      if (result.code !== 0) throw new Error("GitHub release download failed: " + result.stderr.trim().split("\n").at(-1));
+      const downloaded = join(downloadDir, release.asset);
+      if (!existsSync(downloaded)) throw new Error("GitHub release download did not create " + release.asset);
+      bytes = readFileSync(downloaded);
+    } else {
+      const response = await fetcher(spec.artifact.url);
+      if (!response.ok) throw new Error("release artifact download failed: HTTP " + response.status);
+      bytes = Buffer.from(await response.arrayBuffer());
+    }
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    if (sha256 !== spec.artifact.sha256) throw new Error("release artifact sha256 mismatch");
+    writeFileSync(path + ".tmp", bytes, { mode: 0o600 });
+    renameSync(path + ".tmp", path);
+    return path;
+  } finally {
+    rmSync(downloadDir, { recursive: true, force: true });
+  }
 }
 
 // The box: linux, x64, glibc (Ubuntu). npm records os/cpu/libc for platform-specific packages.
@@ -205,7 +223,7 @@ async function buildPinnedArtifactAppliance({ config, pins, harness, log, runner
   const partial = join(dir, key + ".tgz.partial");
   const stage = mkdtempSync(join(config.cacheDir, "build-"));
   try {
-    const asset = await pinnedArtifact(config, spec, fetcher, log);
+    const asset = await pinnedArtifact(config, spec, fetcher, runner, log);
     const extracted = join(stage, "release");
     mkdirSync(extracted);
     const unpacked = await runner("tar", ["-xzf", asset, "-C", extracted, spec.artifact.member]);
