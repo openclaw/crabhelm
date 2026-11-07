@@ -114,8 +114,50 @@ const codex = {
   promptAsArgument: true,
 };
 
-export const HARNESSES = { pi, codex };
-export const PLANNED = ["claude", "grok", "prime", "rusty", "openclaw"];
+// Pi thinking levels mapped to Claude Code --effort values (Claude has no "off").
+const CLAUDE_EFFORT = { off: "low", minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" };
+
+function claudeArgs({ model, thinking }) {
+  if (thinking && !CLAUDE_EFFORT[thinking]) throw new Error("claude: unknown thinking level " + thinking);
+  return [
+    "claude", "-p", "--output-format", "text",
+    ...(model ? ["--model", model.startsWith("clawrouter/") ? model.slice("clawrouter/".length) : model] : []),
+    ...(thinking ? ["--effort", CLAUDE_EFFORT[thinking]] : []),
+  ];
+}
+
+const claude = {
+  name: "claude",
+  bin: "claude",
+  localArgv({ model, thinking }) {
+    return claudeArgs({ model, thinking });
+  },
+  // --bare reads no settings, hooks or keychain; this file only gives CLAUDE_CONFIG_DIR a home.
+  remoteConfig() {
+    return { "claude/settings.json": "{}\n" };
+  },
+  remoteEnv({ configDir, remoteBaseUrl }) {
+    return {
+      CLAUDE_CONFIG_DIR: configDir + "/claude",
+      ANTHROPIC_BASE_URL: new URL(remoteBaseUrl).origin,
+      DISABLE_AUTOUPDATER: "1",
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    };
+  },
+  // In --bare mode Claude Code authenticates only with ANTHROPIC_API_KEY, sent as x-api-key, which ClawRouter accepts.
+  keyEnv: ["ANTHROPIC_API_KEY"],
+  remoteArgv({ model, thinking }) {
+    // The lease is a disposable container holding only inputs and a per-run key.
+    return [...claudeArgs({ model, thinking }), "--bare", "--dangerously-skip-permissions"];
+  },
+  remoteCollect({ sessionDir }) {
+    return ["if [ -d \"$CLAUDE_CONFIG_DIR/projects\" ]; then cp -R \"$CLAUDE_CONFIG_DIR/projects\" " + quote(sessionDir + "/claude-projects") + "; fi"];
+  },
+  promptOnStdin: true,
+};
+
+export const HARNESSES = { pi, codex, claude };
+export const PLANNED = ["grok", "prime", "rusty", "openclaw"];
 
 export function harness(name) {
   const adapter = HARNESSES[name];

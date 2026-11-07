@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, symlinkSync, createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { run } from "./proc.mjs";
@@ -163,10 +163,20 @@ async function assembleLocally({ stage, pins, harness, lockSha256, partial, runn
   if (added.code !== 0) throw new Error("npm cache add failed: " + added.stderr.trim().split("\n").at(-1));
   const installed = await npm(["ci", "--offline", "--omit=dev", "--ignore-scripts", "--os=linux", "--cpu=x64", "--libc=glibc"]);
   if (installed.code !== 0) throw new Error("npm ci failed: " + installed.stderr.trim().split("\n").at(-1));
-  if (!existsSync(join(stage, "app", "node_modules", ".bin", spec.bin))) throw new Error("npm ci did not install " + spec.bin);
+  const parts = ["node.tgz", "app", "agent-run-appliance.json"];
+  if (spec.entry) {
+    // The pin names the real executable (for example a native binary that an
+    // install script would have copied over a stub); link it as bin/<bin>.
+    if (!existsSync(join(stage, "app", spec.entry))) throw new Error("npm ci did not install " + spec.entry);
+    mkdirSync(join(stage, "bin"));
+    symlinkSync(join("..", "app", spec.entry), join(stage, "bin", spec.bin));
+    parts.push("bin");
+  } else if (!existsSync(join(stage, "app", "node_modules", ".bin", spec.bin))) {
+    throw new Error("npm ci did not install " + spec.bin);
+  }
   writeFileSync(join(stage, "agent-run-appliance.json"), JSON.stringify({ harness, package: spec.package, version: spec.version, bin: spec.bin, node: pins.node.version, lockSha256, assembled: "laptop" }) + "\n");
   rmSync(cache, { recursive: true, force: true });
-  const packed = await runner("tar", ["-czf", partial, "-C", stage, "node.tgz", "app", "agent-run-appliance.json"], { env: { ...process.env, COPYFILE_DISABLE: "1" } });
+  const packed = await runner("tar", ["-czf", partial, "-C", stage, ...parts], { env: { ...process.env, COPYFILE_DISABLE: "1" } });
   if (packed.code !== 0) throw new Error("could not pack the appliance");
 }
 
@@ -185,8 +195,8 @@ export async function buildAppliance({ config, pins, harness, crabbox, log = pro
   try {
     const staged = await stageInputs({ config, pins, harness, node, runner, log });
     stage = staged.stage;
-    if (staged.installScripts.length === 0) {
-      log.write("agent-run: no install scripts; assembling the linux-x64 appliance on the laptop\n");
+    if (staged.installScripts.length === 0 || pins.harnesses[harness].ignoreScripts) {
+      log.write("agent-run: " + (staged.installScripts.length ? "pin skips install scripts" : "no install scripts") + "; assembling the linux-x64 appliance on the laptop\n");
       await assembleLocally({ stage, pins, harness, lockSha256: staged.lockSha256, partial, runner });
       return await finish(staged, "laptop");
     }

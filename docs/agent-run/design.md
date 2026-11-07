@@ -63,7 +63,7 @@ Each run streams the cached tarball over SSH; the box checks the sha256 before i
 |---|---|
 | pi | `models.json` provider `clawrouter`, `baseUrl http://127.0.0.1:18789`, `api anthropic-messages`, `apiKey CLAWROUTER_API_KEY`; `pi -p` |
 | codex | fresh `CODEX_HOME` with `config.toml`: `model_provider clawrouter`, `base_url http://127.0.0.1:18789/v1`, `env_key CLAWROUTER_API_KEY`, `wire_api responses`; `codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox` (the lease is a disposable container; Codex's own sandbox needs Landlock and seccomp, which rootless broker containers do not reliably provide). The rollout under `$CODEX_HOME/sessions` and the last message are copied back. |
-| claude | `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`; `claude -p` |
+| claude | `CLAUDE_CONFIG_DIR` per run, `ANTHROPIC_BASE_URL http://127.0.0.1:18789`, `ANTHROPIC_API_KEY` set from `CLAWROUTER_API_KEY` (sent as `x-api-key`, which ClawRouter accepts); `claude -p --bare --dangerously-skip-permissions`, prompt on stdin. The pin sets `ignoreScripts` and `entry`: the postinstall only copies the native binary over a stub, so the laptop links `bin/claude` to that binary instead. Project transcripts are copied back. |
 | grok, prime-agent, rusty, openclaw | per-slice: each slice records the exact base-URL and key settings it needs |
 
 Open item: Grok models route as provider `xai`, which the default device policy (`openai,anthropic`) refuses. The grok slice uses Grok-family models only through providers the default policy allows, or it reports the gap.

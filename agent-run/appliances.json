@@ -14,6 +14,13 @@
       "package": "@openai/codex",
       "version": "0.167.0",
       "bin": "codex"
+    },
+    "claude": {
+      "package": "@anthropic-ai/claude-code",
+      "version": "2.1.319",
+      "bin": "claude",
+      "ignoreScripts": true,
+      "entry": "node_modules/@anthropic-ai/claude-code-linux-x64/claude"
     }
   }
 }

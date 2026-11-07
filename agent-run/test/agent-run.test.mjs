@@ -257,6 +257,21 @@ test("the Codex box config routes through the tunnel and names only the key vari
   assert.deepEqual(HARNESSES.codex.localArgv({ model: "clawrouter/gpt-x", prompt: "hi", sessionDir: "/s" }).slice(-3), ["gpt-x", "--", "hi"]);
 });
 
+test("Claude gets the per-run key as ANTHROPIC_API_KEY, the prompt on stdin and the tunnel as base URL", async () => {
+  const f = remoteFixture();
+  f.deps.pins.harnesses.claude = { package: "c", version: "1.0.0", bin: "claude" };
+  const index = join(f.deps.config.cacheDir, "appliances", "index.json");
+  const entries = JSON.parse(readFileSync(index, "utf8"));
+  writeFileSync(index, JSON.stringify({ ...entries, "claude-1.0.0-node24": entries["pi-1.0.0-node24"] }));
+  assert.equal(await agentRun({ ...f.options, harness: "claude", model: "clawrouter/claude-x", thinking: "minimal" }, f.deps), 0);
+  const script = f.calls.find((c) => c.args.at(-1) === "bash -s").input;
+  assert.match(script, /^export ANTHROPIC_API_KEY="\$CLAWROUTER_API_KEY"$/m);
+  assert.match(script, /^export ANTHROPIC_BASE_URL='?http:\/\/127\.0\.0\.1:18789'?$/m);
+  assert.match(script, /^claude -p --output-format text --model claude-x --effort low --bare --dangerously-skip-permissions <"\$W\/inputs\/prompt\.md"$/m);
+  assert.match(script, /PATH="\$W\/appl\/bin:/);
+  assert.equal(script.match(new RegExp(f.token, "g")).length, 1, "the key appears once, in CLAWROUTER_API_KEY");
+});
+
 test("local placement runs the harness on the laptop with no key and no lease", async () => {
   const f = remoteFixture();
   f.deps.placement = async () => ({ placement: "local" });

@@ -63,19 +63,21 @@ export async function sweep(config, admin, log = process.stderr) {
   return revoked;
 }
 
-function remoteRunScript({ workdir, token, env, argv, promptAsArgument, collect = [] }) {
+function remoteRunScript({ workdir, token, env, argv, promptAsArgument, promptOnStdin, keyEnv = [], collect = [] }) {
   const exports = Object.entries(env).map(([k, v]) => "export " + k + "=" + quote(v));
   const promptArg = promptAsArgument ? " -- \"$(cat \"$W/inputs/prompt.md\")\"" : "";
+  const stdin = promptOnStdin ? " <\"$W/inputs/prompt.md\"" : " </dev/null";
   return [
     "set -eu",
     "W=" + quote(workdir),
-    "export HOME=\"$W/home\" PATH=\"$W/appl/node/bin:$W/appl/app/node_modules/.bin:$PATH\"",
+    "export HOME=\"$W/home\" PATH=\"$W/appl/bin:$W/appl/node/bin:$W/appl/app/node_modules/.bin:$PATH\"",
     "mkdir -p \"$HOME\" \"$W/out/session\"",
     ...exports,
     "export CLAWROUTER_API_KEY=" + quote(token),
+    ...keyEnv.map((name) => "export " + name + "=\"$CLAWROUTER_API_KEY\""),
     "cd \"$W/inputs\"",
     "set +e",
-    argv.map(quote).join(" ") + promptArg + " </dev/null",
+    argv.map(quote).join(" ") + promptArg + stdin,
     "rc=$?",
     ...collect.map((line) => "{ " + line + "; } >&2 || true"),
     "exit $rc",
@@ -106,7 +108,7 @@ export async function agentRun(options, deps = {}) {
   if (decision.placement === "local") {
     const argv = adapter.localArgv({ model: options.model, thinking: options.thinking, prompt, sessionDir: join(out, "session") });
     const output = tee(join(out, "stdout.txt"), stdout);
-    const result = await runner(argv[0], argv.slice(1), { stdout: output.stream, stderr: "inherit", env: childEnv() });
+    const result = await runner(argv[0], argv.slice(1), { input: adapter.promptOnStdin ? prompt : undefined, stdout: output.stream, stderr: "inherit", env: childEnv() });
     await output.done();
     receipt.target = "local";
     receipt.exitCode = result.code;
@@ -188,9 +190,11 @@ export async function agentRun(options, deps = {}) {
     const forward = "127.0.0.1:" + config.remotePort + ":" + router.hostname + ":" + (router.port || (router.protocol === "https:" ? 443 : 80));
     const script = remoteRunScript({
       workdir, token: key.token,
-      env: adapter.remoteEnv({ configDir: workdir + "/config" }),
+      env: adapter.remoteEnv({ configDir: workdir + "/config", remoteBaseUrl }),
       argv: adapter.remoteArgv({ config, model: options.model, thinking: options.thinking, sessionDir: workdir + "/out/session" }),
       promptAsArgument: adapter.promptAsArgument,
+      promptOnStdin: adapter.promptOnStdin,
+      keyEnv: adapter.keyEnv,
       collect: adapter.remoteCollect?.({ sessionDir: workdir + "/out/session" }) ?? [],
     });
     const output = tee(join(out, "stdout.txt"), stdout);
