@@ -209,6 +209,20 @@ test("a remote run revokes the key and stops the lease after the harness exits",
   assert.ok(runCall.input.includes(f.token), "key travels on stdin");
 });
 
+test("a signal skips session download and proceeds to cleanup", async () => {
+  const f = remoteFixture();
+  const runner = f.deps.runner;
+  f.deps.runner = async (command, args, options) => {
+    const result = await runner(command, args, options);
+    if (command === "ssh" && args.at(-1) === "bash -s") process.emit("SIGTERM", "SIGTERM");
+    return result;
+  };
+  assert.equal(await agentRun(f.options, f.deps), 0);
+  assert.deepEqual(f.events, ["mint", "warmup", "revoke", "stop"]);
+  assert.equal(f.calls.filter((call) => call.command === "ssh").length, 3);
+  assert.equal(JSON.parse(readFileSync(join(f.options.out, "receipt.json"), "utf8")).sessionDownloaded, false);
+});
+
 test("cleanup still runs when the upload fails", async () => {
   const f = remoteFixture({ failUpload: true });
   assert.equal(await agentRun(f.options, f.deps), EXIT_INFRA);

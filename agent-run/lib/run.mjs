@@ -207,15 +207,19 @@ export async function agentRun(options, deps = {}) {
     exitCode = result.code;
     receipt.exitCode = result.code;
 
-    const sessionTar = join(stage, "session.tgz");
-    const sessionStream = createWriteStream(sessionTar, { mode: 0o600 });
-    const download = await runner("ssh", sshCommand(base, { remote: "tar -czf - -C " + quote(workdir + "/out/session") + " ." }), { stdout: sessionStream, onSpawn: step });
-    await new Promise((done) => sessionStream.end(done));
-    if (download.code === 0) {
-      const extracted = await runner("tar", ["-xzf", sessionTar, "-C", join(out, "session")]);
-      receipt.sessionDownloaded = extracted.code === 0;
-    } else {
+    if (interrupted) {
       receipt.sessionDownloaded = false;
+    } else {
+      const sessionTar = join(stage, "session.tgz");
+      const sessionStream = createWriteStream(sessionTar, { mode: 0o600 });
+      const download = await runner("ssh", sshCommand(base, { remote: "tar -czf - -C " + quote(workdir + "/out/session") + " ." }), { stdout: sessionStream, onSpawn: step });
+      await new Promise((done) => sessionStream.end(done));
+      if (download.code === 0) {
+        const extracted = await runner("tar", ["-xzf", sessionTar, "-C", join(out, "session")]);
+        receipt.sessionDownloaded = extracted.code === 0;
+      } else {
+        receipt.sessionDownloaded = false;
+      }
     }
     if (decision.placement === "queue" && decision.queueFile) {
       rmSync(decision.queueFile, { force: true });
