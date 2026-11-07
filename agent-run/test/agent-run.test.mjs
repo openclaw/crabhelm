@@ -433,10 +433,11 @@ test("local placement runs the harness on the laptop with no key and no lease", 
 test("local Rusty uses an ephemeral session directory and disables relay sidecars", async () => {
   const f = remoteFixture();
   f.deps.placement = async () => ({ placement: "local" });
-  assert.equal(await agentRun({ ...f.options, harness: "rusty", model: "clawrouter/gpt-6-sol" }, f.deps), 0);
+  assert.equal(await agentRun({ ...f.options, harness: "rusty", model: "clawrouter/gpt-6-sol", thinking: "high" }, f.deps), 0);
   const call = f.calls[0];
   assert.equal(call.command, "rusty");
-  assert.deepEqual(call.args, ["-p", "--output-format", "text", "--model", "gpt-6-sol"]);
+  assert.deepEqual(call.args, ["-p", "--output-format", "text", "--model", "gpt-6-sol", "--effort", "high"]);
+  assert.throws(() => HARNESSES.rusty.localArgv({ thinking: "unknown" }), /unknown thinking level/);
   assert.equal(call.input, readFileSync(f.options.promptFile, "utf8"));
   assert.equal(call.env.RUSTY_SESSION_DIR, f.options.out + "/session");
   assert.equal(call.env.RUSTY_NO_WORKTREE, "1");

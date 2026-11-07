@@ -183,11 +183,21 @@ function rustyModel(model) {
 
 const RUSTY_EFFORT = new Set(["minimal", "low", "medium", "high", "xhigh", "max"]);
 
+function rustyEffortArgs(thinking, flag) {
+  if (!thinking || thinking === "off") return [];
+  if (!RUSTY_EFFORT.has(thinking)) throw new Error("rusty: unknown thinking level " + thinking);
+  return [flag, thinking];
+}
+
 const rusty = {
   name: "rusty",
   bin: "rustyd",
-  localArgv({ model }) {
-    return ["rusty", "-p", "--output-format", "text", ...(model ? ["--model", rustyModel(model)] : [])];
+  localArgv({ model, thinking }) {
+    return [
+      "rusty", "-p", "--output-format", "text",
+      ...(model ? ["--model", rustyModel(model)] : []),
+      ...rustyEffortArgs(thinking, "--effort"),
+    ];
   },
   localEnv({ sessionDir }) {
     return {
@@ -216,12 +226,11 @@ const rusty = {
   },
   keyEnv: ["OPENAI_API_KEY"],
   remoteArgv({ remoteBaseUrl, model, thinking, sessionDir }) {
-    if (thinking && thinking !== "off" && !RUSTY_EFFORT.has(thinking)) throw new Error("rusty: unknown thinking level " + thinking);
     return [
       "rustyd", "print", sessionDir + "/rusty-session.jsonl",
       "--output-format", "text", "--provider", "responses", "--bridge", remoteBaseUrl,
       "--model", rustyModel(model), "--profile", "agent-run",
-      ...(thinking && thinking !== "off" ? ["--reasoning-effort", thinking] : []),
+      ...rustyEffortArgs(thinking, "--reasoning-effort"),
     ];
   },
   promptOnStdin: true,
