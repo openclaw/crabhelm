@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
 import { test } from "node:test";
-import { boxPackages, integrityMatches } from "../lib/appliance.mjs";
+import { applianceKey, boxPackages, buildAppliance, integrityMatches } from "../lib/appliance.mjs";
 import { ClawRouterAdmin, IN_POD_SCRIPT, newKeyName } from "../lib/clawrouter.mjs";
 import { Crabbox, sshCommand } from "../lib/crabbox.mjs";
 import { childEnv } from "../lib/proc.mjs";
@@ -46,6 +47,34 @@ test("tarball integrity is checked against the lockfile hash", () => {
   assert.ok(integrityMatches("sha1-ignored " + good, bytes));
   assert.ok(!integrityMatches(good, Buffer.from("other")));
   assert.ok(!integrityMatches("sha1-" + createHash("sha1").update(bytes).digest("base64"), bytes));
+});
+
+test("a pinned Linux release artifact assembles a digest-addressed appliance", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "agent-run-rusty-appliance-"));
+  const source = join(dir, "source");
+  mkdirSync(source);
+  writeFileSync(join(source, "rustyd"), "fake rustyd binary\n", { mode: 0o755 });
+  const archive = join(dir, "rustyd.tgz");
+  execFileSync("tar", ["-czf", archive, "-C", source, "rustyd"]);
+  const bytes = readFileSync(archive);
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  const url = "https://releases.example/rustyd.tgz";
+  const pins = { harnesses: { rusty: { package: "rustyd", version: "0.1.5", bin: "rustyd", platform: "linux-x64", artifact: { url, sha256: digest, member: "rustyd" } } } };
+  const appliance = await buildAppliance({
+    config: { cacheDir: join(dir, "cache") }, pins, harness: "rusty", log: sink(),
+    fetcher: async (requested) => { assert.equal(requested, url); return new Response(bytes); },
+  });
+  assert.equal(appliance.key, applianceKey(pins, "rusty"));
+  assert.equal(appliance.sourceSha256, digest);
+  assert.equal(appliance.builtOn, "github-release");
+  const unpacked = join(dir, "unpacked");
+  mkdirSync(unpacked);
+  execFileSync("tar", ["-xzf", appliance.path, "-C", unpacked]);
+  const binary = join(unpacked, "bin", "rustyd");
+  assert.equal(readFileSync(binary, "utf8"), "fake rustyd binary\n");
+  assert.ok(statSync(binary).mode & 0o111);
+  const manifest = JSON.parse(readFileSync(join(unpacked, "agent-run-appliance.json"), "utf8"));
+  assert.equal(manifest.artifactSha256, digest);
 });
 
 test("stopping a lease the coordinator never created counts as stopped", async () => {
@@ -172,13 +201,15 @@ function remoteFixture({ runExit = 0, failUpload = false, warmupError, stopResul
   };
   const calls = [];
   const runner = async (command, args, options = {}) => {
-    calls.push({ command, args, input: typeof options.input === "string" ? options.input : undefined });
+    calls.push({ command, args, input: typeof options.input === "string" ? options.input : undefined, env: options.env });
     if (command === "tar" && args[0] === "-czf") {
       const inputDir = join(args[3], "inputs");
       if (existsSync(join(inputDir, "BOOTSTRAP.md"))) {
         const names = ["BOOTSTRAP.md", "IDENTITY.md", "USER.md", "SOUL.md", "memory/.keep"];
         calls.at(-1).workspaceFiles = Object.fromEntries(names.map((name) => [name, readFileSync(join(inputDir, name), "utf8")]));
       }
+      const profile = join(args[3], "config/rusty/home/.rusty/profiles/agent-run.json");
+      if (existsSync(profile)) calls.at(-1).rustyProfile = JSON.parse(readFileSync(profile, "utf8"));
       writeFileSync(args[1], "");
     }
     if (options.input && typeof options.input.resume === "function") {
@@ -335,6 +366,30 @@ test("OpenClaw remote run streams a single turn and collects its session", async
   assert.deepEqual(f.events, ["mint", "warmup", "revoke", "stop"]);
 });
 
+test("Rusty runs one Responses turn with a throwaway profile and per-run key", async () => {
+  const f = remoteFixture();
+  const digest = "4554c6dbb2dd35e50b161e6d4134cda56b3ea14d28a11dfdc7b8bee2cbf996db";
+  f.deps.pins.harnesses.rusty = {
+    package: "rustyd", version: "0.1.5", bin: "rustyd", platform: "linux-x64",
+    artifact: { url: "https://example.invalid/rustyd.tgz", sha256: digest, member: "rustyd" },
+  };
+  const key = applianceKey(f.deps.pins, "rusty");
+  const index = join(f.deps.config.cacheDir, "appliances", "index.json");
+  writeFileSync(index, JSON.stringify({ [key]: {
+    path: join(f.deps.config.cacheDir, "appliances/pi.tgz"),
+    sha256: createHash("sha256").update("appliance").digest("hex"), package: "rustyd", version: "0.1.5",
+  } }));
+  assert.equal(await agentRun({ ...f.options, harness: "rusty", model: "clawrouter/gpt-6-sol", thinking: "high" }, f.deps), 0);
+  const script = f.calls.find((call) => call.args.at(-1) === "bash -s").input;
+  assert.match(script, /^export OPENAI_API_KEY="\$CLAWROUTER_API_KEY"$/m);
+  assert.match(script, /^rustyd print .* --output-format text --provider responses --bridge http:\/\/127\.0\.0\.1:18789 --model gpt-6-sol --profile agent-run --reasoning-effort high <"\$W\/inputs\/prompt\.md"$/m);
+  assert.equal(script.match(new RegExp(f.token, "g")).length, 1, "the per-run key appears only in the injected environment");
+  const archive = f.calls.find((call) => call.command === "tar");
+  assert.equal(archive.rustyProfile.name, "agent-run");
+  assert.deepEqual(archive.rustyProfile.permissions, { allow: [], deny: ["*"] });
+  assert.deepEqual(f.events, ["mint", "warmup", "revoke", "stop"]);
+});
+
 test("Claude gets the per-run key as ANTHROPIC_API_KEY, the prompt on stdin and the tunnel as base URL", async () => {
   const f = remoteFixture();
   f.deps.pins.harnesses.claude = { package: "c", version: "1.0.0", bin: "claude" };
@@ -357,4 +412,18 @@ test("local placement runs the harness on the laptop with no key and no lease", 
   assert.deepEqual(f.events, []);
   assert.equal(f.calls[0].command, "pi");
   assert.deepEqual(f.calls[0].args.slice(0, 1), ["-p"]);
+});
+
+test("local Rusty uses an ephemeral session directory and disables relay sidecars", async () => {
+  const f = remoteFixture();
+  f.deps.placement = async () => ({ placement: "local" });
+  assert.equal(await agentRun({ ...f.options, harness: "rusty", model: "clawrouter/gpt-6-sol" }, f.deps), 0);
+  const call = f.calls[0];
+  assert.equal(call.command, "rusty");
+  assert.deepEqual(call.args, ["-p", "--output-format", "text", "--model", "gpt-6-sol"]);
+  assert.equal(call.input, readFileSync(f.options.promptFile, "utf8"));
+  assert.equal(call.env.RUSTY_SESSION_DIR, f.options.out + "/session");
+  assert.equal(call.env.RUSTY_NO_WORKTREE, "1");
+  assert.equal(call.env.RUSTY_AGENT_RELAY, "0");
+  assert.equal(call.env.RUSTY_HERDR_REPORT, "0");
 });

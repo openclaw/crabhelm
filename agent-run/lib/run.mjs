@@ -108,7 +108,7 @@ export async function agentRun(options, deps = {}) {
   if (decision.placement === "local") {
     const argv = adapter.localArgv({ model: options.model, thinking: options.thinking, prompt, sessionDir: join(out, "session"), runId });
     const output = tee(join(out, "stdout.txt"), stdout);
-    const result = await runner(argv[0], argv.slice(1), { input: adapter.promptOnStdin ? prompt : undefined, stdout: output.stream, stderr: "inherit", env: childEnv() });
+    const result = await runner(argv[0], argv.slice(1), { input: adapter.promptOnStdin ? prompt : undefined, stdout: output.stream, stderr: "inherit", env: childEnv(process.env, adapter.localEnv?.({ config, model: options.model, sessionDir: join(out, "session") }) ?? {}) });
     await output.done();
     receipt.target = "local";
     receipt.exitCode = result.code;
@@ -196,7 +196,7 @@ export async function agentRun(options, deps = {}) {
     const script = remoteRunScript({
       workdir, token: key.token,
       env: adapter.remoteEnv({ configDir: workdir + "/config", remoteBaseUrl }),
-      argv: adapter.remoteArgv({ config, model: options.model, thinking: options.thinking, sessionDir: workdir + "/out/session", runId, promptFile: workdir + "/inputs/prompt.md" }),
+      argv: adapter.remoteArgv({ config, model: options.model, thinking: options.thinking, sessionDir: workdir + "/out/session", runId, promptFile: workdir + "/inputs/prompt.md", remoteBaseUrl }),
       promptAsArgument: adapter.promptAsArgument,
       promptOnStdin: adapter.promptOnStdin,
       keyEnv: typeof adapter.keyEnv === "function" ? adapter.keyEnv({ model: options.model }) : adapter.keyEnv,

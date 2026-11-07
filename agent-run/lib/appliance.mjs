@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, symlinkSync, createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, symlinkSync, createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { run } from "./proc.mjs";
@@ -30,6 +30,7 @@ function readIndex(config) {
 export function applianceKey(pins, harness) {
   const spec = pins.harnesses[harness];
   if (!spec) throw new Error("no appliance pin for harness " + harness);
+  if (spec.artifact) return harness + "-" + spec.version + "-" + spec.platform + "-" + spec.artifact.sha256.slice(0, 12);
   return harness + "-" + spec.version + "-node" + pins.node.version;
 }
 
@@ -56,6 +57,22 @@ async function nodeTarball(config, pins, log) {
   const sha256 = createHash("sha256").update(bytes).digest("hex");
   if (sha256 !== pins.node.sha256) throw new Error("Node tarball sha256 mismatch");
   writeFileSync(path + ".tmp", bytes);
+  renameSync(path + ".tmp", path);
+  return path;
+}
+
+async function pinnedArtifact(config, spec, fetcher, log) {
+  const dir = join(config.cacheDir, "artifacts");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const path = join(dir, spec.package + "-" + spec.version + "-" + spec.artifact.sha256.slice(0, 12) + ".tgz");
+  if (existsSync(path) && await sha256File(path) === spec.artifact.sha256) return path;
+  log.write("agent-run: downloading pinned " + spec.package + " " + spec.version + " for " + spec.platform + "\n");
+  const response = await fetcher(spec.artifact.url);
+  if (!response.ok) throw new Error("release artifact download failed: HTTP " + response.status);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  if (sha256 !== spec.artifact.sha256) throw new Error("release artifact sha256 mismatch");
+  writeFileSync(path + ".tmp", bytes, { mode: 0o600 });
   renameSync(path + ".tmp", path);
   return path;
 }
@@ -180,9 +197,60 @@ async function assembleLocally({ stage, pins, harness, lockSha256, partial, runn
   if (packed.code !== 0) throw new Error("could not pack the appliance");
 }
 
+async function buildPinnedArtifactAppliance({ config, pins, harness, log, runner, fetcher }) {
+  const spec = pins.harnesses[harness];
+  const key = applianceKey(pins, harness);
+  const dir = join(config.cacheDir, "appliances");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const partial = join(dir, key + ".tgz.partial");
+  const stage = mkdtempSync(join(config.cacheDir, "build-"));
+  try {
+    const asset = await pinnedArtifact(config, spec, fetcher, log);
+    const extracted = join(stage, "release");
+    mkdirSync(extracted);
+    const unpacked = await runner("tar", ["-xzf", asset, "-C", extracted, spec.artifact.member]);
+    if (unpacked.code !== 0) throw new Error("could not extract pinned release artifact");
+    const source = join(extracted, spec.artifact.member);
+    if (!existsSync(source)) throw new Error("pinned release artifact lacks " + spec.artifact.member);
+    const binDir = join(stage, "bin");
+    mkdirSync(binDir);
+    const binary = join(binDir, spec.bin);
+    copyFileSync(source, binary);
+    chmodSync(binary, 0o755);
+    const manifest = {
+      harness, package: spec.package, version: spec.version, bin: spec.bin,
+      platform: spec.platform, artifactSha256: spec.artifact.sha256,
+    };
+    writeFileSync(join(stage, "agent-run-appliance.json"), JSON.stringify(manifest, null, 2) + "\n");
+    const packed = await runner("tar", ["-czf", partial, "-C", stage, "bin", "agent-run-appliance.json"], {
+      env: { ...process.env, COPYFILE_DISABLE: "1" },
+    });
+    if (packed.code !== 0) throw new Error("could not pack pinned release appliance");
+    const sha256 = await sha256File(partial);
+    const path = join(dir, key + "-" + sha256.slice(0, 12) + ".tgz");
+    renameSync(partial, path);
+    const entry = {
+      path, sha256, harness, package: spec.package, version: spec.version,
+      platform: spec.platform, sourceSha256: spec.artifact.sha256,
+      builtAt: new Date().toISOString(), builtOn: "github-release",
+    };
+    const index = readIndex(config);
+    index[key] = entry;
+    writeFileSync(indexPath(config), JSON.stringify(index, null, 2) + "\n", { mode: 0o600 });
+    log.write("agent-run: appliance " + key + " sha256=" + sha256 + "\n");
+    return { ...entry, key };
+  } finally {
+    rmSync(partial, { force: true });
+    rmSync(stage, { recursive: true, force: true });
+  }
+}
+
 // Build one harness appliance and cache it locally: on the laptop when no
 // package has install scripts, otherwise on a Crabbox lease.
-export async function buildAppliance({ config, pins, harness, crabbox, log = process.stderr, runner = run }) {
+export async function buildAppliance({ config, pins, harness, crabbox, log = process.stderr, runner = run, fetcher = fetch }) {
+  const spec = pins.harnesses[harness];
+  if (!spec) throw new Error("no appliance pin for harness " + harness);
+  if (spec.artifact) return await buildPinnedArtifactAppliance({ config, pins, harness, log, runner, fetcher });
   const key = applianceKey(pins, harness);
   const node = await nodeTarball(config, pins, log);
   const slug = "agentrun-build-" + harness.replace(/[^a-z0-9]/g, "") + "-" + Date.now().toString(36);

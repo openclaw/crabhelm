@@ -26,6 +26,17 @@
       "package": "openclaw",
       "version": "2026.7.1",
       "bin": "openclaw"
+    },
+    "rusty": {
+      "package": "rustyd",
+      "version": "0.1.5",
+      "bin": "rustyd",
+      "platform": "linux-x64",
+      "artifact": {
+        "url": "https://github.com/leo-labs-ai/rusty-core/releases/download/v0.1.5/rustyd-v0.1.5-linux-x86_64.tar.gz",
+        "sha256": "4554c6dbb2dd35e50b161e6d4134cda56b3ea14d28a11dfdc7b8bee2cbf996db",
+        "member": "rustyd"
+      }
     }
   }
 }
