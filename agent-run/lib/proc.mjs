@@ -13,11 +13,13 @@ export function childEnv(base = process.env, extra = {}) {
 // Run a command. stdin: string | Buffer | readable stream | undefined.
 // stdout/stderr: "capture" (default), "inherit", or a writable stream.
 export function run(command, args, options = {}) {
-  const { input, cwd, env = childEnv(), stdout = "capture", stderr = "capture", onSpawn } = options;
+  const { input, cwd, env = childEnv(), stdout = "capture", stderr = "capture", onSpawn, timeoutMs } = options;
+  if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0)) throw new Error("command timeout must be a positive integer in milliseconds");
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, {
       cwd,
       env,
+      detached: timeoutMs !== undefined && process.platform !== "win32",
       stdio: ["pipe", stdout === "inherit" ? "inherit" : "pipe", stderr === "inherit" ? "inherit" : "pipe"],
     });
     onSpawn?.(child);
@@ -31,13 +33,27 @@ export function run(command, args, options = {}) {
       if (stderr === "capture") child.stderr.on("data", (chunk) => err.push(chunk));
       else child.stderr.pipe(stderr, { end: false });
     }
-    child.on("error", reject);
-    child.on("close", (code, signal) => resolvePromise({
-      code: code ?? (signal ? 128 : 1),
-      signal,
-      stdout: Buffer.concat(out).toString("utf8"),
-      stderr: Buffer.concat(err).toString("utf8"),
-    }));
+    let timedOut = false;
+    const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      timedOut = true;
+      try {
+        if (process.platform === "win32") child.kill("SIGKILL");
+        else process.kill(-child.pid, "SIGKILL");
+      } catch (error) { if (error.code !== "ESRCH") reject(error); }
+    }, timeoutMs);
+    timer?.unref();
+    child.once("exit", () => clearTimeout(timer));
+    child.on("error", (error) => { clearTimeout(timer); reject(error); });
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      resolvePromise({
+        code: timedOut ? 124 : code ?? (signal ? 128 : 1),
+        signal, timedOut,
+        stdout: Buffer.concat(out).toString("utf8"),
+        stderr: Buffer.concat(err).toString("utf8"),
+      });
+    });
     child.stdin.on("error", () => {});
     if (input === undefined) child.stdin.end();
     else if (typeof input === "string" || Buffer.isBuffer(input)) child.stdin.end(input);

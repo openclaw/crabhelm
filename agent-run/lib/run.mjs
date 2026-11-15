@@ -63,7 +63,8 @@ export async function sweep(config, admin, log = process.stderr) {
     const lockFile = join(dir, credential.credentialId + ".json");
     let lock;
     try { lock = JSON.parse(readFileSync(lockFile, "utf8")); } catch { lock = undefined; }
-    if (lock?.pid && pidAlive(lock.pid)) continue;
+    // Another dispatch host may own a key absent from this host's lock directory.
+    if (!lock?.pid || (!lock.finishedAt && pidAlive(lock.pid))) continue;
     await admin.revoke(credential.credentialId);
     rmSync(lockFile, { force: true });
     revoked.push(credential.credentialId);
@@ -80,7 +81,9 @@ function remoteRunScript({ workdir, token, env, argv, promptAsArgument, promptOn
     "set -eu",
     "W=" + quote(workdir),
     "export HOME=\"$W/home\" PATH=\"$W/appl/bin:$W/appl/node/bin:$W/appl/app/node_modules/.bin:$PATH\"",
-    "mkdir -p \"$HOME\" \"$W/out/session\"",
+    "mkdir -p \"$HOME\" \"$W/out/session\" \"$W/out/out\"",
+    "export AGENT_RUN_OUT_DIR=\"$W/out/out\"",
+    "ln -s \"$W/out/out\" \"$W/inputs/out\"",
     ...exports,
     "export CLAWROUTER_API_KEY=" + quote(token),
     ...keyEnv.map((name) => "export " + name + "=\"$CLAWROUTER_API_KEY\""),
@@ -98,7 +101,12 @@ export async function agentRun(options, deps = {}) {
   const config = deps.config;
   const log = deps.log ?? process.stderr;
   const stdout = deps.stdout ?? process.stdout;
-  const runner = deps.runner ?? run;
+  const execute = deps.runner ?? run;
+  const runner = async (command, args, options = {}) => {
+    const result = await execute(command, args, { timeoutMs: config.commandTimeoutMs, ...options });
+    if (result.timedOut) log.write("agent-run: command timed out after " + config.commandTimeoutMs + "ms: " + command + "\n");
+    return result;
+  };
   const adapter = harnessAdapter(options.harness);
   const hasPiContext = options.piContextFile !== undefined;
   if (hasPiContext && adapter.name !== "pi") throw new Error("--pi-context-file requires --harness pi");
@@ -125,7 +133,8 @@ export async function agentRun(options, deps = {}) {
     if (piContext) throw new Error("Pi child context requires remote placement; caller must keep the existing local session");
     const argv = adapter.localArgv({ model: options.model, thinking: options.thinking, prompt, sessionDir: join(out, "session"), runId });
     const output = tee(join(out, "stdout.txt"), stdout);
-    const result = await runner(argv[0], argv.slice(1), { input: adapter.promptOnStdin ? prompt : undefined, stdout: output.stream, stderr: "inherit", env: childEnv(process.env, adapter.localEnv?.({ config, model: options.model, sessionDir: join(out, "session") }) ?? {}) });
+    // Keep the foreground process group so Ctrl-C still reaches local harnesses.
+    const result = await runner(argv[0], argv.slice(1), { timeoutMs: undefined, input: adapter.promptOnStdin ? prompt : undefined, stdout: output.stream, stderr: "inherit", env: childEnv(process.env, adapter.localEnv?.({ config, model: options.model, sessionDir: join(out, "session") }) ?? {}) });
     await output.done();
     receipt.target = "local";
     receipt.exitCode = result.code;
@@ -173,6 +182,8 @@ export async function agentRun(options, deps = {}) {
     leaseRequested = true;
     const lease = await crabbox.warmup(slug, log, { onSpawn: step });
     receipt.target.leaseId = lease.leaseId;
+    receipt.target.requestedMachine = config.crabboxMachine ?? null;
+    log.write("agent-run: run details provider=" + config.crabboxProvider + " lease=" + lease.leaseId + " slug=" + slug + "\n");
     if (interrupted) throw new Error("interrupted");
     const base = await crabbox.sshArgv(slug);
 
@@ -199,15 +210,31 @@ export async function agentRun(options, deps = {}) {
     const upload = await runner("ssh", sshCommand(base, { remote: "mkdir -p " + quote(workdir) + " && tar -xzf - -C " + quote(workdir) }), { input: createReadStream(tarball), onSpawn: step });
     rmSync(tarball, { force: true });
     if (upload.code !== 0) throw new Error("input upload failed (exit " + upload.code + ")");
-    const install = await runner("ssh", sshCommand(base, {
+    const applianceBytes = statSync(appliance.path).size;
+    const uploadStarted = Date.now();
+    log.write("agent-run: appliance upload starting bytes=" + applianceBytes + (config.serveProxyCommand ? " transport=custom-serve-proxy" : " transport=crabbox") + "\n");
+    const applianceInput = createReadStream(appliance.path);
+    const progress = setInterval(() => log.write("agent-run: appliance upload bytes=" + applianceInput.bytesRead + "/" + applianceBytes + "\n"), 30_000);
+    progress.unref();
+    applianceInput.on("close", () => clearInterval(progress));
+    applianceInput.on("error", () => clearInterval(progress));
+    let install;
+    try {
+      install = await runner("ssh", sshCommand(base, {
       remote: "set -e; mkdir -p " + quote(workdir + "/appl") + "; cat > " + quote(workdir + "/appl.tgz") +
         "; echo " + quote(appliance.sha256 + "  " + workdir + "/appl.tgz") + " | sha256sum -c - >/dev/null" +
         "; tar -xzf " + quote(workdir + "/appl.tgz") + " -C " + quote(workdir + "/appl") + "; rm " + quote(workdir + "/appl.tgz") +
         // Laptop-assembled appliances keep Node packed; it was sha256-checked when the appliance was built.
         "; if [ -f " + quote(workdir + "/appl/node.tgz") + " ]; then mkdir -p " + quote(workdir + "/appl/node") + "; tar -xzf " + quote(workdir + "/appl/node.tgz") + " -C " + quote(workdir + "/appl/node") + " --strip-components=1; rm " + quote(workdir + "/appl/node.tgz") + "; fi",
-    }), { input: createReadStream(appliance.path), onSpawn: step });
+      }), { input: applianceInput, onSpawn: step });
+    } finally {
+      clearInterval(progress);
+      applianceInput.destroy();
+    }
     if (install.code !== 0) throw new Error("appliance upload or sha256 check failed (exit " + install.code + ")");
     receipt.appliance.verifiedOnBox = true;
+    receipt.appliance.upload = { bytes: applianceBytes, elapsedMs: Date.now() - uploadStarted, transport: config.serveProxyCommand ? "custom-serve-proxy" : "crabbox" };
+    log.write("agent-run: appliance upload verified sha256=" + appliance.sha256 + " elapsed_ms=" + receipt.appliance.upload.elapsedMs + "\n");
     if (interrupted) throw new Error("interrupted");
 
     const router = new URL(config.routerOrigin);
@@ -232,17 +259,21 @@ export async function agentRun(options, deps = {}) {
     receipt.exitCode = result.code;
 
     if (interrupted) {
-      receipt.sessionDownloaded = false;
+      receipt.resultsDownloaded = receipt.sessionDownloaded = false;
     } else {
       const sessionTar = join(stage, "session.tgz");
       const sessionStream = createWriteStream(sessionTar, { mode: 0o600 });
-      const download = await runner("ssh", sshCommand(base, { remote: "tar -czf - -C " + quote(workdir + "/out/session") + " ." }), { stdout: sessionStream, onSpawn: step });
+      const download = await runner("ssh", sshCommand(base, { remote: "tar -czf - -C " + quote(workdir + "/out") + " ." }), { stdout: sessionStream, onSpawn: step });
       await new Promise((done) => sessionStream.end(done));
       if (download.code === 0) {
-        const extracted = await runner("tar", ["-xzf", sessionTar, "-C", join(out, "session")]);
-        receipt.sessionDownloaded = extracted.code === 0;
+        const extracted = await runner("tar", ["-xzf", sessionTar, "-C", out]);
+        receipt.resultsDownloaded = receipt.sessionDownloaded = extracted.code === 0;
       } else {
-        receipt.sessionDownloaded = false;
+        receipt.resultsDownloaded = receipt.sessionDownloaded = false;
+      }
+      if (!receipt.resultsDownloaded) {
+        log.write("agent-run: result download failed; remote output was not recovered\n");
+        if (exitCode === 0) exitCode = EXIT_INFRA;
       }
     }
     if (decision.placement === "queue" && decision.queueFile) {
@@ -274,7 +305,12 @@ export async function agentRun(options, deps = {}) {
         if (exitCode === 0) exitCode = EXIT_INFRA;
       }
     }
-    rmSync(lockFile, { force: true });
+    if (receipt.key?.revokeProof?.ok) {
+      rmSync(lockFile, { force: true });
+    } else if (existsSync(lockFile)) {
+      // Retain ownership after an uncertain mint or revoke so a later sweep can retry.
+      writeFileSync(lockFile, JSON.stringify({ pid: process.pid, startedAt: receipt.startedAt, finishedAt: new Date().toISOString() }) + "\n", { mode: 0o600 });
+    }
     rmSync(stage, { recursive: true, force: true });
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);

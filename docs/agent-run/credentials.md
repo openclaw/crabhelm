@@ -20,7 +20,7 @@ agent-run never reads, copies or prints it, and it removes `CLAWROUTER_ADMIN_TOK
 
 agent-run revokes in a `finally` block, and on SIGINT or SIGTERM, whether the harness passed or failed:
 `POST /v1/admin/credentials/<name>/revoke` through the same in-pod script. This is `clawctl device revoke`; it takes effect at once, with no restart.
-Keys do not expire by themselves. To cover a killed agent-run, each new agent-run first sweeps: it revokes every enabled `agentrun_*` credential that has no live local run lock.
+Keys do not expire by themselves. To cover a killed agent-run, each new agent-run first sweeps: it revokes an enabled `agentrun_*` credential only when this host has its run lock and the recorded process is dead or the run is marked finished. Ownership records remain after an uncertain mint or revoke so the next sweep can retry. A key with no local lock may belong to another host; agent-run leaves it alone. Keep the state directory host-local. Missing ownership records require operator investigation.
 
 ## How revocation is proved
 

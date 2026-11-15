@@ -12,7 +12,7 @@ import { ClawRouterAdmin, IN_POD_SCRIPT, newKeyName } from "../lib/clawrouter.mj
 import { Crabbox, sshCommand } from "../lib/crabbox.mjs";
 import { childEnv } from "../lib/proc.mjs";
 import { HARNESSES } from "../lib/harnesses.mjs";
-import { agentRun, EXIT_INFRA, EXIT_QUEUED } from "../lib/run.mjs";
+import { agentRun, sweep, EXIT_INFRA, EXIT_QUEUED } from "../lib/run.mjs";
 import { quote, splitWords } from "../lib/shell.mjs";
 
 const sink = () => new Writable({ write(_chunk, _enc, cb) { cb(); } });
@@ -247,6 +247,58 @@ test("the Pi box config drops the laptop key and reads the per-run key from the 
   assert.ok(!files["pi/models.json"].includes("laptop-secret"));
 });
 
+test("Pi converts Codex OAuth models to API-key Responses without changing other transports", () => {
+  const dir = mkdtempSync(join(tmpdir(), "agent-run-pi-auth-"));
+  const modelsFile = join(dir, "models.json");
+  for (const api of ["anthropic-messages", "openai-codex-responses"]) {
+    writeFileSync(modelsFile, JSON.stringify({ providers: { clawrouter: {
+      baseUrl: "http://router:8798", api, apiKey: "laptop-secret",
+      models: [
+        { id: "inherited" },
+        { id: "astra", api: "openai-codex-responses", baseUrl: "http://router:8798/v1" },
+        { id: "astra-no-url", api: "openai-codex-responses" },
+        { id: "n-sol", api: "openai-responses", baseUrl: "http://router:8798/v1" },
+        { id: "claude", api: "anthropic-messages" },
+      ],
+    } } }));
+    const files = HARNESSES.pi.remoteConfig({ config: { piModelsFile: modelsFile, piProvider: "clawrouter" }, remoteBaseUrl: "http://127.0.0.1:18789" });
+    const p = JSON.parse(files["pi/models.json"]).providers.clawrouter;
+    assert.equal(p.api, api === "openai-codex-responses" ? "openai-responses" : api);
+    for (const m of p.models.slice(1, 4)) {
+      assert.equal(m.api, "openai-responses");
+      assert.equal(m.baseUrl, "http://127.0.0.1:18789/v1");
+    }
+    assert.equal(p.models[4].api, "anthropic-messages");
+    assert.equal(p.models[0].api, api === "openai-codex-responses" ? "openai-responses" : undefined);
+    assert.equal(p.apiKey, "$CLAWROUTER_API_KEY");
+    assert.ok(!files["pi/models.json"].includes("laptop-secret"));
+  }
+});
+
+test("warmup requests standard capacity and the selected donor", async () => {
+  const box = new Crabbox({ crabboxProvider: "serve", crabboxType: "cpu2", crabboxMachine: "safe-donor", leaseIdleTimeout: "75m", leaseTtl: "90m" }, {
+    runner: async (command, args) => {
+      assert.equal(command, "crabbox");
+      assert.deepEqual(args, ["warmup", "--provider", "serve", "--type", "cpu2", "--class", "standard", "--slug", "s", "--serve-machine", "safe-donor", "--idle-timeout", "75m", "--ttl", "90m"]);
+      return { code: 0, stdout: "leased cbx_1 slug=s", stderr: "" };
+    },
+  });
+  assert.equal((await box.warmup("s", sink())).leaseId, "cbx_1");
+});
+
+test("sweep leaves other hosts' keys alone and revokes only a dead local run", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "agent-run-sweep-"));
+  mkdirSync(join(stateDir, "locks"));
+  writeFileSync(join(stateDir, "locks/agentrun_live.json"), JSON.stringify({ pid: process.pid }));
+  writeFileSync(join(stateDir, "locks/agentrun_dead.json"), JSON.stringify({ pid: 2147483647 }));
+  const revoked = [];
+  await sweep({ stateDir }, {
+    list: async () => ["agentrun_live", "agentrun_dead", "agentrun_otherhost"].map(credentialId => ({ credentialId, enabled: true })),
+    revoke: async name => revoked.push(name),
+  }, sink());
+  assert.deepEqual(revoked, ["agentrun_dead"]);
+});
+
 function remoteFixture({ runExit = 0, failUpload = false, warmupError, stopResult = { stopped: true, exitCode: 0, lease: "cbx_1" }, afterMint } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "agent-run-flow-"));
   const cacheDir = join(dir, "cache");
@@ -262,7 +314,7 @@ function remoteFixture({ runExit = 0, failUpload = false, warmupError, stopResul
   writeFileSync(join(dir, "prompt.md"), "say hi");
   const config = {
     cacheDir, stateDir: join(dir, "state"), piModelsFile: modelsFile, piProvider: "clawrouter",
-    routerOrigin: "http://router.example:8789", remotePort: 18789, crabboxProvider: "serve", crabboxType: "cpu2",
+    routerOrigin: "http://router.example:8789", remotePort: 18789, crabboxProvider: "serve", crabboxType: "cpu2", commandTimeoutMs: 12345,
   };
   const events = [];
   const pod = fakePod();
@@ -280,7 +332,7 @@ function remoteFixture({ runExit = 0, failUpload = false, warmupError, stopResul
   };
   const calls = [];
   const runner = async (command, args, options = {}) => {
-    calls.push({ command, args, input: typeof options.input === "string" ? options.input : undefined, env: options.env });
+    calls.push({ command, args, input: typeof options.input === "string" ? options.input : undefined, env: options.env, timeoutMs: options.timeoutMs });
     if (command === "tar" && args[0] === "-czf") {
       const inputDir = join(args[3], "inputs");
       if (existsSync(join(inputDir, "BOOTSTRAP.md"))) {
@@ -397,6 +449,51 @@ test("a precomputed queue decision skips placement and removes its queue receipt
   assert.equal(JSON.parse(readFileSync(join(f.options.out, "receipt.json"), "utf8")).queueReceiptRemoved, true);
 });
 
+test("remote results include reports and session files under --out", async () => {
+  const f = remoteFixture();
+  const source = join(f.dir, "remote-out");
+  mkdirSync(join(source, "out"), { recursive: true });
+  mkdirSync(join(source, "session"));
+  writeFileSync(join(source, "out", "changes.patch"), "diff evidence");
+  writeFileSync(join(source, "session", "last-message.md"), "done");
+  const runner = f.deps.runner;
+  f.deps.runner = async (command, args, options) => {
+    if (command === "ssh" && args.at(-1).startsWith("tar -czf")) {
+      assert.match(args.at(-1), /\/out'? \.$/);
+      options.stdout.write(execFileSync("tar", ["-czf", "-", "-C", source, "."]));
+      return { code: 0 };
+    }
+    if (command === "tar" && args[0] === "-xzf") {
+      execFileSync(command, args);
+      return { code: 0 };
+    }
+    return runner(command, args, options);
+  };
+  assert.equal(await agentRun(f.options, f.deps), 0);
+  assert.equal(readFileSync(join(f.options.out, "out/changes.patch"), "utf8"), "diff evidence");
+  assert.equal(readFileSync(join(f.options.out, "session/last-message.md"), "utf8"), "done");
+  const script = f.calls.find(c => c.args.at(-1) === "bash -s").input;
+  assert.ok(script.includes('export AGENT_RUN_OUT_DIR="$W/out/out"'));
+  assert.ok(script.includes('ln -s "$W/out/out" "$W/inputs/out"'));
+  assert.equal(JSON.parse(readFileSync(join(f.options.out, "receipt.json"))).resultsDownloaded, true);
+});
+
+test("a failed result download or extraction fails a successful run and still cleans up", async () => {
+  for (const fail of ["ssh", "tar"]) {
+    const f = remoteFixture();
+    const runner = f.deps.runner;
+    f.deps.runner = async (command, args, options) => {
+      if (command === fail && (args.at(-1).startsWith("tar -czf") || args[0] === "-xzf")) return { code: 1 };
+      return runner(command, args, options);
+    };
+    assert.equal(await agentRun(f.options, f.deps), EXIT_INFRA);
+    const receipt = JSON.parse(readFileSync(join(f.options.out, "receipt.json")));
+    assert.equal(receipt.resultsDownloaded, false);
+    assert.equal(receipt.key.revokeProof.ok, true);
+    assert.equal(receipt.target.cleanup.stopped, true);
+  }
+});
+
 test("a signal skips session download and proceeds to cleanup", async () => {
   const f = remoteFixture();
   const runner = f.deps.runner;
@@ -409,6 +506,28 @@ test("a signal skips session download and proceeds to cleanup", async () => {
   assert.deepEqual(f.events, ["mint", "warmup", "revoke", "stop"]);
   assert.equal(f.calls.filter((call) => call.command === "ssh").length, 3);
   assert.equal(JSON.parse(readFileSync(join(f.options.out, "receipt.json"), "utf8")).sessionDownloaded, false);
+});
+
+test("failed revocation and uncertain mint retain ownership for the next sweep", async () => {
+  for (const failure of ["revoke", "mint"]) {
+    const f = remoteFixture();
+    if (failure === "revoke") {
+      f.deps.admin.revokeAndProve = async () => ({ ok: false, revoked: false, listEnabled: true });
+    } else {
+      const mint = f.deps.admin.mint;
+      f.deps.admin.mint = async name => {
+        await mint(name);
+        throw new Error("mint reply and rollback failed");
+      };
+    }
+    assert.notEqual(await agentRun(f.options, f.deps), 0);
+    const receipt = JSON.parse(readFileSync(join(f.options.out, "receipt.json")));
+    const lock = join(f.deps.config.stateDir, "locks", receipt.runId + ".json");
+    assert.ok(JSON.parse(readFileSync(lock)).finishedAt);
+    assert.deepEqual(await sweep(f.deps.config, f.deps.admin, sink()), [receipt.runId]);
+    assert.equal(existsSync(lock), false);
+    assert.equal((await f.deps.admin.list()).find(c => c.credentialId === receipt.runId).enabled, false);
+  }
 });
 
 test("cleanup still runs when the upload fails", async () => {
@@ -657,12 +776,20 @@ test("Claude gets the per-run key as ANTHROPIC_API_KEY, the prompt on stdin and 
   assert.equal(script.match(new RegExp(f.token, "g")).length, 1, "the key appears once, in CLAWROUTER_API_KEY");
 });
 
+test("remote commands inherit the configured timeout", async () => {
+  const f = remoteFixture();
+  assert.equal(await agentRun(f.options, f.deps), 0);
+  assert.ok(f.calls.length > 0);
+  assert.ok(f.calls.every((call) => call.timeoutMs === f.deps.config.commandTimeoutMs));
+});
+
 test("local placement runs the harness on the laptop with no key and no lease", async () => {
   const f = remoteFixture();
   f.deps.placement = async () => ({ placement: "local" });
   assert.equal(await agentRun(f.options, f.deps), 0);
   assert.deepEqual(f.events, []);
   assert.equal(f.calls[0].command, "pi");
+  assert.equal(f.calls[0].timeoutMs, undefined, "keep the local harness in the foreground process group");
   assert.deepEqual(f.calls[0].args.slice(0, 1), ["-p"]);
 });
 

@@ -5,6 +5,8 @@ import { join } from "node:path";
 // generic; none of these values is a secret.
 export function loadConfig(env = process.env) {
   const home = env.HOME || homedir();
+  const commandTimeoutMs = Number(env.AGENT_RUN_COMMAND_TIMEOUT_MS || 75 * 60 * 1000);
+  if (!Number.isSafeInteger(commandTimeoutMs) || commandTimeoutMs <= 0) throw new Error("AGENT_RUN_COMMAND_TIMEOUT_MS must be a positive integer");
   return {
     placementHelper: env.AGENT_RUN_PLACEMENT || join(home, "Projects/personal/harbor/bin/harbor-capacity-placement.mjs"),
     kubeContext: env.AGENT_RUN_KUBE_CONTEXT || "lue-kube",
@@ -17,6 +19,9 @@ export function loadConfig(env = process.env) {
     remotePort: Number(env.AGENT_RUN_REMOTE_PORT || 18789),
     crabboxProvider: env.AGENT_RUN_CRABBOX_PROVIDER || "serve",
     crabboxType: env.AGENT_RUN_CRABBOX_TYPE || "cpu2",
+    crabboxMachine: env.AGENT_RUN_CRABBOX_MACHINE || undefined,
+    serveProxyCommand: env.AGENT_RUN_SERVE_PROXY_COMMAND || undefined,
+    commandTimeoutMs,
     // On serve leases a raw ssh session closes at the lease's idle timeout
     // even while "crabbox heartbeat" refreshes it (observed 2026-11-06), so
     // the idle timeout is the run budget. agent-run stops the lease itself;

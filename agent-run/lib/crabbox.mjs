@@ -1,5 +1,5 @@
 import { run } from "./proc.mjs";
-import { splitWords } from "./shell.mjs";
+import { quote, splitWords } from "./shell.mjs";
 
 // Thin wrapper over the crabbox CLI: one warmed broker lease per run, raw ssh
 // for upload, the run itself (with a remote forward) and download, then stop.
@@ -21,11 +21,12 @@ export class Crabbox {
   async warmup(slug, log = process.stderr, { onSpawn } = {}) {
     const c = this.#config;
     const result = await this.#run("crabbox", [
-      "warmup", ...this.#providerArgs(), "--type", c.crabboxType, "--slug", slug,
+      "warmup", ...this.#providerArgs(), "--type", c.crabboxType, "--class", "standard", "--slug", slug,
+      ...(c.crabboxProvider === "serve" && c.crabboxMachine ? ["--serve-machine", c.crabboxMachine] : []),
       "--idle-timeout", c.leaseIdleTimeout, "--ttl", c.leaseTtl,
     ], { cwd: this.#cwd, stdout: "capture", stderr: "capture", onSpawn });
     const text = result.stdout + "\n" + result.stderr;
-    for (const line of text.split("\n")) if (/^(leased|ready|warmup complete|serve route|waiting)/.test(line)) log.write("agent-run: crabbox " + line + "\n");
+    for (const line of text.split("\n")) if (/^(leased|ready|warmup complete|serve route|run details|waiting)/.test(line)) log.write("agent-run: crabbox " + line + "\n");
     const leased = /leased (\S+) slug=(\S+)/.exec(text);
     if (result.code !== 0 || !leased) {
       for (const line of text.trim().split("\n").slice(-5)) log.write("agent-run: crabbox " + line + "\n");
@@ -46,6 +47,10 @@ export class Crabbox {
     if (!line) throw new Error("crabbox ssh printed no ssh command");
     const argv = splitWords(line);
     if (argv[0] !== "ssh" || argv.length < 2) throw new Error("unexpected crabbox ssh output");
+    if (this.#config.serveProxyCommand) {
+      if (this.#config.crabboxProvider !== "serve") throw new Error("AGENT_RUN_SERVE_PROXY_COMMAND requires provider serve");
+      return withServeProxy(argv, this.#config.serveProxyCommand);
+    }
     return argv;
   }
 
@@ -57,6 +62,20 @@ export class Crabbox {
     if (!released && /\/release: http 404\b/.test(text)) return { stopped: true, absent: true, exitCode: result.code, lease: null };
     return { stopped: result.code === 0 && Boolean(released), exitCode: result.code, lease: released?.[1] ?? null };
   }
+}
+
+// Replace only the broker relay transport. Both donor and lease SSH authentication
+// (including pinned host keys) remain in the CLI-generated command.
+export function withServeProxy(argv, proxyCommand) {
+  const result = [...argv];
+  const index = result.findIndex((arg, i) => i > 0 && result[i - 1] === "-o" && arg.startsWith("ProxyCommand="));
+  if (index === -1) throw new Error("serve SSH command has no relay hop to replace");
+  const donor = splitWords(result[index].slice("ProxyCommand=".length));
+  const relay = donor.findIndex((arg, i) => i > 0 && donor[i - 1] === "-o" && arg.startsWith("ProxyCommand=") && arg.includes("__serve-relay-proxy"));
+  if (donor[0] !== "ssh" || relay === -1) throw new Error("serve SSH command has no recognized broker relay hop");
+  donor[relay] = "ProxyCommand=" + proxyCommand;
+  result[index] = "ProxyCommand=" + donor.map(quote).join(" ");
+  return result;
 }
 
 // Insert ssh options before the destination (the last word of the argv).

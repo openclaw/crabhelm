@@ -1,6 +1,7 @@
-import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
-import { chmodSync, copyFileSync, symlinkSync, createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
+import { chmodSync, copyFileSync, symlinkSync, createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { childEnv, run } from "./proc.mjs";
@@ -25,6 +26,151 @@ function indexPath(config) {
 
 function readIndex(config) {
   try { return JSON.parse(readFileSync(indexPath(config), "utf8")); } catch { return {}; }
+}
+
+// A name no other process or call uses, for temporary files in shared cache directories.
+function uniqueSuffix() {
+  return process.pid + "-" + randomBytes(6).toString("hex");
+}
+
+// Write a shared cache file so readers see the old file or the complete new one.
+function writeFileAtomic(path, data, options) {
+  const tmp = path + "." + uniqueSuffix() + ".tmp";
+  try {
+    writeFileSync(tmp, data, options);
+    renameSync(tmp, path);
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
+
+// Cross-process cache locks.
+//
+// A lock is a directory. Each contender owns one file in it, named
+// <host>.<pid>.<process start>.<random>. A contender creates its file only
+// when no live owner is present, then lists the directory again: if another
+// live owner appeared, it removes its file and retries. Of two contenders,
+// the one that created its file later always sees the earlier file, so two
+// processes never both hold the lock.
+//
+// No file is ever taken over. A file whose process is gone is ignored and
+// deleted; its name is never reused, so deleting it cannot release a live
+// owner. Age is not used: a slow build keeps its lock for as long as it runs.
+const HOST_ID = createHash("sha256").update(hostname()).digest("hex").slice(0, 12);
+const OWNER_NAME = /^([0-9a-f]{12})\.(\d+)\.([0-9a-f]+)\.[0-9a-f]+$/;
+const heldLocks = new Set();
+let exitHookInstalled = false;
+
+// Identifies one process even when its pid is reused later. "0": unknown.
+function processStartId(pid) {
+  try {
+    let raw = "";
+    if (process.platform === "linux") {
+      const stat = readFileSync("/proc/" + pid + "/stat", "utf8");
+      raw = stat.slice(stat.lastIndexOf(") ") + 2).split(" ")[19] ?? "";
+    } else if (process.platform === "darwin") {
+      // Fixed TZ and locale: the text must be the same from every process.
+      raw = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], {
+        env: { PATH: "/bin:/usr/bin", TZ: "UTC", LC_ALL: "C" }, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+    }
+    return raw ? createHash("sha256").update(raw).digest("hex").slice(0, 12) : "0";
+  } catch {
+    return "0";
+  }
+}
+
+let ownStartId;
+
+// False only on proof that the owner process is gone. Anything unclear
+// (another host, no permission, no start time) counts as alive.
+function ownerAlive(name, verified) {
+  const match = OWNER_NAME.exec(name);
+  if (!match) return true;
+  const [, host, pidText, startId] = match;
+  if (host !== HOST_ID) return true;
+  const pid = Number(pidText);
+  if (pid === process.pid) return startId === "0" || ownStartId === "0" || startId === ownStartId;
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if (error.code === "ESRCH") return false;
+    return true;
+  }
+  if (startId === "0" || verified.has(name)) return true;
+  const current = processStartId(pid);
+  if (current === "0") return true;
+  if (current !== startId) return false;
+  verified.add(name);
+  return true;
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function withCacheLock(config, name, { log, waitMessage } = {}, action) {
+  ownStartId ??= processStartId(process.pid);
+  const dir = join(config.cacheDir, "locks", name.replace(/[^A-Za-z0-9._-]/g, "_"));
+  const mine = [HOST_ID, process.pid, ownStartId, randomBytes(6).toString("hex")].join(".");
+  const path = join(dir, mine);
+  const verified = new Set();
+  const liveOthers = () => {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const live = [];
+    for (const entry of readdirSync(dir)) {
+      if (entry === mine) continue;
+      if (ownerAlive(entry, verified)) live.push(entry);
+      else rmSync(join(dir, entry), { force: true });
+    }
+    return live;
+  };
+  if (!exitHookInstalled) {
+    exitHookInstalled = true;
+    process.on("exit", () => { for (const held of heldLocks) rmSync(held, { force: true }); });
+  }
+  let told = false;
+  for (;;) {
+    let live = liveOthers();
+    if (live.length === 0) {
+      heldLocks.add(path);
+      writeFileSync(path, "", { flag: "wx", mode: 0o600 });
+      live = liveOthers();
+      if (live.length === 0) break;
+      // Another contender arrived at the same moment. Step back; random delays separate the retries.
+      rmSync(path, { force: true });
+      heldLocks.delete(path);
+      await sleep(10 + Math.random() * 90);
+      continue;
+    }
+    if (!told && waitMessage) {
+      log?.write(waitMessage(Number(OWNER_NAME.exec(live[0])?.[2])));
+      told = true;
+    }
+    await sleep(100);
+  }
+  try {
+    return await action();
+  } finally {
+    rmSync(path, { force: true });
+    heldLocks.delete(path);
+  }
+}
+
+// One build per appliance key at a time, across processes.
+function withBuildLock(config, key, log, action) {
+  return withCacheLock(config, "appliance-build-" + key, {
+    log,
+    waitMessage: (pid) => "agent-run: waiting for pid " + pid + " to finish building appliance " + key + "\n",
+  }, action);
+}
+
+// Add one entry to index.json. The lock covers read, change and write, so
+// concurrent builds of different appliances all keep their entries.
+async function publishIndexEntry(config, key, entry) {
+  await withCacheLock(config, "appliance-index", {}, () => {
+    const index = readIndex(config);
+    index[key] = entry;
+    writeFileAtomic(indexPath(config), JSON.stringify(index, null, 2) + "\n", { mode: 0o600 });
+  });
 }
 
 export function applianceKey(pins, harness) {
@@ -56,8 +202,7 @@ async function nodeTarball(config, pins, log) {
   const bytes = Buffer.from(await response.arrayBuffer());
   const sha256 = createHash("sha256").update(bytes).digest("hex");
   if (sha256 !== pins.node.sha256) throw new Error("Node tarball sha256 mismatch");
-  writeFileSync(path + ".tmp", bytes);
-  renameSync(path + ".tmp", path);
+  writeFileAtomic(path, bytes);
   return path;
 }
 
@@ -88,8 +233,7 @@ async function pinnedArtifact(config, spec, fetcher, runner, log) {
     }
     const sha256 = createHash("sha256").update(bytes).digest("hex");
     if (sha256 !== spec.artifact.sha256) throw new Error("release artifact sha256 mismatch");
-    writeFileSync(path + ".tmp", bytes, { mode: 0o600 });
-    renameSync(path + ".tmp", path);
+    writeFileAtomic(path, bytes, { mode: 0o600 });
     return path;
   } finally {
     rmSync(downloadDir, { recursive: true, force: true });
@@ -221,7 +365,7 @@ async function buildPinnedArtifactAppliance({ config, pins, harness, log, runner
   const key = applianceKey(pins, harness);
   const dir = join(config.cacheDir, "appliances");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const partial = join(dir, key + ".tgz.partial");
+  const partial = join(dir, key + ".tgz.partial-" + uniqueSuffix());
   const stage = mkdtempSync(join(config.cacheDir, "build-"));
   try {
     const asset = await pinnedArtifact(config, spec, fetcher, runner, log);
@@ -273,9 +417,7 @@ async function buildPinnedArtifactAppliance({ config, pins, harness, log, runner
       platform: spec.platform, sourceSha256: spec.artifact.sha256,
       builtAt: new Date().toISOString(), builtOn: spec.artifact.source ?? (spec.artifact.githubRelease ? "github-release" : "release-url"),
     };
-    const index = readIndex(config);
-    index[key] = entry;
-    writeFileSync(indexPath(config), JSON.stringify(index, null, 2) + "\n", { mode: 0o600 });
+    await publishIndexEntry(config, key, entry);
     log.write("agent-run: appliance " + key + " sha256=" + sha256 + "\n");
     return { ...entry, key };
   } finally {
@@ -285,17 +427,23 @@ async function buildPinnedArtifactAppliance({ config, pins, harness, log, runner
 }
 
 // Build one harness appliance and cache it locally: on the laptop when no
-// package has install scripts, otherwise on a Crabbox lease.
-export async function buildAppliance({ config, pins, harness, crabbox, log = process.stderr, runner = run, fetcher = fetch }) {
+// package has install scripts, otherwise on a Crabbox lease. Always builds;
+// waits first if another process is building the same appliance.
+export async function buildAppliance(options) {
+  const { config, pins, harness, log = process.stderr } = options;
+  if (!pins.harnesses[harness]) throw new Error("no appliance pin for harness " + harness);
+  return await withBuildLock(config, applianceKey(pins, harness), log, () => buildUnlocked(options));
+}
+
+async function buildUnlocked({ config, pins, harness, crabbox, log = process.stderr, runner = run, fetcher = fetch }) {
   const spec = pins.harnesses[harness];
-  if (!spec) throw new Error("no appliance pin for harness " + harness);
   if (spec.artifact) return await buildPinnedArtifactAppliance({ config, pins, harness, log, runner, fetcher });
   const key = applianceKey(pins, harness);
   const node = await nodeTarball(config, pins, log);
   const slug = "agentrun-build-" + harness.replace(/[^a-z0-9]/g, "") + "-" + Date.now().toString(36);
   const dir = join(config.cacheDir, "appliances");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const partial = join(dir, key + ".tgz.partial");
+  const partial = join(dir, key + ".tgz.partial-" + uniqueSuffix());
   const lease = { slug, stopped: false };
   let stage;
   let leaseRequested = false;
@@ -317,12 +465,22 @@ export async function buildAppliance({ config, pins, harness, crabbox, log = pro
     const packer = spawn("tar", ["-cf", "-", "-C", stage, "node.tgz", "app", "tarballs"], { stdio: ["ignore", "pipe", "inherit"], env: { ...process.env, COPYFILE_DISABLE: "1" } });
     // A spawn failure must reach the finally block (which stops the lease), not crash the process.
     const packed = new Promise((resolve) => { packer.on("error", () => resolve(-1)); packer.on("close", resolve); });
-    const result = await runner("ssh", sshCommand(base, { remote: "bash -c " + quote(script) }), {
-      input: packer.stdout, stdout: out, stderr: log,
-    });
-    await new Promise((resolve) => out.end(resolve));
-    if (await packed !== 0) throw new Error("could not stream the build inputs");
+    let result;
+    try {
+      result = await runner("ssh", sshCommand(base, { remote: "bash -c " + quote(script) }), {
+        input: packer.stdout, stdout: out, stderr: log,
+      });
+    } finally {
+      // A failed or timed-out SSH receiver must not leave tar blocked on its pipe.
+      if (!result || result.code !== 0) {
+        packer.stdout.destroy();
+        packer.kill("SIGKILL");
+      }
+      await new Promise((resolve) => out.end(resolve));
+    }
+    const packedCode = await packed;
     if (result.code !== 0) throw new Error("appliance build failed on the lease (exit " + result.code + ")");
+    if (packedCode !== 0) throw new Error("could not stream the build inputs");
     return await finish(staged, lease.leaseId);
   } finally {
     rmSync(partial, { force: true });
@@ -337,14 +495,20 @@ export async function buildAppliance({ config, pins, harness, crabbox, log = pro
     const sha256 = await sha256File(partial);
     const path = join(dir, key + "-" + sha256.slice(0, 12) + ".tgz");
     renameSync(partial, path);
-    const index = readIndex(config);
-    index[key] = { path, sha256, harness, package: pins.harnesses[harness].package, version: pins.harnesses[harness].version, node: pins.node.version, lockSha256: staged.lockSha256, builtAt: new Date().toISOString(), builtOn };
-    writeFileSync(indexPath(config), JSON.stringify(index, null, 2) + "\n", { mode: 0o600 });
+    const entry = { path, sha256, harness, package: pins.harnesses[harness].package, version: pins.harnesses[harness].version, node: pins.node.version, lockSha256: staged.lockSha256, builtAt: new Date().toISOString(), builtOn };
+    await publishIndexEntry(config, key, entry);
     log.write("agent-run: appliance " + key + " sha256=" + sha256 + "\n");
-    return { ...index[key], key };
+    return { ...entry, key };
   }
 }
 
+// The cached appliance, built first when it is missing. Concurrent calls for
+// one appliance share one build: the others wait for the build lock, then
+// find the finished appliance in the cache.
 export async function ensureAppliance(options) {
-  return await cachedAppliance(options.config, options.pins, options.harness) ?? buildAppliance(options);
+  const { config, pins, harness, log = process.stderr } = options;
+  const cached = await cachedAppliance(config, pins, harness);
+  if (cached) return cached;
+  return await withBuildLock(config, applianceKey(pins, harness), log, async () =>
+    await cachedAppliance(config, pins, harness) ?? await buildUnlocked(options));
 }

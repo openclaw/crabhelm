@@ -25,12 +25,24 @@ const pi = {
     const { apiKey: _drop, ...provider } = source;
     const localOrigin = provider.baseUrl ? new URL(provider.baseUrl).origin : null;
     provider.baseUrl = remoteBaseUrl;
+    // Codex OAuth requires a ChatGPT JWT; lease credentials are ordinary API keys.
+    if (provider.api === "openai-codex-responses") {
+      provider.api = "openai-responses";
+      provider.baseUrl = new URL("/v1", remoteBaseUrl).href;
+    }
     // Models may carry their own baseUrl (e.g. "<origin>/v1" for openai-responses); move them to the tunnel, keep the path.
     provider.models = (provider.models ?? []).map((model) => {
-      if (!model.baseUrl) return model;
-      const url = new URL(model.baseUrl);
-      if (url.origin !== localOrigin) throw new Error("Pi model " + model.id + " has a baseUrl outside the " + config.piProvider + " provider");
-      return { ...model, baseUrl: new URL(remoteBaseUrl).origin + url.pathname.replace(/\/$/, "") };
+      const mapped = { ...model };
+      if (model.baseUrl) {
+        const url = new URL(model.baseUrl);
+        if (url.origin !== localOrigin) throw new Error("Pi model " + model.id + " has a baseUrl outside the " + config.piProvider + " provider");
+        mapped.baseUrl = new URL(remoteBaseUrl).origin + url.pathname.replace(/\/$/, "");
+      }
+      if ((model.api ?? source.api) === "openai-codex-responses") {
+        mapped.api = "openai-responses";
+        mapped.baseUrl = new URL("/v1", remoteBaseUrl).href;
+      }
+      return mapped;
     });
     provider.apiKey = "$CLAWROUTER_API_KEY";
     if (provider.headers) {

@@ -8,7 +8,7 @@ Credential scheme: [credentials.md](credentials.md) (Luke's standing approval, d
 `agent-run --harness <h> --prompt-file F [--model M] [--thinking T] [--attach P..] [--out DIR]` runs one non-interactive harness turn.
 It asks Harbor capacity placement first. On `local` it runs the harness on the laptop. On `remote` or `queue` it runs the harness on a Crabbox broker lease without asking anyone.
 `agent-run place --harness <h> [--run-id ID]` prints the placement decision without running a harness. Pass that JSON file later with `--placement-decision FILE` to reuse the decision and avoid a second capacity check.
-It returns the harness exit code, streams stdout and stderr, and writes the session files plus `receipt.json` into `--out`.
+It returns the harness exit code, streams stdout and stderr, and writes reports, session files and `receipt.json` into `--out`. See the [dispatch runbook](../../agent-run/docs/ORCHESTRATION.md) for donor selection, result paths and patch return.
 
 ## Where it lives
 
@@ -27,7 +27,7 @@ agent-run ──placement──▶ harbor-capacity-placement.mjs --kind agent
    ├─ crabbox warmup --provider serve --type cpu2 (coordinator admits the lease)
    ├─ ssh: upload appliance tgz + inputs (sha256 checked on the box)
    ├─ ssh -R 127.0.0.1:18789 → clawrouter-lue.tail59faed.ts.net:8789 ; run harness, stream output
-   ├─ ssh: tar the session dir back into --out
+   ├─ ssh: tar reports and sessions back into --out
    └─ finally: revoke key (in-pod) ▸ prove revoked ▸ crabbox stop ▸ write receipt.json
 ```
 
@@ -81,7 +81,7 @@ Exit codes: the harness's own code; 75 queued without capacity; 3 agent-run infr
 All remote work runs inside one `try/finally` with SIGINT and SIGTERM handlers: revoke the key, check that it is revoked, then `crabbox stop`.
 Each lease has `--idle-timeout 75m --ttl 90m`, so a lease left by a killed agent-run ends within 75 minutes.
 The idle timeout is the run budget, not a short keepalive window: on serve leases a raw SSH session closes at the lease's idle timeout even while `crabbox heartbeat` refreshes the lease (observed 2026-11-06 with a 3-minute timeout).
-Keys have no expiry in ClawRouter, so every agent-run first runs a sweep: it revokes any enabled `agentrun_*` device whose local run lock is gone.
+Keys have no expiry in ClawRouter, so every agent-run first runs a sweep: it revokes an enabled `agentrun_*` device only when its local run lock identifies a dead process. Keys without a local ownership record may belong to another control host and are left alone.
 
 ## Pi Agent tool and Workflow hook
 
