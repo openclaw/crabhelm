@@ -43,6 +43,54 @@ function tee(file, target) {
   return { stream, done: () => new Promise((r) => { stream.end(); sink.on("finish", r); }) };
 }
 
+const CACHE_HIT = "agent-run-appliance-cache=hit";
+
+// Remote paths of the appliance in the lease's tool cache, as shell words.
+// The cache is relative to the remote $HOME; undefined turns the cache off.
+export function remoteApplianceCache(config, sha256) {
+  const rel = config.remoteToolCache;
+  if (!rel) return undefined;
+  if (!/^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/.test(rel) || rel.split("/").includes("..")) throw new Error("AGENT_RUN_REMOTE_TOOL_CACHE must be a plain path relative to the remote home, or off");
+  if (!/^[0-9a-f]{64}$/.test(sha256)) throw new Error("appliance sha256 is not a hex digest");
+  const root = '"$HOME/' + rel + '"';
+  const dir = '"$HOME/' + rel + '/agent-run"';
+  return { root, dir, file: '"$HOME/' + rel + "/agent-run/" + sha256 + '.tgz"', temp: '"$HOME/' + rel + "/agent-run/." + sha256 + '.$$.tmp"' };
+}
+
+function applianceShell(workdir, sha256) {
+  const tgz = workdir + "/appl.tgz";
+  return {
+    tgz,
+    check: "echo " + quote(sha256 + "  " + tgz) + " | sha256sum -c - >/dev/null 2>&1",
+    unpack: "tar -xzf " + quote(tgz) + " -C " + quote(workdir + "/appl") + "; rm " + quote(tgz) +
+      // Laptop-assembled appliances keep Node packed; it was sha256-checked when the appliance was built.
+      "; if [ -f " + quote(workdir + "/appl/node.tgz") + " ]; then mkdir -p " + quote(workdir + "/appl/node") + "; tar -xzf " + quote(workdir + "/appl/node.tgz") + " -C " + quote(workdir + "/appl/node") + " --strip-components=1; rm " + quote(workdir + "/appl/node.tgz") + "; fi",
+  };
+}
+
+// Unpacks the appliance from the lease cache and prints CACHE_HIT, or leaves
+// no partial files. Every lease on the machine can write the cache: copy
+// first, then check the private copy, so a file swapped after the check is
+// never unpacked.
+export function applianceRestoreCommand(workdir, sha256, cache) {
+  const { tgz, check, unpack } = applianceShell(workdir, sha256);
+  return "mkdir -p " + quote(workdir + "/appl") + "; rc=1; if cp " + cache.file + " " + quote(tgz) + " 2>/dev/null && " + check +
+    "; then ( set -e; " + unpack + " ); rc=$?; fi; if [ \"$rc\" = 0 ]; then touch " + cache.file + " 2>/dev/null; echo " + CACHE_HIT +
+    "; else rm -rf " + quote(tgz) + " " + quote(workdir + "/appl") + "; echo agent-run-appliance-cache=miss; fi";
+}
+
+// Reads the appliance on stdin, checks it, then unpacks it. With a cache it
+// also stores the checked file, but only where the provider mounted a cache
+// directory; a failed store never fails the run.
+export function applianceInstallCommand(workdir, sha256, cache) {
+  const { tgz, check, unpack } = applianceShell(workdir, sha256);
+  return "set -e; mkdir -p " + quote(workdir + "/appl") + "; cat > " + quote(tgz) + "; " + check +
+    (cache ? "; if [ -d " + cache.root + " ] && [ -w " + cache.root + " ]; then mkdir -p " + cache.dir + " 2>/dev/null || true" +
+      "; find " + cache.dir + " -type f -mtime +30 -delete 2>/dev/null || true; cp " + quote(tgz) + " " + cache.temp +
+      " 2>/dev/null && mv -f " + cache.temp + " " + cache.file + " || rm -f " + cache.temp + "; fi" : "") +
+    "; " + unpack;
+}
+
 function locksDir(config) {
   const dir = join(config.stateDir, "locks");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -210,31 +258,43 @@ export async function agentRun(options, deps = {}) {
     const upload = await runner("ssh", sshCommand(base, { remote: "mkdir -p " + quote(workdir) + " && tar -xzf - -C " + quote(workdir) }), { input: createReadStream(tarball), onSpawn: step });
     rmSync(tarball, { force: true });
     if (upload.code !== 0) throw new Error("input upload failed (exit " + upload.code + ")");
-    const applianceBytes = statSync(appliance.path).size;
-    const uploadStarted = Date.now();
-    log.write("agent-run: appliance upload starting bytes=" + applianceBytes + (config.serveProxyCommand ? " transport=custom-serve-proxy" : " transport=crabbox") + "\n");
-    const applianceInput = createReadStream(appliance.path);
-    const progress = setInterval(() => log.write("agent-run: appliance upload bytes=" + applianceInput.bytesRead + "/" + applianceBytes + "\n"), 30_000);
-    progress.unref();
-    applianceInput.on("close", () => clearInterval(progress));
-    applianceInput.on("error", () => clearInterval(progress));
-    let install;
-    try {
-      install = await runner("ssh", sshCommand(base, {
-      remote: "set -e; mkdir -p " + quote(workdir + "/appl") + "; cat > " + quote(workdir + "/appl.tgz") +
-        "; echo " + quote(appliance.sha256 + "  " + workdir + "/appl.tgz") + " | sha256sum -c - >/dev/null" +
-        "; tar -xzf " + quote(workdir + "/appl.tgz") + " -C " + quote(workdir + "/appl") + "; rm " + quote(workdir + "/appl.tgz") +
-        // Laptop-assembled appliances keep Node packed; it was sha256-checked when the appliance was built.
-        "; if [ -f " + quote(workdir + "/appl/node.tgz") + " ]; then mkdir -p " + quote(workdir + "/appl/node") + "; tar -xzf " + quote(workdir + "/appl/node.tgz") + " -C " + quote(workdir + "/appl/node") + " --strip-components=1; rm " + quote(workdir + "/appl/node.tgz") + "; fi",
-      }), { input: applianceInput, onSpawn: step });
-    } finally {
-      clearInterval(progress);
-      applianceInput.destroy();
+    const cache = remoteApplianceCache(config, appliance.sha256);
+    receipt.appliance.cache = cache ? "miss" : "off";
+    if (cache) {
+      const restoreStarted = Date.now();
+      const restore = await runner("ssh", sshCommand(base, {
+        remote: applianceRestoreCommand(workdir, appliance.sha256, cache),
+      }), { onSpawn: step });
+      if (restore.code === 0 && restore.stdout.split("\n").includes(CACHE_HIT)) {
+        receipt.appliance.cache = "hit";
+        receipt.appliance.verifiedOnBox = true;
+        receipt.appliance.restore = { elapsedMs: Date.now() - restoreStarted };
+        log.write("agent-run: appliance restored from lease cache sha256=" + appliance.sha256 + " elapsed_ms=" + receipt.appliance.restore.elapsedMs + "\n");
+      }
     }
-    if (install.code !== 0) throw new Error("appliance upload or sha256 check failed (exit " + install.code + ")");
-    receipt.appliance.verifiedOnBox = true;
-    receipt.appliance.upload = { bytes: applianceBytes, elapsedMs: Date.now() - uploadStarted, transport: config.serveProxyCommand ? "custom-serve-proxy" : "crabbox" };
-    log.write("agent-run: appliance upload verified sha256=" + appliance.sha256 + " elapsed_ms=" + receipt.appliance.upload.elapsedMs + "\n");
+    if (receipt.appliance.cache !== "hit") {
+      const applianceBytes = statSync(appliance.path).size;
+      const uploadStarted = Date.now();
+      log.write("agent-run: appliance upload starting bytes=" + applianceBytes + (config.serveProxyCommand ? " transport=custom-serve-proxy" : " transport=crabbox") + "\n");
+      const applianceInput = createReadStream(appliance.path);
+      const progress = setInterval(() => log.write("agent-run: appliance upload bytes=" + applianceInput.bytesRead + "/" + applianceBytes + "\n"), 30_000);
+      progress.unref();
+      applianceInput.on("close", () => clearInterval(progress));
+      applianceInput.on("error", () => clearInterval(progress));
+      let install;
+      try {
+        install = await runner("ssh", sshCommand(base, {
+          remote: applianceInstallCommand(workdir, appliance.sha256, cache),
+        }), { input: applianceInput, onSpawn: step });
+      } finally {
+        clearInterval(progress);
+        applianceInput.destroy();
+      }
+      if (install.code !== 0) throw new Error("appliance upload or sha256 check failed (exit " + install.code + ")");
+      receipt.appliance.verifiedOnBox = true;
+      receipt.appliance.upload = { bytes: applianceBytes, elapsedMs: Date.now() - uploadStarted, transport: config.serveProxyCommand ? "custom-serve-proxy" : "crabbox" };
+      log.write("agent-run: appliance upload verified sha256=" + appliance.sha256 + " elapsed_ms=" + receipt.appliance.upload.elapsedMs + "\n");
+    }
     if (interrupted) throw new Error("interrupted");
 
     const router = new URL(config.routerOrigin);

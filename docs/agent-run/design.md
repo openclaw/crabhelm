@@ -25,7 +25,7 @@ agent-run ──placement──▶ harbor-capacity-placement.mjs --kind agent
    │ remote/queue
    ├─ mint per-run key ──▶ kubectl exec deploy/clawrouter (admin token stays in the pod env)
    ├─ crabbox warmup --provider serve --type cpu2 (coordinator admits the lease)
-   ├─ ssh: upload appliance tgz + inputs (sha256 checked on the box)
+   ├─ ssh: upload inputs; restore the appliance tgz from the lease cache, else upload it (sha256 checked on the box)
    ├─ ssh -R 127.0.0.1:18789 → clawrouter-lue.tail59faed.ts.net:8789 ; run harness, stream output
    ├─ ssh: tar reports and sessions back into --out
    └─ finally: revoke key (in-pod) ▸ prove revoked ▸ crabbox stop ▸ write receipt.json

@@ -44,8 +44,18 @@ forwarded `/v1` endpoint. Per-run API keys are not ChatGPT OAuth JWTs.
 ## Avoiding a slow broker relay
 
 On this fleet, the broker relay transferred a 218 MB appliance at about
-250 KB/s (roughly 14 minutes). Serve does not advertise cache-volume support;
-do not assume a disposable lease has a persistent donor cache.
+250 KB/s (roughly 14 minutes).
+
+agent-run keeps each uploaded appliance in the lease's tool cache at
+`~/.cache/crabbox-tools/agent-run/<sha256>.tgz`. A later run on the same
+machine copies that file into its work directory, checks the SHA-256 of the
+copy, and skips the upload. The store step runs only where the cache directory
+already exists; Crabbox serve machines mount it as a per-machine volume, and
+other providers keep uploading. Every lease on a machine can write this cache,
+so agent-run never unpacks a file whose digest it has not checked. A missing or
+changed file is a cache miss, not an error. Files unused for 30 days are
+removed at the next store. Set `AGENT_RUN_REMOTE_TOOL_CACHE=off` to always
+upload, or to another path relative to the remote home.
 
 If the control host can SSH to an approved donor, set
 `AGENT_RUN_SERVE_PROXY_COMMAND` to a trusted byte-stream command that reaches
@@ -121,8 +131,9 @@ before applying it. No commit, push or GitHub credential on the lease is needed.
   scheduling, a shared workspace, or a persistent agent pane.
 - Only supplied inputs reach the lease. Edits outside remote `out/` are not
   returned automatically. Remote leases are discarded after collection.
-- Linux x64 appliances are pinned. Cold builds download dependencies; warm
-  runs still upload the appliance. Network throughput can dominate runtime.
+- Linux x64 appliances are pinned. Cold builds download dependencies. The
+  first run on each machine uploads the appliance; network throughput can
+  dominate that run.
 - Cache locking coordinates processes on one host, not a shared network cache.
 - Automatic key sweeping only revokes dead or finished runs with a local ownership record.
   Failed mint/revoke attempts retain that record for the next sweep.
