@@ -357,7 +357,7 @@ function remoteFixture({ runExit = 0, failUpload = false, cacheHit = false, remo
     const remote = args.at(-1) ?? "";
     if (command === "ssh" && remote.startsWith("mkdir") && failUpload) return { code: 255, stdout: "", stderr: "" };
     if (command === "ssh" && remote === "bash -s") return { code: runExit, stdout: "", stderr: "" };
-    if (command === "ssh" && remote.includes("rc=1; if cp ")) return { code: 0, stdout: "agent-run-appliance-cache=" + (cacheHit ? "hit" : "miss") + "\n", stderr: "" };
+    if (command === "ssh" && remote.includes("rc=1; if [ -f ")) return { code: 0, stdout: "agent-run-appliance-cache=" + (cacheHit ? "hit" : "miss") + "\n", stderr: "" };
     return { code: 0, stdout: "", stderr: "" };
   };
   const fixture = {
@@ -534,7 +534,7 @@ test("failed revocation and uncertain mint retain ownership for the next sweep",
 });
 
 const isUpload = (call) => call.command === "ssh" && call.args.at(-1).includes("cat > ");
-const isRestore = (call) => call.command === "ssh" && call.args.at(-1).includes("rc=1; if cp ");
+const isRestore = (call) => call.command === "ssh" && call.args.at(-1).includes("rc=1; if [ -f ");
 
 test("an appliance in the lease cache is checked on a private copy and not uploaded", async () => {
   const f = remoteFixture({ cacheHit: true });
@@ -542,7 +542,8 @@ test("an appliance in the lease cache is checked on a private copy and not uploa
   assert.equal(f.calls.filter(isUpload).length, 0);
   const sha256 = createHash("sha256").update("appliance").digest("hex");
   const remote = f.calls.find(isRestore).args.at(-1);
-  const copied = remote.indexOf('cp "$HOME/.cache/crabbox-tools/agent-run/' + sha256 + '.tgz" ');
+  const entry = '"$HOME/.cache/crabbox-tools/agent-run/' + sha256 + '.tgz"';
+  const copied = remote.indexOf("[ -f " + entry + " ] && [ ! -L " + entry + " ] && timeout 120 head -c 9 " + entry + " > ");
   const checked = remote.indexOf("sha256sum -c");
   const unpacked = remote.indexOf("tar -xzf");
   assert.ok(copied >= 0 && copied < checked && checked < unpacked, remote);
@@ -600,6 +601,7 @@ test("the lease cache commands store, restore and reject a changed file in a rea
   const tgz = join(home, "appliance.tgz");
   execFileSync("tar", ["-czf", tgz, "-C", source, "bin.txt"]);
   const sha256 = createHash("sha256").update(readFileSync(tgz)).digest("hex");
+  const bytes = statSync(tgz).size;
   const cache = remoteApplianceCache({ remoteToolCache: ".cache/crabbox-tools" }, sha256);
   const cached = join(home, ".cache/crabbox-tools/agent-run", sha256 + ".tgz");
   const sh = (command, input) => spawnSync("sh", ["-c", command], { input, env: { PATH: process.env.PATH, HOME: home }, encoding: "utf8" });
@@ -608,13 +610,13 @@ test("the lease cache commands store, restore and reject a changed file in a rea
   assert.equal(sh(applianceInstallCommand(work("no-cache"), sha256, cache), readFileSync(tgz)).status, 0);
   assert.equal(readFileSync(join(work("no-cache"), "appl/bin.txt"), "utf8"), "harness");
   assert.ok(!existsSync(join(home, ".cache")), "no cache directory is created where the provider mounted none");
-  assert.match(sh(applianceRestoreCommand(work("cold"), sha256, cache)).stdout, /=miss\n$/);
+  assert.match(sh(applianceRestoreCommand(work("cold"), sha256, cache, bytes)).stdout, /=miss\n$/);
   assert.ok(!existsSync(join(work("cold"), "appl")));
 
   mkdirSync(join(home, ".cache/crabbox-tools"), { recursive: true });
   assert.equal(sh(applianceInstallCommand(work("first"), sha256, cache), readFileSync(tgz)).status, 0);
   assert.deepEqual(readFileSync(cached), readFileSync(tgz));
-  const hit = sh(applianceRestoreCommand(work("second"), sha256, cache));
+  const hit = sh(applianceRestoreCommand(work("second"), sha256, cache, bytes));
   assert.equal(hit.stdout, "agent-run-appliance-cache=hit\n");
   assert.equal(readFileSync(join(work("second"), "appl/bin.txt"), "utf8"), "harness");
   assert.ok(!existsSync(join(work("second"), "appl.tgz")));
@@ -624,9 +626,24 @@ test("the lease cache commands store, restore and reject a changed file in a rea
   assert.deepEqual(readFileSync(cached), readFileSync(tgz), "a failed upload does not replace the cached file");
 
   writeFileSync(cached, "swapped by another lease");
-  const changed = sh(applianceRestoreCommand(work("third"), sha256, cache));
+  const changed = sh(applianceRestoreCommand(work("third"), sha256, cache, bytes));
   assert.equal(changed.stdout, "agent-run-appliance-cache=miss\n");
   assert.ok(!existsSync(join(work("third"), "appl")) && !existsSync(join(work("third"), "appl.tgz")));
+
+  // A pipe in the entry's place would block a plain copy until a writer came.
+  rmSync(cached);
+  assert.equal(spawnSync("mkfifo", [cached]).status, 0);
+  const pipe = spawnSync("sh", ["-c", applianceRestoreCommand(work("pipe"), sha256, cache, bytes)], { env: { ...process.env, HOME: home }, encoding: "utf8", timeout: 20_000 });
+  assert.equal(pipe.status, 0, "the restore returns: " + pipe.signal);
+  assert.equal(pipe.stdout, "agent-run-appliance-cache=miss\n");
+  // An entry longer than the appliance is cut at the appliance's size, then fails the check.
+  rmSync(cached);
+  writeFileSync(cached, Buffer.concat([readFileSync(tgz), Buffer.alloc(4096)]));
+  assert.equal(sh(applianceRestoreCommand(work("long"), sha256, cache, bytes)).stdout, "agent-run-appliance-cache=hit\n");
+  writeFileSync(cached, Buffer.alloc(bytes + 4096, 1));
+  assert.equal(sh(applianceRestoreCommand(work("endless"), sha256, cache, bytes)).stdout, "agent-run-appliance-cache=miss\n");
+  assert.equal(statSync(cached).size, bytes + 4096);
+  writeFileSync(cached, readFileSync(tgz));
 
   // Another lease can leave anything in the shared directory. A store that
   // cannot work must not fail the run, and a directory in the file's place is replaced.

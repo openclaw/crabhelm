@@ -52,8 +52,10 @@ machine copies that file into its work directory, checks the SHA-256 of the
 copy, and skips the upload. The store step runs only where the cache directory
 already exists; Crabbox serve machines mount it as a per-machine volume, and
 other providers keep uploading. Every lease on a machine can write this cache,
-so agent-run never unpacks a file whose digest it has not checked. A missing or
-changed file is a cache miss, not an error. Files unused for 30 days are
+so agent-run never unpacks a file whose digest it has not checked. The copy
+takes a regular file only, reads at most the appliance's own size and stops
+after 120 seconds. A missing, changed or unreadable entry is a cache miss, not
+an error, and a store that cannot work does not fail the run. Files unused for 30 days are
 removed at the next store. Set `AGENT_RUN_REMOTE_TOOL_CACHE=off` to always
 upload, or to another path relative to the remote home.
 

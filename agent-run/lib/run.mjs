@@ -71,10 +71,17 @@ function applianceShell(workdir, sha256) {
 // Unpacks the appliance from the lease cache and prints CACHE_HIT, or leaves
 // no partial files. Every lease on the machine can write the cache: copy
 // first, then check the private copy, so a file swapped after the check is
-// never unpacked.
-export function applianceRestoreCommand(workdir, sha256, cache) {
+// never unpacked. The copy takes a regular file only, reads at most the
+// appliance's own size and has a time limit, so a pipe or an endless file in
+// the entry's place is a miss, not a hang.
+export const RESTORE_COPY_SECONDS = 120;
+// Copy limit plus time to check and unpack; after this the run uploads instead.
+const RESTORE_TIMEOUT_MS = (RESTORE_COPY_SECONDS + 180) * 1000;
+export function applianceRestoreCommand(workdir, sha256, cache, bytes) {
+  if (!Number.isSafeInteger(bytes) || bytes <= 0) throw new Error("appliance size is not a positive integer");
   const { tgz, check, unpack } = applianceShell(workdir, sha256);
-  return "mkdir -p " + quote(workdir + "/appl") + "; rc=1; if cp " + cache.file + " " + quote(tgz) + " 2>/dev/null && " + check +
+  return "mkdir -p " + quote(workdir + "/appl") + "; rc=1; if [ -f " + cache.file + " ] && [ ! -L " + cache.file + " ] && timeout " + RESTORE_COPY_SECONDS +
+    " head -c " + bytes + " " + cache.file + " > " + quote(tgz) + " 2>/dev/null && " + check +
     "; then ( set -e; " + unpack + " ); rc=$?; fi; if [ \"$rc\" = 0 ]; then touch " + cache.file + " 2>/dev/null; echo " + CACHE_HIT +
     "; else rm -rf " + quote(tgz) + " " + quote(workdir + "/appl") + "; echo agent-run-appliance-cache=miss; fi";
 }
@@ -265,8 +272,8 @@ export async function agentRun(options, deps = {}) {
     if (cache) {
       const restoreStarted = Date.now();
       const restore = await runner("ssh", sshCommand(base, {
-        remote: applianceRestoreCommand(workdir, appliance.sha256, cache),
-      }), { onSpawn: step });
+        remote: applianceRestoreCommand(workdir, appliance.sha256, cache, statSync(appliance.path).size),
+      }), { onSpawn: step, timeoutMs: Math.min(config.commandTimeoutMs, RESTORE_TIMEOUT_MS) });
       if (restore.code === 0 && restore.stdout.split("\n").includes(CACHE_HIT)) {
         receipt.appliance.cache = "hit";
         receipt.appliance.verifiedOnBox = true;
