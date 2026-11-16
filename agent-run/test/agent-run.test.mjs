@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -559,7 +559,8 @@ test("a cache miss uploads, checks the upload, then stores it only where a cache
   const sha256 = createHash("sha256").update("appliance").digest("hex");
   const remote = f.calls.find(isUpload).args.at(-1);
   const checked = remote.indexOf("sha256sum -c");
-  const stored = remote.indexOf('mv -f "$HOME/.cache/crabbox-tools/agent-run/.' + sha256 + '.$$.tmp" "$HOME/.cache/crabbox-tools/agent-run/' + sha256 + '.tgz"');
+  const stored = remote.indexOf('mv -f "$t" "$HOME/.cache/crabbox-tools/agent-run/' + sha256 + '.tgz"');
+  assert.ok(remote.includes('t=$(mktemp "$HOME/.cache/crabbox-tools/agent-run/.' + sha256 + '.XXXXXX") || exit 0'), remote);
   assert.ok(checked >= 0 && checked < stored, remote);
   assert.ok(remote.includes('if [ -d "$HOME/.cache/crabbox-tools" ] && [ -w "$HOME/.cache/crabbox-tools" ]; then'), remote);
   const receipt = JSON.parse(readFileSync(join(f.options.out, "receipt.json"), "utf8"));
@@ -626,6 +627,21 @@ test("the lease cache commands store, restore and reject a changed file in a rea
   const changed = sh(applianceRestoreCommand(work("third"), sha256, cache));
   assert.equal(changed.stdout, "agent-run-appliance-cache=miss\n");
   assert.ok(!existsSync(join(work("third"), "appl")) && !existsSync(join(work("third"), "appl.tgz")));
+
+  // Another lease can leave anything in the shared directory. A store that
+  // cannot work must not fail the run, and a directory in the file's place is replaced.
+  rmSync(cached);
+  mkdirSync(join(cached, "trap"), { recursive: true });
+  assert.equal(sh(applianceInstallCommand(work("dir-in-place"), sha256, cache), readFileSync(tgz)).status, 0);
+  assert.equal(readFileSync(join(work("dir-in-place"), "appl/bin.txt"), "utf8"), "harness");
+  assert.deepEqual(readFileSync(cached), readFileSync(tgz));
+  rmSync(join(home, ".cache/crabbox-tools/agent-run"), { recursive: true });
+  writeFileSync(join(home, ".cache/crabbox-tools/agent-run"), "not a directory");
+  const blocked = sh(applianceInstallCommand(work("blocked-store"), sha256, cache), readFileSync(tgz));
+  assert.equal(blocked.status, 0, blocked.stderr);
+  assert.equal(readFileSync(join(work("blocked-store"), "appl/bin.txt"), "utf8"), "harness");
+  assert.equal(readFileSync(join(home, ".cache/crabbox-tools/agent-run"), "utf8"), "not a directory");
+  assert.equal(readdirSync(join(home, ".cache/crabbox-tools")).length, 1, "no temp file is left behind");
 });
 
 test("cleanup still runs when the upload fails", async () => {

@@ -54,7 +54,7 @@ export function remoteApplianceCache(config, sha256) {
   if (!/^[0-9a-f]{64}$/.test(sha256)) throw new Error("appliance sha256 is not a hex digest");
   const root = '"$HOME/' + rel + '"';
   const dir = '"$HOME/' + rel + '/agent-run"';
-  return { root, dir, file: '"$HOME/' + rel + "/agent-run/" + sha256 + '.tgz"', temp: '"$HOME/' + rel + "/agent-run/." + sha256 + '.$$.tmp"' };
+  return { root, dir, file: '"$HOME/' + rel + "/agent-run/" + sha256 + '.tgz"', temp: '"$HOME/' + rel + "/agent-run/." + sha256 + '.XXXXXX"' };
 }
 
 function applianceShell(workdir, sha256) {
@@ -81,13 +81,15 @@ export function applianceRestoreCommand(workdir, sha256, cache) {
 
 // Reads the appliance on stdin, checks it, then unpacks it. With a cache it
 // also stores the checked file, but only where the provider mounted a cache
-// directory; a failed store never fails the run.
+// directory. Other leases can write there, so the store runs in a subshell
+// whose result is ignored, and mktemp picks a name no other lease can prepare.
 export function applianceInstallCommand(workdir, sha256, cache) {
   const { tgz, check, unpack } = applianceShell(workdir, sha256);
   return "set -e; mkdir -p " + quote(workdir + "/appl") + "; cat > " + quote(tgz) + "; " + check +
-    (cache ? "; if [ -d " + cache.root + " ] && [ -w " + cache.root + " ]; then mkdir -p " + cache.dir + " 2>/dev/null || true" +
-      "; find " + cache.dir + " -type f -mtime +30 -delete 2>/dev/null || true; cp " + quote(tgz) + " " + cache.temp +
-      " 2>/dev/null && mv -f " + cache.temp + " " + cache.file + " || rm -f " + cache.temp + "; fi" : "") +
+    (cache ? "; if [ -d " + cache.root + " ] && [ -w " + cache.root + " ]; then ( set +e; mkdir -p " + cache.dir +
+      "; find " + cache.dir + " -type f -mtime +30 -delete; t=$(mktemp " + cache.temp + ") || exit 0" +
+      "; [ ! -d " + cache.file + " ] || rm -rf " + cache.file +
+      "; cp " + quote(tgz) + " \"$t\" && mv -f \"$t\" " + cache.file + " || rm -f \"$t\" ) >/dev/null 2>&1 || true; fi" : "") +
     "; " + unpack;
 }
 
