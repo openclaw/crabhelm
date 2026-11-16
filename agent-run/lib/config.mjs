@@ -28,6 +28,9 @@ export function loadConfig(env = process.env) {
     // these bound a lease left behind by a killed agent-run.
     leaseIdleTimeout: env.AGENT_RUN_LEASE_IDLE_TIMEOUT || "75m",
     leaseTtl: env.AGENT_RUN_LEASE_TTL || "90m",
+    // Lease-side appliance cache, relative to the remote home. Crabbox serve
+    // machines keep this directory between leases; "off" always uploads.
+    remoteToolCache: env.AGENT_RUN_REMOTE_TOOL_CACHE === "off" ? undefined : env.AGENT_RUN_REMOTE_TOOL_CACHE || ".cache/crabbox-tools",
     cacheDir: env.AGENT_RUN_CACHE_DIR || join(home, ".cache/agent-run"),
     stateDir: env.AGENT_RUN_STATE_DIR || join(home, ".local/state/agent-run"),
     piModelsFile: env.AGENT_RUN_PI_MODELS || join(home, ".pi/agent/models.json"),
