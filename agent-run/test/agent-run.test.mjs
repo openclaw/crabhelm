@@ -1000,3 +1000,9 @@ test("Pi context rejects local placement, other harnesses, missing model and uns
   await assert.rejects(() => agentRun(wrongPin.options, wrongPin.deps), /pinned Pi SDK appliance/);
   assert.deepEqual(wrongPin.events, []);
 });
+
+test("loadConfig refuses a pin to the banned rp-kube-01 donor", () => {
+  assert.throws(() => loadConfig({ HOME: "/h", AGENT_RUN_CRABBOX_MACHINE: "rp-kube-01" }), /rp-kube-01 is banned/);
+  assert.equal(loadConfig({ HOME: "/h", AGENT_RUN_CRABBOX_MACHINE: "lue-dl360-worker-01-donor" }).crabboxMachine, "lue-dl360-worker-01-donor");
+  assert.equal(loadConfig({ HOME: "/h" }).crabboxMachine, undefined);
+});

@@ -20,10 +20,12 @@ require Harbor on the control host.
 
 ## Dispatch
 
-Check current capacity with `crabbox serve machines`. Select an approved donor:
-`lue-dl360-worker-01-donor`, `asus-laptop-1-donor`, or
-`lue-kube-worker-01-donor`. Availability changes. Never select
-`rp-kube-01`: it is a client production host. This proof does not use the M2 Max.
+Check current capacity with `crabbox serve machines`. The only approved donor
+is `lue-dl360-worker-01-donor` (the asus and worker-01 donors are retired).
+`rp-kube-01` is banned: it is a client production host (Luke, 2026-11-16).
+`loadConfig` rejects `AGENT_RUN_CRABBOX_MACHINE=rp-kube-01`, Harbor placement
+never reports it, and the crabbox user config pins unpinned serve leases with
+`serve.machine: lue-dl360-worker-01-donor`. This proof does not use the M2 Max.
 
 ```sh
 export AGENT_RUN_CRABBOX_MACHINE=lue-dl360-worker-01-donor
@@ -35,8 +37,9 @@ node agent-run/bin/agent-run.mjs \
 
 Replace `--harness pi` with `--harness codex` for Codex. Each run needs its
 own output directory. The runner requests an explicit type and standard
-class. `AGENT_RUN_CRABBOX_MACHINE` pins serve placement; without it, the broker
-chooses a machine. Check its current fleet before allowing automatic selection.
+class. `AGENT_RUN_CRABBOX_MACHINE` pins serve placement; without it, crabbox uses
+`serve.machine` from its user config. Without either, the broker chooses by
+free CPUs and can pick `rp-kube-01`, so keep the user-config pin.
 
 Pi maps `openai-codex-responses` models to `openai-responses` at the
 forwarded `/v1` endpoint. Per-run API keys are not ChatGPT OAuth JWTs.
