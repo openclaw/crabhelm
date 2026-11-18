@@ -212,6 +212,45 @@ test("mint sends only the sha256 of the secret to the pod", async () => {
   assert.ok(argv.includes(createHash("sha256").update(secret).digest("hex")));
 });
 
+// Runs the real in-pod script with fetch stubbed; returns the PUT body text.
+function podPutBody(extraArgs) {
+  const stub = "globalThis.fetch = async (url, init) => { if (init.method === 'PUT') process.stderr.write('BODY:' + init.body + '\\n'); "
+    + "return new Response(JSON.stringify({ credentials: [] }), { status: 200 }); };";
+  const result = spawnSync(process.execPath, ["--import", "data:text/javascript," + encodeURIComponent(stub), "--input-type=module", "-e", IN_POD_SCRIPT,
+    "put", "agentrun_test_000009", "a".repeat(64), ...extraArgs], { env: { ...process.env, CLAWROUTER_ADMIN_TOKEN: "t" }, encoding: "utf8" });
+  const line = result.stderr.split("\n").find((l) => l.startsWith("BODY:"));
+  return { body: line?.slice(5), stdout: result.stdout, status: result.status };
+}
+
+test("without AGENT_RUN_OPENAI_GRANT the mint argv and body are unchanged", async () => {
+  assert.equal(podPutBody([]).body, JSON.stringify({
+    secretSha256: "a".repeat(64), providers: ["openai", "anthropic", "xai"], tenantId: "default",
+    tokenRole: "service", retainRequestContent: false,
+  }));
+  const pod = fakePod();
+  await new ClawRouterAdmin(loadConfig({ HOME: "/h" }), { runner: pod.runner }).mint("agentrun_test_000010");
+  const tail = pod.calls[0].slice(pod.calls[0].indexOf(IN_POD_SCRIPT) + 1);
+  assert.equal(tail.length, 3);
+});
+
+test("AGENT_RUN_OPENAI_GRANT limits the minted key to that OpenAI grant", async () => {
+  const body = JSON.parse(podPutBody(["openai_work"]).body);
+  assert.deepEqual(body.grantRouting, { eligibleGrants: { openai: ["openai_work"] } });
+  const pod = fakePod();
+  await new ClawRouterAdmin(loadConfig({ HOME: "/h", AGENT_RUN_OPENAI_GRANT: "openai_work" }), { runner: pod.runner }).mint("agentrun_test_000011");
+  assert.equal(pod.calls[0].at(-1), "openai_work");
+});
+
+test("an invalid OpenAI grant reference is refused before and inside the pod", async () => {
+  for (const bad of ["openai-work", "a b", "x;rm"]) {
+    assert.throws(() => loadConfig({ HOME: "/h", AGENT_RUN_OPENAI_GRANT: bad }), /token reference/);
+    await assert.rejects(new ClawRouterAdmin({ openaiGrant: bad }, { runner: fakePod().runner }).mint("agentrun_test_000012"), /invalid openai grant/);
+  }
+  const refused = podPutBody(["bad-ref"]);
+  assert.equal(refused.body, undefined);
+  assert.match(refused.stdout, /invalid openai grant/);
+});
+
 test("a mint whose reply fails still revokes the key", async () => {
   const pod = fakePod();
   const runner = async (command, args) => {

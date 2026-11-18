@@ -14,6 +14,11 @@ to a lease. Pi also needs a models file with the selected ClawRouter model.
 
 Defaults and environment overrides live in [config.mjs](../lib/config.mjs).
 Set `AGENT_RUN_PI_MODELS` when the Pi models file is elsewhere.
+Set `AGENT_RUN_OPENAI_GRANT=<token ref>` (for example `openai_work`) to limit
+the per-run key to that one OpenAI grant: the mint body gains
+`grantRouting: {eligibleGrants: {openai: [<ref>]}}`. The ref must be letters,
+digits and underscore. If that grant is unusable the run fails; it never falls
+back to another OpenAI grant. Unset leaves the mint body unchanged.
 Automatic placement requires Harbor's capacity helper; use
 `AGENT_RUN_PLACEMENT` to select it. Explicit `--placement remote` does not
 require Harbor on the control host.

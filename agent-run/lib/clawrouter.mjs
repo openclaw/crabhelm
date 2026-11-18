@@ -3,13 +3,16 @@ import { run } from "./proc.mjs";
 
 export const KEY_PREFIX = "agentrun_";
 const NAME = /^agentrun_[A-Za-z0-9_]{4,110}$/;
+// ClawRouter token references: letters, digits and underscore.
+export const GRANT_REF = /^[A-Za-z0-9_]{1,128}$/;
 
 // Runs inside the ClawRouter pod. It reads the admin token from the pod's own
 // environment, calls the loopback admin API, and prints only non-secret
 // credential metadata. The put body mirrors "clawctl device add" with the
-// approved xai provider added. It sets no budget or request cap.
+// approved xai provider added. It sets no budget or request cap. An optional
+// fourth argument limits the key to one OpenAI grant (token reference).
 export const IN_POD_SCRIPT = String.raw`
-const [op, name, sha] = process.argv.slice(1);
+const [op, name, sha, openaiGrant] = process.argv.slice(1);
 const token = process.env.CLAWROUTER_ADMIN_TOKEN;
 const out = (value, code = 0) => { console.log(JSON.stringify(value)); process.exit(code); };
 if (!token) out({ ok: false, op, error: "admin-access:absent" }, 2);
@@ -28,9 +31,11 @@ async function call(method, path, body) {
 try {
   if (op === "put") {
     if (!/^[0-9a-f]{64}$/.test(sha ?? "")) out({ ok: false, op, error: "invalid sha256" }, 2);
+    if (openaiGrant !== undefined && !/^[A-Za-z0-9_]{1,128}$/.test(openaiGrant)) out({ ok: false, op, error: "invalid openai grant" }, 2);
     await call("PUT", "/v1/admin/keys/" + name, {
       secretSha256: sha, providers: ["openai", "anthropic", "xai"], tenantId: "default",
       tokenRole: "service", retainRequestContent: false,
+      ...(openaiGrant ? { grantRouting: { eligibleGrants: { openai: [openaiGrant] } } } : {}),
     });
   } else if (op === "revoke") {
     await call("POST", "/v1/admin/credentials/" + name + "/revoke");
@@ -68,12 +73,12 @@ export class ClawRouterAdmin {
     this.#fetch = fetcher;
   }
 
-  async #pod(op, name = "", sha = "") {
+  async #pod(op, name = "", sha = "", grant = "") {
     const c = this.#config;
     const args = [
       "--context", c.kubeContext, "-n", c.routerNamespace, "exec", "deploy/" + c.routerDeployment,
       "-c", c.routerContainer, "--", "node", "--input-type=module", "-e", IN_POD_SCRIPT, op,
-      ...(name ? [name] : []), ...(sha ? [sha] : []),
+      ...(name ? [name] : []), ...(sha ? [sha] : []), ...(grant ? [grant] : []),
     ];
     const result = await this.#run("kubectl", args);
     const line = result.stdout.trim().split("\n").filter(Boolean).at(-1) ?? "";
@@ -89,9 +94,11 @@ export class ClawRouterAdmin {
   // Returns { name, token }. The token exists only in this process's memory.
   async mint(name) {
     if (!NAME.test(name)) throw new Error("invalid key name");
+    const grant = this.#config.openaiGrant;
+    if (grant !== undefined && !GRANT_REF.test(grant)) throw new Error("invalid openai grant");
     const secret = randomBytes(24).toString("hex");
     try {
-      const credentials = await this.#pod("put", name, sha256Hex(secret));
+      const credentials = await this.#pod("put", name, sha256Hex(secret), grant);
       const entry = credentials.find((c) => c.credentialId === name);
       if (!entry?.enabled) throw new Error("ClawRouter did not report the new key as enabled");
     } catch (error) {
