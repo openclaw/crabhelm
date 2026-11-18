@@ -96,7 +96,7 @@ export class ClawRouterAdmin {
   async mint(name) {
     if (!NAME.test(name)) throw new Error("invalid key name");
     const grant = this.#config.openaiGrant;
-    if (grant !== undefined && !GRANT_REF.test(grant)) throw new Error("invalid openai grant");
+    if (grant !== undefined && (typeof grant !== "string" || !GRANT_REF.test(grant))) throw new Error("invalid openai grant");
     const secret = randomBytes(24).toString("hex");
     try {
       const credentials = await this.#pod("put", name, sha256Hex(secret), grant);
