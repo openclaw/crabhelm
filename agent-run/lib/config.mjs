@@ -12,8 +12,9 @@ export function loadConfig(env = process.env) {
   const home = env.HOME || homedir();
   const commandTimeoutMs = Number(env.AGENT_RUN_COMMAND_TIMEOUT_MS || 75 * 60 * 1000);
   if (!Number.isSafeInteger(commandTimeoutMs) || commandTimeoutMs <= 0) throw new Error("AGENT_RUN_COMMAND_TIMEOUT_MS must be a positive integer");
-  const openaiGrant = env.AGENT_RUN_OPENAI_GRANT || undefined;
-  if (openaiGrant !== undefined && !GRANT_REF.test(openaiGrant)) throw new Error("AGENT_RUN_OPENAI_GRANT must be a ClawRouter token reference (letters, digits, underscore)");
+  // An empty but present value is refused: a missing variable must not silently drop the restriction.
+  const openaiGrant = env.AGENT_RUN_OPENAI_GRANT;
+  if (openaiGrant !== undefined && !GRANT_REF.test(openaiGrant)) throw new Error("AGENT_RUN_OPENAI_GRANT must be a ClawRouter token reference (1-256 characters, no '/' or control characters)");
   if (BANNED_CRABBOX_MACHINES.includes(env.AGENT_RUN_CRABBOX_MACHINE)) throw new Error("AGENT_RUN_CRABBOX_MACHINE=" + env.AGENT_RUN_CRABBOX_MACHINE + " is banned: it is a client production host");
   return {
     placementHelper: env.AGENT_RUN_PLACEMENT || join(home, "Projects/personal/harbor/bin/harbor-capacity-placement.mjs"),

@@ -3,8 +3,9 @@ import { run } from "./proc.mjs";
 
 export const KEY_PREFIX = "agentrun_";
 const NAME = /^agentrun_[A-Za-z0-9_]{4,110}$/;
-// ClawRouter token references: letters, digits and underscore.
-export const GRANT_REF = /^[A-Za-z0-9_]{1,128}$/;
+// Matches ClawRouter's validGrantSegment (worker/grant-selection.ts): 1-256
+// characters, no "/", no control characters.
+export const GRANT_REF = /^[^/\u0000-\u001f\u007f]{1,256}$/;
 
 // Runs inside the ClawRouter pod. It reads the admin token from the pod's own
 // environment, calls the loopback admin API, and prints only non-secret
@@ -31,7 +32,7 @@ async function call(method, path, body) {
 try {
   if (op === "put") {
     if (!/^[0-9a-f]{64}$/.test(sha ?? "")) out({ ok: false, op, error: "invalid sha256" }, 2);
-    if (openaiGrant !== undefined && !/^[A-Za-z0-9_]{1,128}$/.test(openaiGrant)) out({ ok: false, op, error: "invalid openai grant" }, 2);
+    if (openaiGrant !== undefined && !/^[^\/\u0000-\u001f\u007f]{1,256}$/.test(openaiGrant)) out({ ok: false, op, error: "invalid openai grant" }, 2);
     await call("PUT", "/v1/admin/keys/" + name, {
       secretSha256: sha, providers: ["openai", "anthropic", "xai"], tenantId: "default",
       tokenRole: "service", retainRequestContent: false,

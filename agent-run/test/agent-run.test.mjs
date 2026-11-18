@@ -242,11 +242,12 @@ test("AGENT_RUN_OPENAI_GRANT limits the minted key to that OpenAI grant", async 
 });
 
 test("an invalid OpenAI grant reference is refused before and inside the pod", async () => {
-  for (const bad of ["openai-work", "a b", "x;rm"]) {
+  for (const bad of ["", "a/b", "x\u0001y", "z".repeat(257)]) {
     assert.throws(() => loadConfig({ HOME: "/h", AGENT_RUN_OPENAI_GRANT: bad }), /token reference/);
     await assert.rejects(new ClawRouterAdmin({ openaiGrant: bad }, { runner: fakePod().runner }).mint("agentrun_test_000012"), /invalid openai grant/);
   }
-  const refused = podPutBody(["bad-ref"]);
+  assert.equal(loadConfig({ HOME: "/h", AGENT_RUN_OPENAI_GRANT: "openai-primary" }).openaiGrant, "openai-primary");
+  const refused = podPutBody(["bad/ref"]);
   assert.equal(refused.body, undefined);
   assert.match(refused.stdout, /invalid openai grant/);
 });
